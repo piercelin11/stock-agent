@@ -1,0 +1,37 @@
+{
+  "name": "stock-agent",
+  "version": "1.0.0",
+  "description": "台股觀察/分析工具。抓取證交所（TWSE）與櫃買中心（TPEX）公開資料，篩選出當日漲幅前段的個股，未來會存入 PostgreSQL 並透過 Claude Code 互動式地做族群分析、新聞整合等工作。",
+  "main": "top20-gainers.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/piercelin11/stock-agent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/piercelin11/stock-agent/issues"
+  },
+  "homepage": "https://github.com/piercelin11/stock-agent#readme",
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.9.1",
+    "@prisma/client": "^7.9.1",
+    "@types/node": "^26.2.0",
+    "dotenv": "^17.4.2",
+    "pg": "^8.23.0",
+    "prisma": "^7.9.1",
+    "typescript": "^7.0.2"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.21.0",
+    "tsx": "^4.23.12"
+  }
+}

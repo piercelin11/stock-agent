@@ -23,3 +23,11 @@ prisma/*.db
 # IDE
 .vscode/
 .idea/
+
+/generated/prisma
+
+# Auto-installed skill caches (local tool state, not project source)
+.agents/
+.claude/
+.windsurf/
+skills-lock.json

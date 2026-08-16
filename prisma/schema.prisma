@@ -1,0 +1,128 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum SecurityType {
+  stock
+  etf
+  preferred
+  warrant
+  bond
+  other
+}
+
+enum Market {
+  TWSE
+  TPEx
+}
+
+// 正式產業別（獨立 model，一支股票對應一個）
+model Sector {
+  id     Int     @id @default(autoincrement())
+  name   String  @unique
+  stocks Stock[]
+}
+
+// 股票基本資料
+model Stock {
+  code         String        @id
+  name         String
+  market       Market
+  securityType SecurityType
+  sectorId     Int?
+  sector       Sector?       @relation(fields: [sectorId], references: [id])
+
+  dailyQuotes   DailyQuote[]
+  tags          StockTag[]
+  newsLinks     NewsStock[]
+  watchlistItem WatchlistItem?
+}
+
+// 概念題材（多對多，會動態變動）
+model Tag {
+  id     Int        @id @default(autoincrement())
+  name   String     @unique
+  stocks StockTag[]
+}
+
+model StockTag {
+  stockCode String
+  tagId     Int
+  createdAt DateTime @default(now())
+
+  stock Stock @relation(fields: [stockCode], references: [code])
+  tag   Tag   @relation(fields: [tagId], references: [id])
+
+  @@id([stockCode, tagId])
+}
+
+// 每日報價快取表
+model DailyQuote {
+  id        Int      @id @default(autoincrement())
+  stockCode String
+  date      DateTime
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    BigInt
+  change    Float
+  source    Market
+  fetchedAt DateTime @default(now())
+
+  stock Stock @relation(fields: [stockCode], references: [code])
+
+  @@unique([stockCode, date])
+  @@index([date])
+}
+
+// 新聞
+model NewsArticle {
+  id             Int      @id @default(autoincrement())
+  title          String
+  link           String
+  source         String
+  publishedAt    DateTime
+  sentiment      String?
+  sentimentScore Float?
+  createdAt      DateTime @default(now())
+
+  stocks NewsStock[]
+}
+
+model NewsStock {
+  newsId    Int
+  stockCode String
+
+  news  NewsArticle @relation(fields: [newsId], references: [id])
+  stock Stock       @relation(fields: [stockCode], references: [code])
+
+  @@id([newsId, stockCode])
+}
+
+// 手動維護的正式觀察名單
+model WatchlistItem {
+  stockCode String   @id
+  addedAt   DateTime @default(now())
+  notes     String?
+
+  stock Stock @relation(fields: [stockCode], references: [code])
+}
+
+// AI 產出的分析結果歷史紀錄
+model AnalysisResult {
+  id        Int      @id @default(autoincrement())
+  date      DateTime
+  stockCode String?
+  type      String // "screener" | "watchlist_summary" | "sector_ranking" 等
+  content   String
+  createdAt DateTime @default(now())
+}
