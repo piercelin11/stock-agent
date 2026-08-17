@@ -33,17 +33,22 @@ model Sector {
 
 // 股票基本資料
 model Stock {
-  code         String        @id
+  code         String       @id
   name         String
   market       Market
   securityType SecurityType
   sectorId     Int?
-  sector       Sector?       @relation(fields: [sectorId], references: [id])
+  sector       Sector?      @relation(fields: [sectorId], references: [id])
 
   dailyQuotes   DailyQuote[]
   tags          StockTag[]
   newsLinks     NewsStock[]
   watchlistItem WatchlistItem?
+
+  monthRevenues         MonthRevenue[]
+  financialStatements   FinancialStatement[]
+  institutionalTradings InstitutionalTrading[]
+  technicalIndicators   TechnicalIndicator[]
 }
 
 // 概念題材（多對多，會動態變動）
@@ -119,10 +124,83 @@ model WatchlistItem {
 
 // AI 產出的分析結果歷史紀錄
 model AnalysisResult {
-  id        Int      @id @default(autoincrement())
-  date      DateTime
-  stockCode String?
-  type      String // "screener" | "watchlist_summary" | "sector_ranking" 等
-  content   String
-  createdAt DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  date        DateTime
+  stockCode   String?
+  type        String // "screener" | "watchlist_summary" | "sector_ranking" 等
+  content     String
+  dataQuality Json?
+  createdAt   DateTime @default(now())
+}
+
+// 月營收
+model MonthRevenue {
+  id         Int      @id @default(autoincrement())
+  stockCode  String
+  year       Int
+  month      Int
+  revenue    BigInt
+  revenueYoY Float?
+  revenueMoM Float?
+  createdAt  DateTime @default(now())
+
+  stock Stock @relation(fields: [stockCode], references: [code])
+
+  @@unique([stockCode, year, month])
+}
+
+// 季報核心數字
+model FinancialStatement {
+  id              Int      @id @default(autoincrement())
+  stockCode       String
+  year            Int
+  quarter         Int
+  revenue         BigInt?
+  grossProfit     BigInt?
+  operatingIncome BigInt?
+  netIncome       BigInt?
+  eps             Float?
+  createdAt       DateTime @default(now())
+
+  stock Stock @relation(fields: [stockCode], references: [code])
+
+  @@unique([stockCode, year, quarter])
+}
+
+// 三大法人籌碼（獨立表，不併入 DailyQuote）
+model InstitutionalTrading {
+  id                    Int      @id @default(autoincrement())
+  stockCode             String
+  date                  DateTime
+  foreignNetBuy         BigInt? // 外資買賣超（股數或金額，依資料源決定，備註清楚單位）
+  investmentTrustNetBuy BigInt? // 投信買賣超
+  dealerNetBuy          BigInt? // 自營商買賣超
+  source                Market
+  fetchedAt             DateTime @default(now())
+
+  stock Stock @relation(fields: [stockCode], references: [code])
+
+  @@unique([stockCode, date])
+  @@index([date])
+}
+
+// 技術指標（獨立表，不併入 DailyQuote）
+model TechnicalIndicator {
+  id             Int      @id @default(autoincrement())
+  stockCode      String
+  date           DateTime
+  ma5            Float?
+  ma10           Float?
+  ma20           Float?
+  ma60           Float?
+  bollingerUpper Float?
+  bollingerMid   Float?
+  bollingerLower Float?
+  volumeMa20     Float?
+  calculatedAt   DateTime @default(now())
+
+  stock Stock @relation(fields: [stockCode], references: [code])
+
+  @@unique([stockCode, date])
+  @@index([date])
 }
