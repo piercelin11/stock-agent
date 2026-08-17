@@ -7,10 +7,23 @@ const prisma = new PrismaClient({ adapter });
 
 const MI_INDEX_URL = "https://www.twse.com.tw/exchangeReport/MI_INDEX";
 const DAILY_QUOTES_TABLE_INDEX = 8; // "每日收盤行情(全部)"
+const TPEX_QUOTES_URL = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes";
 
 interface MiIndexResponse {
   stat: string;
   tables?: { title: string | null; fields: string[] | null; data: string[][] }[];
+}
+
+interface TpexRow {
+  Date: string;
+  SecuritiesCompanyCode: string;
+  CompanyName: string;
+  Close: string;
+  Change: string;
+  Open: string;
+  High: string;
+  Low: string;
+  TradingShares: string;
 }
 
 interface ParsedRow {
@@ -24,8 +37,25 @@ interface ParsedRow {
   change: number;
 }
 
+interface FillResult {
+  date: string | null;
+  processed: number;
+  newStocks: number;
+  skippedDerivatives: number;
+  isNonTradingDay: boolean;
+}
+
 function toApiDate(date: string): string {
   return date.replaceAll("-", "");
+}
+
+// TPEx 的 Date 欄位是民國年，例如 "1150817" -> "2026-08-17"
+function rocDateToIso(rocDate: string): string {
+  const rocYear = parseInt(rocDate.slice(0, 3), 10);
+  const month = rocDate.slice(3, 5);
+  const day = rocDate.slice(5, 7);
+  const year = rocYear + 1911;
+  return `${year}-${month}-${day}`;
 }
 
 function toSecurityType(code: string, name: string): SecurityType {
@@ -38,7 +68,7 @@ function toSecurityType(code: string, name: string): SecurityType {
 }
 
 function parseNumber(raw: string): number {
-  return parseFloat(raw.replace(/,/g, ""));
+  return parseFloat(raw.replace(/,/g, "").trim());
 }
 
 function parseChangeSign(raw: string): 1 | -1 | 0 {
@@ -47,7 +77,7 @@ function parseChangeSign(raw: string): 1 | -1 | 0 {
   return 0;
 }
 
-function parseRow(row: string[]): ParsedRow | null {
+function parseMiIndexRow(row: string[]): ParsedRow | null {
   const [code, name, tradeVolume, , , open, high, low, close, changeSign, changeAmount] = row;
 
   if (
@@ -90,7 +120,31 @@ function parseRow(row: string[]): ParsedRow | null {
   };
 }
 
-async function fetchDailyQuotes(date: string): Promise<ParsedRow[] | null> {
+function parseTpexRow(row: TpexRow): ParsedRow | null {
+  const closeNum = parseNumber(row.Close);
+  const openNum = parseNumber(row.Open);
+  const highNum = parseNumber(row.High);
+  const lowNum = parseNumber(row.Low);
+  const volumeNum = parseNumber(row.TradingShares);
+  const changeNum = parseNumber(row.Change);
+
+  if (![closeNum, openNum, highNum, lowNum, volumeNum].every(Number.isFinite)) {
+    return null;
+  }
+
+  return {
+    code: row.SecuritiesCompanyCode.trim(),
+    name: row.CompanyName.trim(),
+    open: openNum,
+    high: highNum,
+    low: lowNum,
+    close: closeNum,
+    volume: BigInt(Math.trunc(volumeNum)),
+    change: Number.isFinite(changeNum) ? changeNum : 0,
+  };
+}
+
+async function fetchTwseQuotes(date: string): Promise<ParsedRow[] | null> {
   const url = new URL(MI_INDEX_URL);
   url.searchParams.set("response", "json");
   url.searchParams.set("date", toApiDate(date));
@@ -114,17 +168,30 @@ async function fetchDailyQuotes(date: string): Promise<ParsedRow[] | null> {
     return null;
   }
 
-  return table.data.map(parseRow).filter((r): r is ParsedRow => r !== null);
+  return table.data.map(parseMiIndexRow).filter((r): r is ParsedRow => r !== null);
 }
 
-export async function fillOneDay(date: string): Promise<{ processed: number; newStocks: number; skippedDerivatives: number; isNonTradingDay: boolean }> {
-  const rows = await fetchDailyQuotes(date);
-
-  if (!rows) {
-    console.log(`${date} 非交易日或無資料，跳過`);
-    return { processed: 0, newStocks: 0, skippedDerivatives: 0, isNonTradingDay: true };
+// TPEx OpenAPI 不支援指定日期查詢，只能拿到目前的最新一天，跟 top20-gainers.js 同源
+async function fetchTpexQuotes(): Promise<{ date: string; rows: ParsedRow[] } | null> {
+  const res = await fetch(TPEX_QUOTES_URL, {
+    headers: { "User-Agent": "Mozilla/5.0" },
+  });
+  if (!res.ok) {
+    throw new Error(`TPEx OpenAPI 請求失敗: ${res.status} ${res.statusText}`);
   }
 
+  const body = (await res.json()) as TpexRow[];
+  const firstRow = body[0];
+  if (!Array.isArray(body) || firstRow === undefined) {
+    return null;
+  }
+
+  const date = rocDateToIso(firstRow.Date);
+  const rows = body.map(parseTpexRow).filter((r): r is ParsedRow => r !== null);
+  return { date, rows };
+}
+
+async function writeRows(rows: ParsedRow[], date: string, market: Market): Promise<{ processed: number; newStocks: number; skippedDerivatives: number }> {
   const dateObj = new Date(date);
   let processed = 0;
   let newStocks = 0;
@@ -148,7 +215,7 @@ export async function fillOneDay(date: string): Promise<{ processed: number; new
         data: {
           code: row.code,
           name: row.name,
-          market: Market.TWSE,
+          market,
           securityType,
         },
       });
@@ -164,7 +231,7 @@ export async function fillOneDay(date: string): Promise<{ processed: number; new
         close: row.close,
         volume: row.volume,
         change: row.change,
-        source: Market.TWSE,
+        source: market,
       },
       create: {
         stockCode: row.code,
@@ -175,16 +242,48 @@ export async function fillOneDay(date: string): Promise<{ processed: number; new
         close: row.close,
         volume: row.volume,
         change: row.change,
-        source: Market.TWSE,
+        source: market,
       },
     });
     processed++;
   }
 
+  return { processed, newStocks, skippedDerivatives };
+}
+
+// 補齊「指定單一天」的上市（TWSE）報價，用 MI_INDEX，支援任意歷史日期
+export async function fillOneDayTwse(date: string): Promise<FillResult> {
+  const rows = await fetchTwseQuotes(date);
+
+  if (!rows) {
+    console.log(`${date} TWSE 非交易日或無資料，跳過`);
+    return { date, processed: 0, newStocks: 0, skippedDerivatives: 0, isNonTradingDay: true };
+  }
+
+  const { processed, newStocks, skippedDerivatives } = await writeRows(rows, date, Market.TWSE);
+
   console.log(
-    `${date} 處理完成：共 ${processed} 筆（一般股票/ETF/特別股/其他），跳過權證/可轉債 ${skippedDerivatives} 筆，新增 ${newStocks} 支之前沒見過的 Stock`,
+    `${date} TWSE 處理完成：共 ${processed} 筆（一般股票/ETF/特別股/其他），跳過權證/可轉債 ${skippedDerivatives} 筆，新增 ${newStocks} 支之前沒見過的 Stock`,
   );
-  return { processed, newStocks, skippedDerivatives, isNonTradingDay: false };
+  return { date, processed, newStocks, skippedDerivatives, isNonTradingDay: false };
+}
+
+// 補齊「今天」的上櫃（TPEx）報價，TPEx OpenAPI 不支援指定歷史日期，只能拿到目前最新一天
+export async function fillTodayTpex(): Promise<FillResult> {
+  const result = await fetchTpexQuotes();
+
+  if (!result) {
+    console.log("TPEx 今日無資料，跳過");
+    return { date: null, processed: 0, newStocks: 0, skippedDerivatives: 0, isNonTradingDay: true };
+  }
+
+  const { date, rows } = result;
+  const { processed, newStocks, skippedDerivatives } = await writeRows(rows, date, Market.TPEx);
+
+  console.log(
+    `${date} TPEx 處理完成：共 ${processed} 筆（一般股票/ETF/特別股/其他），跳過權證/可轉債 ${skippedDerivatives} 筆，新增 ${newStocks} 支之前沒見過的 Stock`,
+  );
+  return { date, processed, newStocks, skippedDerivatives, isNonTradingDay: false };
 }
 
 function parseArgs(): { date: string } {
@@ -201,7 +300,8 @@ function parseArgs(): { date: string } {
 
 async function main() {
   const { date } = parseArgs();
-  await fillOneDay(date);
+  await fillOneDayTwse(date);
+  await fillTodayTpex();
 }
 
 const isMain = process.argv[1] && import.meta.url === new URL(process.argv[1], "file://").href;

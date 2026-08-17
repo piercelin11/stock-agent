@@ -28,7 +28,10 @@
   - 非交易日（週末/假日）回應不含 `tables` 欄位，只有 `{"stat": "很抱歉，沒有符合條件的資料!"}`，可用這個判斷跳過。
   - 這支 API 的「全部」個股明細包含股票/ETF/權證/可轉債等所有證券類型（權證數量可達上萬筆），不是只有一般股票，寫入 `Stock` 前要套用過濾規則分類。
 - **過濾規則**：ETF 代號開頭為 `00`；權證名稱含「購」或「售」，或代號為 6 碼數字；可轉債（bond）代號為 5 碼數字；一般股票為恰好 4 碼數字；特別股代號為 4 碼 + 1 碼英文字母（共 5 碼）；其餘歸類為 other。
-- **權證（warrant）與可轉債（bond）不存進資料庫**：這個專案的分析目標不涉及衍生性金融商品。`fill-gap-mi-index.ts` 的 `fillOneDay` 分類完 `securityType` 後，若為 `warrant` 或 `bond` 會直接跳過（不建立 Stock、不寫入 DailyQuote），並在統計輸出裡回報跳過筆數。2026-08-17 已一次性清理過資料庫裡既有的 18,041 筆 warrant/bond Stock 記錄與對應的 29,382 筆 DailyQuote。
+- **權證（warrant）與可轉債（bond）不存進資料庫**：這個專案的分析目標不涉及衍生性金融商品。`fill-daily-quotes.ts` 的 `writeRows` 分類完 `securityType` 後，若為 `warrant` 或 `bond` 會直接跳過（不建立 Stock、不寫入 DailyQuote），並在統計輸出裡回報跳過筆數。2026-08-17 已一次性清理過資料庫裡既有的 18,041 筆 warrant/bond Stock 記錄與對應的 29,382 筆 DailyQuote。
+- **TPEx OpenAPI 個股行情端點不支援歷史日期查詢**：`tpex_mainboard_daily_close_quotes`、`tpex_mainboard_quotes`、`tpex_delayed_stock_close` 等端點的 swagger 定義 `parameters` 都是空陣列，2026-08-17 實測不論傳什麼查詢參數，回應的 `Date` 欄位永遠是「目前最新一天」，無法像證交所 `MI_INDEX` 一樣指定任意歷史日期。因此上櫃股票的「補歷史缺漏」目前無解，只能補當天（`fill-daily-quotes.ts` 的 `fillTodayTpex`）或靠 FinMind 逐支回補（`backfill-daily-quotes.ts`）。
+- **`STOCK_DAY_ALL` 有發布延遲，不適合當作「今天資料是否已可取得」的判斷依據**：2026-08-17 實測，`MI_INDEX` 對當天日期已回應 `stat: OK`（資料齊備）的同一時間點，`STOCK_DAY_ALL` 回傳的 `Date` 仍是前一個交易日，代表兩支 API 的資料更新時間點不同步。因此 `fill-daily-quotes.ts` 的 TWSE 部分固定用 `MI_INDEX`（可指定日期、資料較即時），沒有改用 `STOCK_DAY_ALL`。
+- **TPEx `tpex_mainboard_daily_close_quotes` 回應細節**：`Date` 欄位是民國年（如 `1150817`，需 `+1911` 轉西元），欄位名稱為 `SecuritiesCompanyCode`/`CompanyName`/`Close`/`Open`/`High`/`Low`/`TradingShares`/`Change`（`Change` 直接是帶正負號的數字字串，不像 `MI_INDEX` 用 HTML 顏色標記）。回應同樣混雜股票/ETF/權證/可轉債，需套用同一套過濾規則。
 
 ## 開發慣例
 
@@ -50,7 +53,7 @@
 
 ## 目前進度
 
-已完成：資料庫 schema（12 個 model，含 `MonthRevenue`、`FinancialStatement`、`InstitutionalTrading`、`TechnicalIndicator`）建立並套用 migration、`prisma/seed.ts` 執行完成、逐支股票用 FinMind 回補歷史報價（`backfill-daily-quotes.ts`）、技術指標計算（`calculate-technical-indicators.ts`）、全市場篩選（`run-screener.ts`）、單日全市場報價缺漏回補（`fill-gap-mi-index.ts`，用 `MI_INDEX` API）、每日排程主控腳本（`daily-pipeline.ts`，串起缺漏檢查→補齊→算指標→跑篩選）皆已完成並手動測試成功（2026-08-17）。`fill-gap-mi-index.ts` 已排除權證/可轉債寫入，資料庫裡既有的權證/可轉債資料也已清理完畢（2026-08-17）。
+已完成：資料庫 schema（12 個 model，含 `MonthRevenue`、`FinancialStatement`、`InstitutionalTrading`、`TechnicalIndicator`）建立並套用 migration、`prisma/seed.ts` 執行完成、逐支股票用 FinMind 回補歷史報價（`backfill-daily-quotes.ts`）、技術指標計算（`calculate-technical-indicators.ts`）、全市場篩選（`run-screener.ts`）、全市場報價缺漏回補（`fill-daily-quotes.ts`，TWSE 用 `MI_INDEX` API 可補任意歷史日期，TPEx 用 TPEx OpenAPI 只能補當天）、每日排程主控腳本（`daily-pipeline.ts`，串起缺漏檢查→補齊 TWSE+TPEx→算指標→跑篩選）皆已完成並手動測試成功（2026-08-17）。`fill-daily-quotes.ts` 已排除權證/可轉債寫入，資料庫裡既有的權證/可轉債資料也已清理完畢（2026-08-17）。
 
 尚未開始：新聞抓取與情緒分析、三大法人籌碼（`InstitutionalTrading`）抓取、月營收/財報（`MonthRevenue`/`FinancialStatement`）抓取、Tag/StockTag 篩選邏輯、WatchlistItem 操作介面、AnalysisResult 產出流程、`daily-pipeline.ts` 的 cron 排程設定（腳本已可手動執行，但還沒排程）。
 
@@ -62,8 +65,11 @@
 - **`scripts/backfill-daily-quotes.ts`**：用 FinMind API 逐支股票回補近 120 天歷史報價至 `DailyQuote`。執行：`npx tsx scripts/backfill-daily-quotes.ts`（可用 `BACKFILL_LIMIT` 環境變數限制處理支數，測試用）。
 - **`scripts/calculate-technical-indicators.ts`**：依 `DailyQuote` 計算 MA5/10/20/60、布林通道、量能均線，寫入 `TechnicalIndicator`。匯出 `calculateTechnicalIndicators()` 供其他腳本 import 使用。執行：`npx tsx scripts/calculate-technical-indicators.ts`。
 - **`scripts/run-screener.ts`**：讀取 `scripts/screener-conditions.json` 的條件（目前支援 `bollinger_breakout`、`volume_surge`），對最新交易日跑全市場篩選，結果印出並寫入 `data/screener-results/{date}.json`。匯出 `runScreener()` 供其他腳本 import 使用。執行：`npx tsx scripts/run-screener.ts`。
-- **`scripts/fill-gap-mi-index.ts`**：用證交所 `MI_INDEX` 報表 API 一次補齊「指定單一天」的全上市市場個股報價（比逐支查 FinMind 快很多），自動新增資料庫沒有的 `Stock` 記錄並 upsert `DailyQuote`。匯出 `fillOneDay(date)` 供其他腳本 import 使用。執行：`npx tsx scripts/fill-gap-mi-index.ts --date=YYYY-MM-DD`。**限制**：只涵蓋上市（TWSE），不含上櫃（TPEx）。
-- **`scripts/daily-pipeline.ts`**：每日排程主控腳本，串接上述腳本：檢查 `DailyQuote` 最新日期與今天的差距→依序（非平行）呼叫 `fillOneDay` 補齊每個缺漏日期（含今天）→呼叫 `calculateTechnicalIndicators()`→呼叫 `runScreener()`→印出總結。任何步驟失敗會印出清楚的步驟/日期/錯誤訊息並以非 0 狀態碼結束。執行：`npx tsx scripts/daily-pipeline.ts`。**目前僅能手動執行，尚未設定 cron 排程。**
+- **`scripts/fill-daily-quotes.ts`**（2026-08-17 由 `fill-gap-mi-index.ts` + `fill-today-tpex.ts` 合併而成）：補齊全市場報價，自動新增資料庫沒有的 `Stock` 記錄並 upsert `DailyQuote`。匯出兩個函式：
+  - `fillOneDayTwse(date)`：用證交所 `MI_INDEX` 報表 API 補齊「指定單一天」的全上市（TWSE）市場報價，可補任意歷史日期。
+  - `fillTodayTpex()`：用 TPEx OpenAPI `tpex_mainboard_daily_close_quotes` 補齊全上櫃（TPEx）市場報價；該端點不支援日期參數，永遠回傳「目前最新一天」，無法補歷史缺漏。
+  執行：`npx tsx scripts/fill-daily-quotes.ts --date=YYYY-MM-DD`（CLI 模式會依序呼叫 `fillOneDayTwse(date)` 和 `fillTodayTpex()`）。
+- **`scripts/daily-pipeline.ts`**：每日排程主控腳本，串接上述腳本：檢查 `DailyQuote` 最新日期與今天的差距→依序（非平行）呼叫 `fillOneDayTwse` 補齊每個缺漏日期（僅 TWSE，TPEx 無法補歷史）→呼叫 `fillOneDayTwse(today)` + `fillTodayTpex()` 確保今天 TWSE、TPEx 都是最新→呼叫 `calculateTechnicalIndicators()`→呼叫 `runScreener()`→印出總結。任何步驟失敗會印出清楚的步驟/日期/錯誤訊息並以非 0 狀態碼結束。執行：`npx tsx scripts/daily-pipeline.ts`。**目前僅能手動執行，尚未設定 cron 排程。**
 
 ## README.md 維護
 

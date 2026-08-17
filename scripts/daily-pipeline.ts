@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../generated/prisma/client.js";
-import { fillOneDay } from "./fill-gap-mi-index.js";
+import { fillOneDayTwse, fillTodayTpex } from "./fill-daily-quotes.js";
 import { calculateTechnicalIndicators } from "./calculate-technical-indicators.js";
 import { runScreener } from "./run-screener.js";
 
@@ -76,10 +76,10 @@ async function main() {
     throw new PipelineStepError("檢查缺漏", "查詢 DailyQuote 最新日期失敗", err);
   }
 
-  // 3. 補齊缺漏
+  // 3. 補齊缺漏（僅 TWSE，TPEx OpenAPI 不支援指定歷史日期）
   for (const date of gapDates) {
     try {
-      const result = await fillOneDay(date);
+      const result = await fillOneDayTwse(date);
       if (!result.isNonTradingDay) {
         gapDaysFilled++;
       }
@@ -89,12 +89,14 @@ async function main() {
     await sleep(FILL_DELAY_MS);
   }
 
-  // 4. 確保今天的資料也是最新的
+  // 4. 確保今天的資料也是最新的（TWSE + TPEx）
   const todayStr = formatDate(new Date());
   try {
-    const result = await fillOneDay(todayStr);
-    todayQuotesWritten = result.processed;
-    todayDerivativesSkipped = result.skippedDerivatives;
+    const twseResult = await fillOneDayTwse(todayStr);
+    await sleep(FILL_DELAY_MS);
+    const tpexResult = await fillTodayTpex();
+    todayQuotesWritten = twseResult.processed + tpexResult.processed;
+    todayDerivativesSkipped = twseResult.skippedDerivatives + tpexResult.skippedDerivatives;
   } catch (err) {
     throw new PipelineStepError("補齊今日資料", `處理日期 ${todayStr} 失敗`, err);
   }
