@@ -21,7 +21,14 @@
 - **FinMind API**：未註冊 300 次/小時，註冊後 600 次/小時；大部分 dataset 需要指定 `stock_id`（例外：`TaiwanStockInfo` 可一次拿全部股票清單）。`TaiwanStockNews` 只有標題/連結/簡短描述，沒有全文。`TaiwanStockInfo` 的 `type` 欄位有 `twse`、`tpex`、`emerging`（興櫃）三種值，目前 `Market` enum 只涵蓋 `TWSE`/`TPEx`，seed 時會跳過 `emerging`。
 - **證交所 OpenAPI**（`openapi.twse.com.tw`）：免註冊免金鑰，一次可拿全上市市場當日資料（`STOCK_DAY_ALL`），官方未公布明確 rate limit，自行節流即可。
 - **櫃買中心 OpenAPI**（`www.tpex.org.tw/openapi`）：同上，但欄位命名跟證交所不同，且回傳資料混合了股票/ETF/權證/可轉債，需要過濾。
-- **過濾規則**：ETF 代號開頭為 `00`；權證名稱含「購」或「售」；可轉債代號為 4 碼股票代號 + 1-2 碼流水號（共 5-6 碼數字）；一般股票為恰好 4 碼數字；特別股代號為 4 碼 + 1 碼英文字母（共 5 碼）。
+- **證交所舊版報表 API `MI_INDEX`**（`www.twse.com.tw/exchangeReport/MI_INDEX`）：可查「指定單一天」的全上市市場資料（`STOCK_DAY_ALL` 只給當日），已於 2026-08-17 實測驗證可用。用法重點：
+  - `date` 參數直接傳西元 `YYYYMMDD` 即可（如 `20260814`），API 內部會自動轉換民國年，不需要自己轉換。
+  - `response=json&type=ALL` 即可直接拿到 JSON，不需要 fallback 成 HTML 解析。
+  - 回應是 `tables` 陣列，混雜指數/大盤統計/個股明細等 10 個表格，**個股明細在 index 8**（標題「每日收盤行情(全部)」），欄位為 `[證券代號, 證券名稱, 成交股數, 成交筆數, 成交金額, 開盤價, 最高價, 最低價, 收盤價, 漲跌(+/-), 漲跌價差, ...]`；`漲跌(+/-)` 欄位是含 HTML 顏色標記的字串（`color:red`=漲、`color:green`=跌），要另外解析正負號。
+  - 非交易日（週末/假日）回應不含 `tables` 欄位，只有 `{"stat": "很抱歉，沒有符合條件的資料!"}`，可用這個判斷跳過。
+  - 這支 API 的「全部」個股明細包含股票/ETF/權證/可轉債等所有證券類型（權證數量可達上萬筆），不是只有一般股票，寫入 `Stock` 前要套用過濾規則分類。
+- **過濾規則**：ETF 代號開頭為 `00`；權證名稱含「購」或「售」，或代號為 6 碼數字；可轉債（bond）代號為 5 碼數字；一般股票為恰好 4 碼數字；特別股代號為 4 碼 + 1 碼英文字母（共 5 碼）；其餘歸類為 other。
+- **權證（warrant）與可轉債（bond）不存進資料庫**：這個專案的分析目標不涉及衍生性金融商品。`fill-gap-mi-index.ts` 的 `fillOneDay` 分類完 `securityType` 後，若為 `warrant` 或 `bond` 會直接跳過（不建立 Stock、不寫入 DailyQuote），並在統計輸出裡回報跳過筆數。2026-08-17 已一次性清理過資料庫裡既有的 18,041 筆 warrant/bond Stock 記錄與對應的 29,382 筆 DailyQuote。
 
 ## 開發慣例
 
@@ -43,15 +50,20 @@
 
 ## 目前進度
 
-已完成：資料庫 schema（8 個 model）建立、初始 migration（`20260816075426_init`）套用完成、`prisma/seed.ts` 撰寫完成並成功執行（Stock 2,753 筆、Sector 56 筆）。
+已完成：資料庫 schema（12 個 model，含 `MonthRevenue`、`FinancialStatement`、`InstitutionalTrading`、`TechnicalIndicator`）建立並套用 migration、`prisma/seed.ts` 執行完成、逐支股票用 FinMind 回補歷史報價（`backfill-daily-quotes.ts`）、技術指標計算（`calculate-technical-indicators.ts`）、全市場篩選（`run-screener.ts`）、單日全市場報價缺漏回補（`fill-gap-mi-index.ts`，用 `MI_INDEX` API）、每日排程主控腳本（`daily-pipeline.ts`，串起缺漏檢查→補齊→算指標→跑篩選）皆已完成並手動測試成功（2026-08-17）。`fill-gap-mi-index.ts` 已排除權證/可轉債寫入，資料庫裡既有的權證/可轉債資料也已清理完畢（2026-08-17）。
 
-尚未開始：每日報價（DailyQuote）抓取排程、新聞抓取與情緒分析、Tag/StockTag 篩選邏輯、WatchlistItem 操作介面、AnalysisResult 產出流程。
+尚未開始：新聞抓取與情緒分析、三大法人籌碼（`InstitutionalTrading`）抓取、月營收/財報（`MonthRevenue`/`FinancialStatement`）抓取、Tag/StockTag 篩選邏輯、WatchlistItem 操作介面、AnalysisResult 產出流程、`daily-pipeline.ts` 的 cron 排程設定（腳本已可手動執行，但還沒排程）。
 
 （每次進度更新，麻煩幫我一併更新這個區塊。）
 
 ## 既有腳本
 
 - **`top20-gainers.js`**（專案根目錄，非 TypeScript，尚未整合進 `/scripts` 或資料庫）：抓取當日 TWSE + TPEx 收盤資料，篩選出一般股票（排除 ETF、權證、特別股等），依漲幅排序印出前 20 名。執行方式：`node top20-gainers.js`。之後若要整合進資料庫流程，需改寫成 TypeScript 並搬進 `/scripts`，把結果寫入 `DailyQuote` 而非只印出。
+- **`scripts/backfill-daily-quotes.ts`**：用 FinMind API 逐支股票回補近 120 天歷史報價至 `DailyQuote`。執行：`npx tsx scripts/backfill-daily-quotes.ts`（可用 `BACKFILL_LIMIT` 環境變數限制處理支數，測試用）。
+- **`scripts/calculate-technical-indicators.ts`**：依 `DailyQuote` 計算 MA5/10/20/60、布林通道、量能均線，寫入 `TechnicalIndicator`。匯出 `calculateTechnicalIndicators()` 供其他腳本 import 使用。執行：`npx tsx scripts/calculate-technical-indicators.ts`。
+- **`scripts/run-screener.ts`**：讀取 `scripts/screener-conditions.json` 的條件（目前支援 `bollinger_breakout`、`volume_surge`），對最新交易日跑全市場篩選，結果印出並寫入 `data/screener-results/{date}.json`。匯出 `runScreener()` 供其他腳本 import 使用。執行：`npx tsx scripts/run-screener.ts`。
+- **`scripts/fill-gap-mi-index.ts`**：用證交所 `MI_INDEX` 報表 API 一次補齊「指定單一天」的全上市市場個股報價（比逐支查 FinMind 快很多），自動新增資料庫沒有的 `Stock` 記錄並 upsert `DailyQuote`。匯出 `fillOneDay(date)` 供其他腳本 import 使用。執行：`npx tsx scripts/fill-gap-mi-index.ts --date=YYYY-MM-DD`。**限制**：只涵蓋上市（TWSE），不含上櫃（TPEx）。
+- **`scripts/daily-pipeline.ts`**：每日排程主控腳本，串接上述腳本：檢查 `DailyQuote` 最新日期與今天的差距→依序（非平行）呼叫 `fillOneDay` 補齊每個缺漏日期（含今天）→呼叫 `calculateTechnicalIndicators()`→呼叫 `runScreener()`→印出總結。任何步驟失敗會印出清楚的步驟/日期/錯誤訊息並以非 0 狀態碼結束。執行：`npx tsx scripts/daily-pipeline.ts`。**目前僅能手動執行，尚未設定 cron 排程。**
 
 ## README.md 維護
 

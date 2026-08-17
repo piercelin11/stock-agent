@@ -1,0 +1,4 @@
+[
+  { "type": "bollinger_breakout", "direction": "upper" },
+  { "type": "volume_surge", "multiplier": 2.0 }
+]

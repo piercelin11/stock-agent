@@ -22,7 +22,7 @@ function movingAverage(closes: number[], index: number, period: number): number 
   return average(closes.slice(index + 1 - period, index + 1));
 }
 
-async function main() {
+export async function calculateTechnicalIndicators(): Promise<{ processed: number; indicatorsWritten: number }> {
   const stocks = await prisma.stock.findMany({
     where: { securityType: "stock" },
     select: { code: true },
@@ -92,13 +92,18 @@ async function main() {
   console.log("\n===== 技術指標計算完成 =====");
   console.log(`處理股票數: ${processed}`);
   console.log(`寫入 TechnicalIndicator 筆數: ${indicatorsWritten}`);
+
+  return { processed, indicatorsWritten };
 }
 
-main()
-  .catch((err) => {
-    console.error("技術指標計算失敗:", err);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+const isMain = process.argv[1] && import.meta.url === new URL(process.argv[1], "file://").href;
+if (isMain) {
+  calculateTechnicalIndicators()
+    .catch((err) => {
+      console.error("技術指標計算失敗:", err);
+      process.exit(1);
+    })
+    .finally(async () => {
+      await prisma.$disconnect();
+    });
+}
