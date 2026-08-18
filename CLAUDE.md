@@ -55,7 +55,9 @@
 
 已完成：資料庫 schema（12 個 model，含 `MonthRevenue`、`FinancialStatement`、`InstitutionalTrading`、`TechnicalIndicator`）建立並套用 migration、`prisma/seed.ts` 執行完成、逐支股票用 FinMind 回補歷史報價（`backfill-daily-quotes.ts`）、技術指標計算（`calculate-technical-indicators.ts`）、全市場篩選（`run-screener.ts`）、全市場報價缺漏回補（`fill-daily-quotes.ts`，TWSE 用 `MI_INDEX` API 可補任意歷史日期，TPEx 用 TPEx OpenAPI 只能補當天）、每日排程主控腳本（`daily-pipeline.ts`，串起缺漏檢查→補齊 TWSE+TPEx→算指標→跑篩選）皆已完成並手動測試成功（2026-08-17）。`fill-daily-quotes.ts` 已排除權證/可轉債寫入，資料庫裡既有的權證/可轉債資料也已清理完畢（2026-08-17）。
 
-尚未開始：新聞抓取與情緒分析、三大法人籌碼（`InstitutionalTrading`）抓取、月營收/財報（`MonthRevenue`/`FinancialStatement`）抓取、Tag/StockTag 篩選邏輯、WatchlistItem 操作介面、AnalysisResult 產出流程、`daily-pipeline.ts` 的 cron 排程設定（腳本已可手動執行，但還沒排程）。
+**Phase C（候選股深度資料抓取）已完成（2026-08-18）**：`scripts/fetch-candidate-details.ts` 讀取 `data/screener-results/{日期}.json` 的候選股清單，逐支依序抓取籌碼面（`InstitutionalTrading`）、月營收（`MonthRevenue`）、季報（`FinancialStatement`）、新聞（`NewsArticle`/`NewsStock`）四個面向，寫入資料庫。已用 2026-08-18 篩選結果（23 檔候選股）實測成功，零失敗。`NewsArticle.link` 已加上 `@unique` 約束（migration `20260818112801_add_news_article_link_unique`）。
+
+尚未開始：新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯、WatchlistItem 操作介面、AnalysisResult 產出流程（Phase D）、`daily-pipeline.ts` 的 cron 排程設定（腳本已可手動執行，但還沒排程）、`fetch-candidate-details.ts` 尚未整合進 `daily-pipeline.ts`（目前是獨立手動執行的腳本）。
 
 （每次進度更新，麻煩幫我一併更新這個區塊。）
 
@@ -71,7 +73,13 @@
   - `fillOneDayTwse(date)`：用證交所 `MI_INDEX` 報表 API 補齊「指定單一天」的全上市（TWSE）市場報價，可補任意歷史日期。
   - `fillTodayTpex()`：用 TPEx OpenAPI `tpex_mainboard_daily_close_quotes` 補齊全上櫃（TPEx）市場報價；該端點不支援日期參數，永遠回傳「目前最新一天」，無法補歷史缺漏。
   執行：`npx tsx scripts/fill-daily-quotes.ts --date=YYYY-MM-DD`（CLI 模式會依序呼叫 `fillOneDayTwse(date)` 和 `fillTodayTpex()`）。
-- **`scripts/daily-pipeline.ts`**：每日排程主控腳本，串接上述腳本：檢查 `DailyQuote` 最新日期與今天的差距→依序（非平行）呼叫 `fillOneDayTwse` 補齊每個缺漏日期（僅 TWSE，TPEx 無法補歷史）→呼叫 `fillOneDayTwse(today)` + `fillTodayTpex()` 確保今天 TWSE、TPEx 都是最新→呼叫 `calculateTechnicalIndicators()`→呼叫 `runScreener()`→印出總結。任何步驟失敗會印出清楚的步驟/日期/錯誤訊息並以非 0 狀態碼結束。執行：`npx tsx scripts/daily-pipeline.ts`。**目前僅能手動執行，尚未設定 cron 排程。**
+- **`scripts/daily-pipeline.ts`**：每日排程主控腳本，串接上述腳本：檢查 `DailyQuote` 最新日期與今天的差距→依序（非平行）呼叫 `fillOneDayTwse` 補齊每個缺漏日期（僅 TWSE，TPEx 無法補歷史）→呼叫 `fillOneDayTwse(today)` + `fillTodayTpex()` 確保今天 TWSE、TPEx 都是最新→呼叫 `calculateTechnicalIndicators()`→呼叫 `runScreener()`→印出總結。任何步驟失敗會印出清楚的步驟/日期/錯誤訊息並以非 0 狀態碼結束。執行：`npx tsx scripts/daily-pipeline.ts`。**目前僅能手動執行，尚未設定 cron 排程，也尚未串接 `fetch-candidate-details.ts`。**
+- **`scripts/fetch-candidate-details.ts`**：讀取 `data/screener-results/{日期}.json`（不帶 `--date` 則自動取目錄下最新一份）的候選股清單，對每支候選股依序（非平行）抓取四個面向並寫入資料庫：
+  - 籌碼面：FinMind `TaiwanStockInstitutionalInvestorsBuySell`，近 30 天，依日期加總 `Foreign_Investor`/`Foreign_Dealer_Self`（外資）、`Investment_Trust`（投信）、`Dealer_self`/`Dealer_Hedging`（自營商）的 `buy - sell`，upsert 進 `InstitutionalTrading`。
+  - 月營收：FinMind `TaiwanStockMonthRevenue`，近 12 個月，upsert 進 `MonthRevenue`（`revenueYoY`/`revenueMoM` 目前不計算，維持 null）。
+  - 季報：FinMind `TaiwanStockFinancialStatements`，近 8 季，回應是「多筆細項組成一份財報」格式（每列一個 `type`），依 `type` 對應到 `revenue`/`grossProfit`/`operatingIncome`（`netIncome` 對應 `IncomeAfterTaxes`）/`eps` 五個欄位後彙整成一列，upsert 進 `FinancialStatement`。
+  - 消息面：FinMind `TaiwanStockNews`，近 14 天。**注意：這支 API 不接受 `end_date` 參數**（帶了會回傳 400 錯誤），只能傳 `start_date` 讓 API 回傳「從該日期到現在」的全部資料，範圍收斂靠自己在本地過濾（用 `daysAgo(14)` 算出的日期字串轉成 `Date` 當 cutoff，取午夜 0 點而非當下時分秒，避免漏掉邊界日當天較早發布的新聞）。**同一則新聞常會因為 `source` 別名不同（如「ETtoday財經雲」vs「finance.ettoday.net」）在回應裡重複出現，需依 `link` 去重**，只保留第一筆。依 `link` 查詢 `NewsArticle` 是否已存在，不存在才 `create`，然後一律 `upsert` `NewsStock` 關聯（同一則新聞可能對應多支候選股）。
+  單一步驟失敗不中斷整支腳本，會記錄下來繼續跑下一步，最後總結報告列出所有失敗的股票代號+步驟+錯誤原因。每次 API 呼叫間隔 6 秒節流。執行：`npx tsx scripts/fetch-candidate-details.ts --date=2026-08-18`。2026-08-18 已用 23 檔候選股實測成功，零失敗（處理時間約 10 分鐘/次）。
 
 ## README.md 維護
 

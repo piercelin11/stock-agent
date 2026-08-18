@@ -10,6 +10,7 @@
 - `scripts/calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線等技術指標。
 - `scripts/run-screener.ts`：依條件（`scripts/screener-conditions.json`）跑全市場篩選，產出候選觀察股清單。
 - `scripts/daily-pipeline.ts`：每日排程主控腳本，串接以上缺漏檢查、補齊、算指標、跑篩選流程。
+- `scripts/fetch-candidate-details.ts`：讀取篩選結果候選股清單，逐支抓取籌碼面（三大法人買賣超）、基本面（月營收、季報）、消息面（新聞）四類資料，寫入資料庫。
 
 ## 環境需求
 
@@ -45,6 +46,9 @@ npx tsx scripts/run-screener.ts
 
 # 每日主流程（缺漏檢查 → 補齊 TWSE+TPEx → 算指標 → 跑篩選）
 npx tsx scripts/daily-pipeline.ts
+
+# 抓取候選股深度資料（籌碼/基本面/消息面），預設讀最新一份篩選結果
+npx tsx scripts/fetch-candidate-details.ts --date=2026-08-18
 
 # 舊版：不寫入資料庫，只印出當日漲幅前 20 名
 node top20-gainers.js

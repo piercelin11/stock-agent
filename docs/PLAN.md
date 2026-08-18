@@ -1,106 +1,102 @@
-# 股市觀察 Agent - 缺漏回補與每日主流程
+# 股市觀察 Agent - Phase C:候選股深度資料抓取
 
 ## 背景
 
-目前已有 `DailyQuote`、`TechnicalIndicator` 等資料表,以及用 FinMind 逐支股票回補歷史的腳本。這次任務要新增兩支腳本:
+`scripts/run-screener.ts` 已經會產出 `data/screener-results/{日期}.json`(例如 `data/screener-results/2026-08-18.json`),裡面是當天篩選出的候選股清單。這次任務要寫一支腳本,讀取這份候選清單,針對每一支候選股,補抓籌碼面、基本面、消息面資料,寫進資料庫。
 
-1. `fill-gap-mi-index.ts`:用證交所的 `MI_INDEX` 舊版報表 API,一次呼叫補齊「某一天」的全市場資料(比逐支查 FinMind 快很多)
-2. `daily-pipeline.ts`:排程真正執行的主控腳本,自動檢查缺漏、補齊、算指標、跑篩選,全部串起來
-
-**這次任務範圍不包含**:財報、新聞、三大法人的抓取(維持之前的規劃,留到 Phase C)。
+**這次任務不涉及**:全市場資料、技術指標(那些已經在 Phase A/B 完成),也不涉及 AI 報表產出(那是 Phase D)。這次純粹是「資料補強」,結束時資料庫裡應該要有候選股完整的四個面向資料可查。
 
 ---
 
-## 任務 0:先驗證 MI_INDEX 這支 API 是否真的可以查指定歷史日期
+## 任務 1:Schema 微調(如果需要)
 
-**這步一定要先做,不要跳過**——這支 API 沒有正式文件保證,行為需要實際驗證才能放心接進主流程。
+檢查 `NewsArticle` model,**確認 `link` 欄位有沒有唯一性約束**,如果沒有,加上去(避免同一則新聞被不同候選股的抓取流程重複寫入):
 
-```
-1. 挑一個資料庫裡已經有資料的日期(從 DailyQuote 找一個確定存在的日期)
-2. 呼叫 https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={該日期的民國年格式}&type=ALL
-3. 如果回傳的是 HTML 而不是 JSON,改用 response=html,並用 HTML 解析的方式取出資料表(參考該頁面裡「每日收盤行情」那個表格區塊)
-4. 把解析出來的資料,跟資料庫裡同一天、同幾支股票的 DailyQuote 做比對(挑5-10支股票對一下收盤價、成交量)
-5. 如果數字對得起來 → 確認可用,才繼續做任務1、2
-6. 如果對不起來,或日期參數不管用(不管填哪天都回傳同一天資料)→ 回報給我,先不要繼續往下做,我們再討論替代方案
-```
-
-**注意**:這支 API 的回傳資料裡,同一個回應會混雜「指數資訊」「大盤統計」「個股明細」好幾個區塊,要確認你抓到的是「個股明細」那個表格區塊,不是指數或統計數字。
-
----
-
-## 任務 1:`fill-gap-mi-index.ts`——補齊指定單一天的資料
-
-**用法**:`node scripts/fill-gap-mi-index.js --date=2026-08-10`(參數是西元日期,程式內部自行轉換成 API 需要的民國年格式)
-
-**執行邏輯**:
-
-```
-1. 讀取命令列參數 --date,轉換成 API 需要的民國年格式(YYY年MM月DD日,不含分隔符)
-2. 呼叫 MI_INDEX,取得該日全市場個股明細
-3. 如果該日沒有交易資料(例如週末、國定假日,API 回傳空的或找不到明細表格):
-   - 印出「{日期} 非交易日或無資料,跳過」,正常結束,不算錯誤
-4. 對回傳的每一筆個股資料:
-   a. 檢查 Stock 表裡有沒有這個代號
-      - 沒有的話,自動新增一筆 Stock 記錄(用之前已經寫好的分類邏輯判斷 securityType:
-        代號開頭00→etf、4碼字母結尾→preferred、6碼數字或名稱含「購」「售」→warrant、
-        5碼數字→bond、剛好4碼數字→stock、其他→other)
-        market 欄位:MI_INDEX 是證交所(上市)的資料,固定填 TWSE
-        sectorId 留空(這支資料源沒有產業別資訊)
-   b. upsert 進 DailyQuote(唯一鍵 stockCode + date)
-      source 欄位固定填 TWSE
-5. 印出處理結果:該日共處理幾筆、新增了幾支之前沒見過的 Stock 記錄
-```
-
-**這支腳本要匯出一個可以被其他腳本 import 使用的函式**(不是只能透過命令列參數執行),例如:
-
-```typescript
-export async function fillOneDay(date: string): Promise<{ processed: number; isNonTradingDay: boolean }> {
-  // ...上述邏輯
+```prisma
+model NewsArticle {
+  // ...既有欄位
+  link String @unique
 }
 ```
 
-命令列執行的部分,只是讀取 `--date` 參數後呼叫這個函式,方便 `daily-pipeline.ts` 之後直接 import 重複使用同一份邏輯,不用複製貼上重寫一次。
+如果需要異動,執行對應的 migration。
 
 ---
 
-## 任務 2:`daily-pipeline.ts`——排程主控腳本
+## 任務 2:撰寫 `scripts/fetch-candidate-details.ts`
 
-**用法**:`node scripts/daily-pipeline.js`(不需要任何參數,這是 cron 排程直接執行的目標)
+**用法**:
+```
+node scripts/fetch-candidate-details.js --date=2026-08-18
+```
+(若不帶 `--date`,預設讀取 `data/screener-results/` 目錄下最新的一份 JSON 檔)
 
-**執行邏輯**:
+### 執行邏輯
 
 ```
-1. 印出開始時間
+1. 讀取對應的 screener-results JSON 檔,取出候選股代號清單
+2. 對每一支候選股代號,依序(for + await,不要平行處理)執行以下四個步驟:
 
-2. 檢查缺漏:
-   a. 查詢 DailyQuote 裡最新的日期(MAX(date))
-   b. 從那天的隔天開始,列出到「今天」為止的所有日期(含週末,不用先篩選,交給 fillOneDay 自己判斷是不是交易日)
-   c. 如果沒有缺漏(最新日期就是今天或最近一個交易日),跳過這步
+   a. 籌碼面:呼叫 FinMind TaiwanStockInstitutionalInvestorsBuySell
+      - data_id = 該股票代號
+      - 日期區間:近30天
+      - 逐筆 upsert 進 InstitutionalTrading(唯一鍵 stockCode + date)
+      - 欄位對應:外資買賣超 → foreignNetBuy、投信買賣超 → investmentTrustNetBuy、
+        自營商買賣超 → dealerNetBuy(請先呼叫一次確認 FinMind 實際回傳的欄位名稱,
+        對應到我們 schema 裡的三個欄位,可能需要做欄位名稱轉換)
+      - source 欄位:填入該股票在 Stock 表裡對應的 market 值
 
-3. 補齊缺漏:
-   對每一個缺漏日期,依序(for + await,不要平行處理,避免短時間內對 MI_INDEX 打太多次請求)呼叫任務1匯出的 fillOneDay(date)
-   每次呼叫之間加入約2-3秒延遲(這支 API 沒有明確 rate limit,但保守起見還是加個緩衝)
-   印出進度
+   b. 基本面 - 月營收:呼叫 FinMind TaiwanStockMonthRevenue
+      - data_id = 該股票代號
+      - 日期區間:近12個月
+      - 逐筆 upsert 進 MonthRevenue(唯一鍵 stockCode + year + month)
 
-4. 確保今天的資料也是最新的:
-   呼叫 fillOneDay(今天日期)
+   c. 基本面 - 季報:呼叫 FinMind TaiwanStockFinancialStatements
+      - data_id = 該股票代號
+      - 日期區間:近8季(約2年)
+      - 逐筆 upsert 進 FinancialStatement(唯一鍵 stockCode + year + quarter)
+      - 注意:FinMind 這支資料集可能是「多筆細項組成一份財報」的格式(例如營收、毛利分別是不同列),
+        請先呼叫一次確認實際回傳格式,再決定怎麼整理成我們 schema 裡「一列代表一季」的結構
 
-5. 重新計算技術指標:
-   呼叫已經寫好的 calculate-technical-indicators 邏輯(import 進來用,不要重寫)
+   d. 消息面:呼叫 FinMind TaiwanStockNews
+      - data_id = 該股票代號
+      - 日期區間:近14天
+      - 對每一則新聞,用 link 欄位檢查資料庫裡是否已經存在(避免重複寫入)
+        - 不存在 → 新增進 NewsArticle
+        - 已存在 → 略過建立,但仍需確保 NewsStock 有對應這支股票的關聯記錄
+          (同一則新聞可能與多支候選股都相關,要能對應到多支股票)
 
-6. 跑篩選:
-   呼叫已經寫好的 run-screener 邏輯(import 進來用,不要重寫)
-   印出今天篩選出幾檔候選股
-
-7. 印出結束時間、總耗時、整體執行摘要(補了幾天缺漏、今天新增幾筆報價、篩出幾檔候選股)
-
-8. 任何一個步驟失敗,要印出清楚的錯誤訊息(是哪個步驟、哪個日期、什麼錯誤),並且讓整支腳本以非0狀態碼結束(方便之後排程系統或log監控知道這次執行失敗了),不要吞掉錯誤默默結束
+3. 每處理完一支候選股,印出進度(例如「已處理 5/30 檔:2330 台積電」)
+4. 每次 API 呼叫之間加入約6秒延遲(維持之前的節流慣例)
+5. 全部完成後,印出總結:
+   - 處理了幾檔候選股
+   - 各類別分別寫入了幾筆(籌碼/月營收/季報/新聞)
+   - 有沒有任何一支股票的某個步驟失敗(列出失敗的股票代號+步驟+錯誤原因,方便之後重跑)
 ```
+
+### 錯誤處理原則
+
+**單一步驟失敗,不要讓整支腳本中斷**——例如某支股票的新聞抓取失敗,應該記錄下來、繼續處理下一支股票的下一個步驟,而不是整個流程停掉。最後的總結報告要清楚列出哪些地方失敗了,方便你決定要不要針對性重跑。
+
+---
+
+## 任務 3:驗證
+
+腳本執行完後,幫我確認:
+
+1. 隨機挑 2-3 檔候選股,分別查詢 `InstitutionalTrading`、`MonthRevenue`、`FinancialStatement`、`NewsArticle`(透過 `NewsStock` 關聯),確認資料格式合理、數字看起來正常
+2. 確認 `NewsStock` 的多對多關聯運作正常(如果有新聞同時關聯到多支候選股,檢查有沒有正確建立多筆關聯記錄)
+
+---
+
+## 暫不處理(明確排除,留待之後決定)
+
+- **TaiwanStockPER(估值/本益比)**:這個資料是「隨股價每天變動」的性質,比較適合掛在 `DailyQuote` 而不是 `FinancialStatement`(因為 FinancialStatement 是季度性質,PER 卻是每日的)。這次先不做,等之後確定要加,再另外討論要不要在 `DailyQuote` 加 `pe`/`pb` 欄位。
+- **Yahoo 股市 RSS 補充新聞來源**:規劃中,這次只用 FinMind 的新聞資料集。
+- **市值(TaiwanStockMarketValue)**:上次提過可以加在 `Stock` 表上,這次先不做,之後有需要再補。
 
 ---
 
 ## 執行順序提醒
 
-**請先做任務0驗證,把驗證結果回報給我確認之後,我們再往下做任務1、任務2。** 如果任務0驗證失敗(MI_INDEX 不可靠),先停下來討論替代方案,不要硬做任務1、2。
-
-任務1、2完成後,也請先手動執行 `daily-pipeline.ts` 測試一次(不要直接設定 cron),確認整套流程跑起來沒問題,我們再討論排程設定的部分。
+任務1(schema檢查)→ 任務2(撰寫並執行腳本)→ 任務3(驗證)。任務2執行前,先確認一下候選股數量(從 JSON 檔案數一下),讓我知道大概要跑多久(依候選股數量 × 4次呼叫 × 6秒估算),不用等跑完才知道時間。

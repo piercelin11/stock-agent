@@ -93,7 +93,7 @@ model DailyQuote {
 model NewsArticle {
   id             Int      @id @default(autoincrement())
   title          String
-  link           String
+  link           String   @unique
   source         String
   publishedAt    DateTime
   sentiment      String?
