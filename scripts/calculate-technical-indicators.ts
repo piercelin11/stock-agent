@@ -53,11 +53,13 @@ export async function calculateTechnicalIndicators(): Promise<{ processed: numbe
 
       let bollingerUpper: number | null = null;
       let bollingerLower: number | null = null;
+      let bollingerBandwidth: number | null = null;
       if (ma20 !== null) {
         const window = closes.slice(i + 1 - 20, i + 1);
         const sd = stdDev(window, ma20);
         bollingerUpper = ma20 + 2 * sd;
         bollingerLower = ma20 - 2 * sd;
+        bollingerBandwidth = ma20 !== 0 ? (bollingerUpper - bollingerLower) / ma20 : null;
       }
 
       return {
@@ -70,6 +72,7 @@ export async function calculateTechnicalIndicators(): Promise<{ processed: numbe
         bollingerMid: ma20,
         bollingerUpper,
         bollingerLower,
+        bollingerBandwidth,
         volumeMa20,
       };
     });

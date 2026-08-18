@@ -10,9 +10,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
+const SHARES_PER_LOT = 1000;
+
 type Condition =
   | { type: "bollinger_breakout"; direction: "upper" | "lower" }
-  | { type: "volume_surge"; multiplier: number };
+  | { type: "volume_surge"; multiplier: number }
+  | { type: "volume_min"; lots: number }
+  | { type: "bandwidth_squeeze"; threshold: number; days: number };
 
 interface Quote {
   close: number;
@@ -23,6 +27,7 @@ interface Quote {
 interface Indicator {
   bollingerUpper: number | null;
   bollingerLower: number | null;
+  bollingerBandwidth: number | null;
   volumeMa20: number | null;
 }
 
@@ -36,6 +41,9 @@ function checkCondition(condition: Condition, quote: Quote, indicator: Indicator
   if (condition.type === "volume_surge") {
     return indicator.volumeMa20 !== null && Number(quote.volume) > indicator.volumeMa20 * condition.multiplier;
   }
+  if (condition.type === "volume_min") {
+    return Number(quote.volume) >= condition.lots * SHARES_PER_LOT;
+  }
   return false;
 }
 
@@ -43,7 +51,30 @@ function conditionLabel(condition: Condition): string {
   if (condition.type === "bollinger_breakout") {
     return `bollinger_breakout(${condition.direction})`;
   }
-  return `volume_surge(x${condition.multiplier})`;
+  if (condition.type === "volume_surge") {
+    return `volume_surge(x${condition.multiplier})`;
+  }
+  if (condition.type === "volume_min") {
+    return `volume_min(${condition.lots}張)`;
+  }
+  return `bandwidth_squeeze(<${(condition.threshold * 100).toFixed(0)}%, ${condition.days}天)`;
+}
+
+/**
+ * 檢查某支股票「最新交易日」是否連續 N 天 bollingerBandwidth < threshold。
+ * history 須已按日期新到舊排序，且僅包含該股票的記錄。
+ */
+function checkBandwidthPersistence(
+  history: { bollingerBandwidth: number | null }[],
+  threshold: number,
+  days: number,
+): boolean {
+  if (history.length < days) return false;
+  for (let i = 0; i < days; i++) {
+    const bandwidth = history[i]?.bollingerBandwidth;
+    if (bandwidth === null || bandwidth === undefined || bandwidth >= threshold) return false;
+  }
+  return true;
 }
 
 export async function runScreener(): Promise<{ date: string; candidateCount: number } | null> {
@@ -82,10 +113,42 @@ export async function runScreener(): Promise<{ date: string; candidateCount: num
       stockCode: true,
       bollingerUpper: true,
       bollingerLower: true,
+      bollingerBandwidth: true,
       volumeMa20: true,
     },
   });
   const indicatorMap = new Map(indicators.map((i) => [i.stockCode, i]));
+
+  const bandwidthConditions = conditions.filter(
+    (c): c is Extract<Condition, { type: "bandwidth_squeeze" }> => c.type === "bandwidth_squeeze",
+  );
+  const maxBandwidthDays = Math.max(0, ...bandwidthConditions.map((c) => c.days));
+
+  const bandwidthHistoryMap = new Map<string, { bollingerBandwidth: number | null }[]>();
+  if (maxBandwidthDays > 0) {
+    const recentDates = await prisma.technicalIndicator.findMany({
+      where: { date: { lte: targetDate } },
+      distinct: ["date"],
+      orderBy: { date: "desc" },
+      take: maxBandwidthDays,
+      select: { date: true },
+    });
+    const fromDate = recentDates[recentDates.length - 1]?.date ?? targetDate;
+
+    const history = await prisma.technicalIndicator.findMany({
+      where: { date: { gte: fromDate, lte: targetDate } },
+      orderBy: { date: "desc" },
+      select: { stockCode: true, bollingerBandwidth: true },
+    });
+    for (const row of history) {
+      const list = bandwidthHistoryMap.get(row.stockCode);
+      if (list) {
+        list.push(row);
+      } else {
+        bandwidthHistoryMap.set(row.stockCode, [row]);
+      }
+    }
+  }
 
   interface Result {
     code: string;
@@ -105,7 +168,16 @@ export async function runScreener(): Promise<{ date: string; candidateCount: num
     let matchesAll = true;
 
     for (const condition of conditions) {
-      if (checkCondition(condition, quote, indicator)) {
+      const matched =
+        condition.type === "bandwidth_squeeze"
+          ? checkBandwidthPersistence(
+              bandwidthHistoryMap.get(quote.stockCode) ?? [],
+              condition.threshold,
+              condition.days,
+            )
+          : checkCondition(condition, quote, indicator);
+
+      if (matched) {
         triggeredConditions.push(conditionLabel(condition));
       } else {
         matchesAll = false;

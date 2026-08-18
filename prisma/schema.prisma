@@ -196,6 +196,7 @@ model TechnicalIndicator {
   bollingerUpper Float?
   bollingerMid   Float?
   bollingerLower Float?
+  bollingerBandwidth Float?
   volumeMa20     Float?
   calculatedAt   DateTime @default(now())
 

@@ -63,8 +63,10 @@
 
 - **`top20-gainers.js`**（專案根目錄，非 TypeScript，尚未整合進 `/scripts` 或資料庫）：抓取當日 TWSE + TPEx 收盤資料，篩選出一般股票（排除 ETF、權證、特別股等），依漲幅排序印出前 20 名。執行方式：`node top20-gainers.js`。之後若要整合進資料庫流程，需改寫成 TypeScript 並搬進 `/scripts`，把結果寫入 `DailyQuote` 而非只印出。
 - **`scripts/backfill-daily-quotes.ts`**：用 FinMind API 逐支股票回補近 120 天歷史報價至 `DailyQuote`。執行：`npx tsx scripts/backfill-daily-quotes.ts`（可用 `BACKFILL_LIMIT` 環境變數限制處理支數，測試用）。
-- **`scripts/calculate-technical-indicators.ts`**：依 `DailyQuote` 計算 MA5/10/20/60、布林通道、量能均線，寫入 `TechnicalIndicator`。匯出 `calculateTechnicalIndicators()` 供其他腳本 import 使用。執行：`npx tsx scripts/calculate-technical-indicators.ts`。
-- **`scripts/run-screener.ts`**：讀取 `scripts/screener-conditions.json` 的條件（目前支援 `bollinger_breakout`、`volume_surge`），對最新交易日跑全市場篩選，結果印出並寫入 `data/screener-results/{date}.json`。匯出 `runScreener()` 供其他腳本 import 使用。執行：`npx tsx scripts/run-screener.ts`。
+- **`scripts/calculate-technical-indicators.ts`**：依 `DailyQuote` 計算 MA5/10/20/60、布林通道（含 `bollingerBandwidth` 帶寬 `= (upper - lower) / mid`）、量能均線，寫入 `TechnicalIndicator`。匯出 `calculateTechnicalIndicators()` 供其他腳本 import 使用。執行：`npx tsx scripts/calculate-technical-indicators.ts`。
+- **`scripts/run-screener.ts`**：讀取 `scripts/screener-conditions.json` 的條件，對最新交易日跑全市場篩選，結果印出並寫入 `data/screener-results/{date}.json`。匯出 `runScreener()` 供其他腳本 import 使用。執行：`npx tsx scripts/run-screener.ts`。目前支援的條件型別：
+  - `bollinger_breakout`（`direction: "upper"|"lower"`）、`volume_surge`（`multiplier`，當日量 > N 倍 20 日均量）、`volume_min`（`lots`，當日量 ≥ N 張，1 張 = 1000 股）：皆為單日可判斷條件，邏輯在 `checkCondition`。
+  - `bandwidth_squeeze`（`threshold`、`days`）：判斷「最新交易日往回數 N 天，`bollingerBandwidth` 皆 < threshold」（連續性條件，遇 null 視為不符合）。因需要多天歷史，邏輯獨立在 `checkBandwidthPersistence`，主流程會依所有 `bandwidth_squeeze` 條件裡最大的 `days` 一次性批次查詢近 N 天 `TechnicalIndicator`（而非逐股票查詢），效能考量。
 - **`scripts/fill-daily-quotes.ts`**（2026-08-17 由 `fill-gap-mi-index.ts` + `fill-today-tpex.ts` 合併而成）：補齊全市場報價，自動新增資料庫沒有的 `Stock` 記錄並 upsert `DailyQuote`。匯出兩個函式：
   - `fillOneDayTwse(date)`：用證交所 `MI_INDEX` 報表 API 補齊「指定單一天」的全上市（TWSE）市場報價，可補任意歷史日期。
   - `fillTodayTpex()`：用 TPEx OpenAPI `tpex_mainboard_daily_close_quotes` 補齊全上櫃（TPEx）市場報價；該端點不支援日期參數，永遠回傳「目前最新一天」，無法補歷史缺漏。
