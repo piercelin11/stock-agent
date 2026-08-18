@@ -22,6 +22,123 @@ function movingAverage(closes: number[], index: number, period: number): number 
   return average(closes.slice(index + 1 - period, index + 1));
 }
 
+// 近 20 日「日報酬率」標準差（%）
+function volatility20d(closes: number[], index: number): number | null {
+  if (index + 1 < 21) return null; // 需要 21 筆收盤價才能算出 20 個報酬率
+  const window = closes.slice(index - 20, index + 1);
+  const returns: number[] = [];
+  for (let i = 1; i < window.length; i++) {
+    const prev = window[i - 1]!;
+    if (prev <= 0) continue;
+    returns.push(((window[i]! - prev) / prev) * 100);
+  }
+  if (returns.length === 0) return null;
+  const mean = average(returns)!;
+  return stdDev(returns, mean);
+}
+
+// 近 20 日內從任一高點到之後低點的最大跌幅（%，負值）
+function maxDrawdown20d(closes: number[], index: number, period = 20): number | null {
+  if (index + 1 < period) return null;
+  const window = closes.slice(index + 1 - period, index + 1);
+  let peak = window[0]!;
+  let maxDrawdown = 0;
+  for (const close of window) {
+    if (close > peak) peak = close;
+    if (peak > 0) {
+      const drawdown = ((close - peak) / peak) * 100;
+      if (drawdown < maxDrawdown) maxDrawdown = drawdown;
+    }
+  }
+  return maxDrawdown;
+}
+
+// 近 20 日 True Range 平均值
+function atr20(highs: number[], lows: number[], closes: number[], index: number, period = 20): number | null {
+  if (index + 1 < period + 1) return null; // 需要前一日收盤才能算 TR
+  const trueRanges: number[] = [];
+  for (let i = index - period + 1; i <= index; i++) {
+    const prevClose = closes[i - 1]!;
+    const tr = Math.max(
+      highs[i]! - lows[i]!,
+      Math.abs(highs[i]! - prevClose),
+      Math.abs(lows[i]! - prevClose),
+    );
+    trueRanges.push(tr);
+  }
+  return average(trueRanges);
+}
+
+// 14 日 RSI（標準公式：漲幅平均 / (漲幅平均 + 跌幅平均) x 100）
+function rsi14(closes: number[], index: number, period = 14): number | null {
+  if (index + 1 < period + 1) return null;
+  let gainSum = 0;
+  let lossSum = 0;
+  for (let i = index - period + 1; i <= index; i++) {
+    const diff = closes[i]! - closes[i - 1]!;
+    if (diff > 0) gainSum += diff;
+    else lossSum += -diff;
+  }
+  const avgGain = gainSum / period;
+  const avgLoss = lossSum / period;
+  if (avgGain + avgLoss === 0) return 50; // 完全無波動，視為中性
+  return (avgGain / (avgGain + avgLoss)) * 100;
+}
+
+function ema(values: number[], period: number): (number | null)[] {
+  const k = 2 / (period + 1);
+  const result: (number | null)[] = new Array(values.length).fill(null);
+  let prevEma: number | null = null;
+  for (let i = 0; i < values.length; i++) {
+    if (i + 1 < period) continue;
+    if (prevEma === null) {
+      prevEma = average(values.slice(i + 1 - period, i + 1));
+    } else {
+      prevEma = values[i]! * k + prevEma * (1 - k);
+    }
+    result[i] = prevEma;
+  }
+  return result;
+}
+
+// 用 12/26/9 EMA 算 MACD 線與訊號線，回傳最新交叉後的持續狀態
+function macdStatusSeries(closes: number[]): (string | null)[] {
+  const ema12 = ema(closes, 12);
+  const ema26 = ema(closes, 26);
+  const macdLine = closes.map((_, i) => {
+    const a = ema12[i] ?? null;
+    const b = ema26[i] ?? null;
+    return a !== null && b !== null ? a - b : null;
+  });
+  const macdValues = macdLine.filter((v): v is number => v !== null);
+  const signalOnValid = ema(macdValues, 9);
+
+  // 把只在「有效 macdLine」序列上算出的 signal 值對回原本的日期索引
+  const signalLine: (number | null)[] = new Array(closes.length).fill(null);
+  let validIndex = -1;
+  for (let i = 0; i < macdLine.length; i++) {
+    if (macdLine[i] === null) continue;
+    validIndex++;
+    signalLine[i] = signalOnValid[validIndex] ?? null;
+  }
+
+  const status: (string | null)[] = new Array(closes.length).fill(null);
+  for (let i = 1; i < closes.length; i++) {
+    const macd = macdLine[i];
+    const signal = signalLine[i];
+    if (macd == null || signal == null) continue;
+
+    if (macd > signal) {
+      status[i] = "bullish";
+    } else if (macd < signal) {
+      status[i] = "bearish";
+    } else {
+      status[i] = null;
+    }
+  }
+  return status;
+}
+
 export async function calculateTechnicalIndicators(): Promise<{ processed: number; indicatorsWritten: number }> {
   const stocks = await prisma.stock.findMany({
     where: { securityType: "stock" },
@@ -38,11 +155,14 @@ export async function calculateTechnicalIndicators(): Promise<{ processed: numbe
     const quotes = await prisma.dailyQuote.findMany({
       where: { stockCode: stock.code },
       orderBy: { date: "asc" },
-      select: { date: true, close: true, volume: true },
+      select: { date: true, high: true, low: true, close: true, volume: true },
     });
 
+    const highs = quotes.map((q) => q.high);
+    const lows = quotes.map((q) => q.low);
     const closes = quotes.map((q) => q.close);
     const volumes = quotes.map((q) => Number(q.volume));
+    const macdStatuses = macdStatusSeries(closes);
 
     const rows = quotes.map((quote, i) => {
       const ma5 = movingAverage(closes, i, 5);
@@ -74,6 +194,11 @@ export async function calculateTechnicalIndicators(): Promise<{ processed: numbe
         bollingerLower,
         bollingerBandwidth,
         volumeMa20,
+        volatility20d: volatility20d(closes, i),
+        maxDrawdown20d: maxDrawdown20d(closes, i),
+        atr20: atr20(highs, lows, closes, i),
+        rsi14: rsi14(closes, i),
+        macdStatus: macdStatuses[i] ?? null,
       };
     });
 

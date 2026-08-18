@@ -28,6 +28,7 @@ prisma/*.db
 
 # Screener output (generated daily, not source)
 /data/screener-results/
+/data/screen-score-results/
 
 # Auto-installed skill caches (local tool state, not project source)
 .agents/

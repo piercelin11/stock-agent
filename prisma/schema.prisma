@@ -239,6 +239,11 @@ model TechnicalIndicator {
   bollingerLower Float?
   bollingerBandwidth Float?
   volumeMa20     Float?
+  volatility20d  Float? // 近 20 日日報酬率標準差（%）
+  maxDrawdown20d Float? // 近 20 日最大回撤（%，負值）
+  atr20          Float? // 近 20 日 True Range 平均值
+  rsi14          Float? // 14 日 RSI
+  macdStatus     String? // "bullish" | "bearish" | null
   calculatedAt   DateTime @default(now())
 
   stock Stock @relation(fields: [stockCode], references: [code])

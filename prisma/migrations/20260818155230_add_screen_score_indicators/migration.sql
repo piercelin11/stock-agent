@@ -1,0 +1,6 @@
+-- AlterTable
+ALTER TABLE "TechnicalIndicator" ADD COLUMN     "atr20" DOUBLE PRECISION,
+ADD COLUMN     "macdStatus" TEXT,
+ADD COLUMN     "maxDrawdown20d" DOUBLE PRECISION,
+ADD COLUMN     "rsi14" DOUBLE PRECISION,
+ADD COLUMN     "volatility20d" DOUBLE PRECISION;

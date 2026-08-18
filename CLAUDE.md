@@ -65,7 +65,9 @@
 
 **Phase C（候選股深度資料抓取）已完成（2026-08-18）**：`scripts/fetch-candidate-details.ts` 讀取 `data/screener-results/{日期}.json` 的候選股清單，逐支依序抓取籌碼面（`InstitutionalTrading`）、月營收（`MonthRevenue`）、季報（`FinancialStatement`）、新聞（`NewsArticle`/`NewsStock`）四個面向，寫入資料庫。已用 2026-08-18 篩選結果（23 檔候選股）實測成功，零失敗。`NewsArticle.link` 已加上 `@unique` 約束（migration `20260818112801_add_news_article_link_unique`）。
 
-尚未開始/明確不做：估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯、WatchlistItem 操作介面、AnalysisResult 產出流程（Phase D）、`daily-pipeline.ts` 的 cron 排程設定（腳本已可手動執行，但還沒排程）、`fetch-candidate-details.ts` 尚未整合進 `daily-pipeline.ts`（目前是獨立手動執行的腳本）。
+**全市場評分腳本（screen_score）已完成（2026-08-18）**：依 `docs/PLAN.md` 完成 Step 0（`calculate-technical-indicators.ts` 新增 `volatility20d`/`maxDrawdown20d`/`atr20`/`rsi14`/`macdStatus` 五欄位，migration `20260818155230_add_screen_score_indicators`）與 Step 1（新增 `scripts/calculate-screen-score.ts`，九因子加權評分，匯出 `calculateScreenScore(date)`，結果輸出至 `data/screen-score-results/{date}.json`，不寫資料庫）。`rankScore`（橫向百分位排名函式）已用假資料單元測試三種邊界情況（全部有值/部分 null/全部 null）；開發過程中發現並修正一個方向性 bug（`lowerIsBetter=false` 時最大值誤排到最低分，已修正並用台積電市值/成交金額實測驗證為 100 分）。已用 2026-08-18 全市場資料實測（1947 檔一般股票），肉眼核對前 20 名、抽查 PE/PB 因子方向、確認估值缺值股票（如 DR 存託憑證）正確降級為 `naScore` 不崩潰。**尚未接進 `daily-pipeline.ts`**（依計畫先獨立驗證，穩定後再考慮整合）。
+
+尚未開始/明確不做：估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯（`topic_alignment` 因子固定中性分）、WatchlistItem 操作介面、AnalysisResult 產出流程（Phase D）、`daily-pipeline.ts` 的 cron 排程設定（腳本已可手動執行，但還沒排程）、`fetch-candidate-details.ts` 與 `calculate-screen-score.ts` 皆尚未整合進 `daily-pipeline.ts`（目前是獨立手動執行的腳本）、`WEIGHTS` 權重調整（目前是 PLAN.md 給的初始值，未來可能需依實際排名結果微調）。
 
 （每次進度更新，麻煩幫我一併更新這個區塊。）
 
@@ -73,7 +75,7 @@
 
 - **`top20-gainers.js`**（專案根目錄，非 TypeScript，尚未整合進 `/scripts` 或資料庫）：抓取當日 TWSE + TPEx 收盤資料，篩選出一般股票（排除 ETF、權證、特別股等），依漲幅排序印出前 20 名。執行方式：`node top20-gainers.js`。之後若要整合進資料庫流程，需改寫成 TypeScript 並搬進 `/scripts`，把結果寫入 `DailyQuote` 而非只印出。
 - **`scripts/backfill-daily-quotes.ts`**：用 FinMind API 逐支股票回補近 120 天歷史報價至 `DailyQuote`。執行：`npx tsx scripts/backfill-daily-quotes.ts`（可用 `BACKFILL_LIMIT` 環境變數限制處理支數，測試用）。
-- **`scripts/calculate-technical-indicators.ts`**：依 `DailyQuote` 計算 MA5/10/20/60、布林通道（含 `bollingerBandwidth` 帶寬 `= (upper - lower) / mid`）、量能均線，寫入 `TechnicalIndicator`。匯出 `calculateTechnicalIndicators()` 供其他腳本 import 使用。執行：`npx tsx scripts/calculate-technical-indicators.ts`。
+- **`scripts/calculate-technical-indicators.ts`**：依 `DailyQuote` 計算 MA5/10/20/60、布林通道（含 `bollingerBandwidth` 帶寬 `= (upper - lower) / mid`）、量能均線，以及 `volatility20d`（近20日日報酬率標準差）、`maxDrawdown20d`（近20日最大回撤）、`atr20`（近20日 True Range 平均值）、`rsi14`（14日 RSI）、`macdStatus`（12/26/9 EMA 判斷 `"bullish"`/`"bearish"`/`null`），寫入 `TechnicalIndicator`。匯出 `calculateTechnicalIndicators()` 供其他腳本 import 使用。執行：`npx tsx scripts/calculate-technical-indicators.ts`。
 - **`scripts/run-screener.ts`**：讀取 `scripts/screener-conditions.json` 的條件，對最新交易日跑全市場篩選，結果印出並寫入 `data/screener-results/{date}.json`。匯出 `runScreener()` 供其他腳本 import 使用。執行：`npx tsx scripts/run-screener.ts`。目前支援的條件型別：
   - `bollinger_breakout`（`direction: "upper"|"lower"`）、`volume_surge`（`multiplier`，當日量 > N 倍 20 日均量）、`volume_min`（`lots`，當日量 ≥ N 張，1 張 = 1000 股）：皆為單日可判斷條件，邏輯在 `checkCondition`。
   - `bandwidth_squeeze`（`threshold`、`days`）：判斷「最新交易日往回數 N 天，`bollingerBandwidth` 皆 < threshold」（連續性條件，遇 null 視為不符合）。因需要多天歷史，邏輯獨立在 `checkBandwidthPersistence`，主流程會依所有 `bandwidth_squeeze` 條件裡最大的 `days` 一次性批次查詢近 N 天 `TechnicalIndicator`（而非逐股票查詢），效能考量。
@@ -91,6 +93,7 @@
   - 季報：FinMind `TaiwanStockFinancialStatements`，近 8 季，回應是「多筆細項組成一份財報」格式（每列一個 `type`），依 `type` 對應到 `revenue`/`grossProfit`/`operatingIncome`（`netIncome` 對應 `IncomeAfterTaxes`）/`eps` 五個欄位後彙整成一列，upsert 進 `FinancialStatement`。
   - 消息面：FinMind `TaiwanStockNews`，近 14 天。**注意：這支 API 不接受 `end_date` 參數**（帶了會回傳 400 錯誤），只能傳 `start_date` 讓 API 回傳「從該日期到現在」的全部資料，範圍收斂靠自己在本地過濾（用 `daysAgo(14)` 算出的日期字串轉成 `Date` 當 cutoff，取午夜 0 點而非當下時分秒，避免漏掉邊界日當天較早發布的新聞）。**同一則新聞常會因為 `source` 別名不同（如「ETtoday財經雲」vs「finance.ettoday.net」）在回應裡重複出現，需依 `link` 去重**，只保留第一筆。依 `link` 查詢 `NewsArticle` 是否已存在，不存在才 `create`，然後一律 `upsert` `NewsStock` 關聯（同一則新聞可能對應多支候選股）。
   單一步驟失敗不中斷整支腳本，會記錄下來繼續跑下一步，最後總結報告列出所有失敗的股票代號+步驟+錯誤原因。每次 API 呼叫間隔 6 秒節流。執行：`npx tsx scripts/fetch-candidate-details.ts --date=2026-08-18`。2026-08-18 已用 23 檔候選股實測成功，零失敗（處理時間約 10 分鐘/次）。
+- **`scripts/calculate-screen-score.ts`**：針對「最新交易日」全市場一般股票（`securityType = "stock"`），用九因子加權概念算出 0~100 的 `screenScore` 並輸出排名，是獨立於 `run-screener.ts` 的全市場評分（不是布林條件式篩選，是排序），零 LLM、零額外外部 API 呼叫。九個因子：`value`（PE/PB 排名）、`size`（市值 log10 排名）、`liquidity`（成交金額 log10 排名）、`momentum`（當日+60日漲跌幅、MACD 加減分）、`reversal`（理想反彈起點、RSI 超買超賣）、`activity`（量比+換手率）、`stability`（波動度/最大回撤/ATR 扣分）、`theme_heat`（讀 `IndustryHeatSnapshot`）、`topic_alignment`（固定中性 50 分，尚無題材 Tag 系統）。核心共用函式 `rankScore()`（橫向百分位排名）已單元測試過三種邊界情況。加權設定在 `WEIGHTS` const，`topic_alignment` 權重為 0，加總時用「有效權重總和」正規化。匯出 `calculateScreenScore(date)`。結果不寫資料庫，輸出至 `data/screen-score-results/{date}.json`，同時 console.log 印前 20 名。執行：`npx tsx scripts/calculate-screen-score.ts --date=YYYY-MM-DD`（不帶參數用最新交易日）。依賴 `TechnicalIndicator`/`StockValuation`/`IndustryHeatSnapshot`/`Stock.sharesOutstanding` 皆已是當天最新資料（程式碼層級不 import 其他腳本，但執行順序上依賴它們先跑過）。2026-08-18 已用全市場 1947 檔實測成功。
 
 ## README.md 維護
 

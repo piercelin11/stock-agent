@@ -7,8 +7,9 @@
 - `top20-gainers.js`：抓取當日 TWSE + TPEx 收盤資料，篩選出一般股票（排除 ETF、權證、特別股等），依漲幅排序（尚未整合進資料庫）。
 - `scripts/backfill-daily-quotes.ts`：用 FinMind API 逐支股票回補近期歷史報價至 `DailyQuote`。
 - `scripts/fill-daily-quotes.ts`：補齊全市場報價，內部依市場分開處理——TWSE 用證交所 `MI_INDEX` 報表 API，支援指定任意單一天（可補歷史缺漏）；TPEx 用櫃買中心 OpenAPI（跟 `top20-gainers.js` 同源），該 API 不支援指定日期，只能補「目前最新一天」。皆會自動新增資料庫沒有的股票記錄。
-- `scripts/calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線等技術指標。
+- `scripts/calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線、波動度、最大回撤、ATR、RSI、MACD 狀態等技術指標。
 - `scripts/run-screener.ts`：依條件（`scripts/screener-conditions.json`）跑全市場篩選，產出候選觀察股清單。
+- `scripts/calculate-screen-score.ts`：九因子加權，對全市場一般股票算出 0~100 的 `screenScore` 並輸出排名（篩選之外的全市場排序，兩者互補）。
 - `scripts/fill-gap-valuation.ts`：抓取指定日期的個股估值（本益比/股價淨值比/殖利率）寫入 `StockValuation`，TWSE 與 TPEx 皆支援任意歷史日期。
 - `scripts/calculate-industry-heat.ts`：依每日報價計算各產業等權熱度（平均漲跌幅、漲跌家數、排名）寫入 `IndustryHeatSnapshot`，支援回補多個交易日。
 - `scripts/update-shares-outstanding.ts`：從 MOPS 公開 CSV 更新各股票已發行普通股數（月頻手動執行；市值用「股數 × 收盤價」現算，不落地存欄位）。
@@ -46,6 +47,9 @@ npx tsx scripts/calculate-technical-indicators.ts
 
 # 跑篩選
 npx tsx scripts/run-screener.ts
+
+# 算全市場評分排名（不帶 --date 則用最新交易日）
+npx tsx scripts/calculate-screen-score.ts --date=2026-08-18
 
 # 抓取指定日期的個股估值（不帶 --date 則抓今天）
 npx tsx scripts/fill-gap-valuation.ts --date=2026-08-18
