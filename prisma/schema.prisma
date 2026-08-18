@@ -26,9 +26,10 @@ enum Market {
 
 // 正式產業別（獨立 model，一支股票對應一個）
 model Sector {
-  id     Int     @id @default(autoincrement())
-  name   String  @unique
-  stocks Stock[]
+  id            Int                    @id @default(autoincrement())
+  name          String                 @unique
+  stocks        Stock[]
+  heatSnapshots IndustryHeatSnapshot[]
 }
 
 // 股票基本資料
@@ -40,6 +41,9 @@ model Stock {
   sectorId     Int?
   sector       Sector?      @relation(fields: [sectorId], references: [id])
 
+  sharesOutstanding          BigInt? // 已發行普通股數
+  sharesOutstandingUpdatedAt DateTime?
+
   dailyQuotes   DailyQuote[]
   tags          StockTag[]
   newsLinks     NewsStock[]
@@ -49,6 +53,43 @@ model Stock {
   financialStatements   FinancialStatement[]
   institutionalTradings InstitutionalTrading[]
   technicalIndicators   TechnicalIndicator[]
+  stockValuations       StockValuation[]
+}
+
+// 個股估值（PE/PB/殖利率），來源：TWSE BWIBBU_d / TPEx
+model StockValuation {
+  id            Int      @id @default(autoincrement())
+  stockCode     String
+  date          DateTime @db.Date
+  peRatio       Decimal? @db.Decimal(10, 2) // 虧損公司為 null
+  pbRatio       Decimal? @db.Decimal(10, 2)
+  dividendYield Decimal? @db.Decimal(6, 2)
+  closePrice    Decimal? @db.Decimal(10, 2) // BWIBBU_d 有附，順手存
+  source        String // "TWSE" | "TPEX"
+  fetchedAt     DateTime @default(now())
+
+  stock Stock @relation(fields: [stockCode], references: [code])
+
+  @@unique([stockCode, date])
+  @@index([date])
+}
+
+// 產業熱度每日快照（不存 heatScore，分數用時現算）
+model IndustryHeatSnapshot {
+  id               Int      @id @default(autoincrement())
+  sectorId         Int
+  date             DateTime @db.Date
+  avgChangePercent Decimal  @db.Decimal(8, 4) // 等權平均漲跌幅
+  risingCount      Int // 上漲家數
+  fallingCount     Int // 下跌家數
+  totalCount       Int // 當日有成交的成分股數
+  rank             Int // 當日排名（1 = 最熱）
+  createdAt        DateTime @default(now())
+
+  sector Sector @relation(fields: [sectorId], references: [id])
+
+  @@unique([sectorId, date])
+  @@index([date])
 }
 
 // 概念題材（多對多，會動態變動）

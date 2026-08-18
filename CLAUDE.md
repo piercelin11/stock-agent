@@ -15,6 +15,9 @@
 - **NewsStock**：NewsArticle 與 Stock 的多對多關聯表。
 - **WatchlistItem**：手動維護的正式觀察名單，一支股票最多一筆。
 - **AnalysisResult**：AI 產出的分析結果歷史紀錄（screener / watchlist_summary / sector_ranking 等）。
+- **StockValuation**：個股每日估值（本益比/股價淨值比/殖利率/收盤價），依 `stockCode + date` 唯一。TPEx 來源沒有收盤價（`closePrice` 為 null）；虧損公司 `peRatio` 為 null。
+- **IndustryHeatSnapshot**：產業熱度每日快照（等權平均漲跌幅、漲跌家數、當日排名），依 `sectorId + date` 唯一。**不存 heatScore**——熱度分數要用時從原始欄位現算，避免公式調整後需要重刷歷史。
+- **Stock 的股本欄位**：`sharesOutstanding`（已發行普通股數）與 `sharesOutstandingUpdatedAt`。市值不落地存欄位，要用時以 `sharesOutstanding × 當日收盤價` 現算。
 
 ## 資料來源與限制
 
@@ -32,6 +35,9 @@
 - **TPEx OpenAPI 個股行情端點不支援歷史日期查詢**：`tpex_mainboard_daily_close_quotes`、`tpex_mainboard_quotes`、`tpex_delayed_stock_close` 等端點的 swagger 定義 `parameters` 都是空陣列，2026-08-17 實測不論傳什麼查詢參數，回應的 `Date` 欄位永遠是「目前最新一天」，無法像證交所 `MI_INDEX` 一樣指定任意歷史日期。因此上櫃股票的「補歷史缺漏」目前無解，只能補當天（`fill-daily-quotes.ts` 的 `fillTodayTpex`）或靠 FinMind 逐支回補（`backfill-daily-quotes.ts`）。
 - **`STOCK_DAY_ALL` 有發布延遲，不適合當作「今天資料是否已可取得」的判斷依據**：2026-08-17 實測，`MI_INDEX` 對當天日期已回應 `stat: OK`（資料齊備）的同一時間點，`STOCK_DAY_ALL` 回傳的 `Date` 仍是前一個交易日，代表兩支 API 的資料更新時間點不同步。因此 `fill-daily-quotes.ts` 的 TWSE 部分固定用 `MI_INDEX`（可指定日期、資料較即時），沒有改用 `STOCK_DAY_ALL`。
 - **TPEx `tpex_mainboard_daily_close_quotes` 回應細節**：`Date` 欄位是民國年（如 `1150817`，需 `+1911` 轉西元），欄位名稱為 `SecuritiesCompanyCode`/`CompanyName`/`Close`/`Open`/`High`/`Low`/`TradingShares`/`Change`（`Change` 直接是帶正負號的數字字串，不像 `MI_INDEX` 用 HTML 顏色標記）。回應同樣混雜股票/ETF/權證/可轉債，需套用同一套過濾規則。
+- **TWSE 估值 API `BWIBBU_d`**（`www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=YYYYMMDD&selectType=ALL`）：全上市普通股的本益比/殖利率/股價淨值比，可查任意歷史日期（2026-08-18 實測，回應 `date` 欄位直接是西元 `YYYYMMDD` 可拿來核對）。欄位順序 `[證券代號, 證券名稱, 收盤價, 殖利率(%), 股利年度, 本益比, 股價淨值比, 財報年/季]`；本益比缺值（虧損公司）為 `"-"`；數字可能含千分位逗號。非交易日 `stat` 不是 `"OK"`。回傳約 1080 筆，比 `Stock` 表的 TWSE 普通股（約 1220 檔）少約 12%——估值端點僅涵蓋有估值資料的普通股，此差異屬正常。
+- **TPEx 估值端點支援歷史日期查詢**（與行情端點不同！）：`www.tpex.org.tw/www/zh-tw/afterTrading/peQryDate?date=YYYY/MM/DD&id=&response=json`，`date` 收「西元」年斜線格式（如 `2026/06/01`），2026-08-18 實測可查任意歷史日期。回應在 `tables[0]`，`date` 欄位是民國年斜線格式（`115/06/01`）要 `+1911` 核對；欄位順序 `[股票代號, 公司名稱, 本益比, 每股股利, 股利年度, 殖利率(%), 股價淨值比, 財報年/季]`（**與 TWSE 不同且沒有收盤價**），公司名稱尾端帶補位空白要 trim。非交易日 `totalCount` 為 0。OpenAPI 版 `tpex_mainboard_peratio_analysis` 只給最新一天，不用。
+- **MOPS 股本 CSV**（`mopsfin.twse.com.tw/opendata/t187ap03_L.csv` 上市 / `t187ap03_O.csv` 上櫃）：UTF-8 含 BOM，最後一欄「已發行普通股數或TDR原股發行股數」直接就是股數。**絕對不要用「實收資本額 ÷ 面額」推算**——面額不是每家都 10 元（實測案例：國巨 2327 面額 2.5 元）。CSV 只涵蓋現存上市/上櫃公司，`Stock` 表裡的已下市/KY 等標的不在其中（約 TWSE 135 檔、TPEx 34 檔），跳過不動原值。
 
 ## 開發慣例
 
@@ -55,9 +61,11 @@
 
 已完成：資料庫 schema（12 個 model，含 `MonthRevenue`、`FinancialStatement`、`InstitutionalTrading`、`TechnicalIndicator`）建立並套用 migration、`prisma/seed.ts` 執行完成、逐支股票用 FinMind 回補歷史報價（`backfill-daily-quotes.ts`）、技術指標計算（`calculate-technical-indicators.ts`）、全市場篩選（`run-screener.ts`）、全市場報價缺漏回補（`fill-daily-quotes.ts`，TWSE 用 `MI_INDEX` API 可補任意歷史日期，TPEx 用 TPEx OpenAPI 只能補當天）、每日排程主控腳本（`daily-pipeline.ts`，串起缺漏檢查→補齊 TWSE+TPEx→算指標→跑篩選）皆已完成並手動測試成功（2026-08-17）。`fill-daily-quotes.ts` 已排除權證/可轉債寫入，資料庫裡既有的權證/可轉債資料也已清理完畢（2026-08-17）。
 
+**Phase B 擴充（估值/市值/產業熱度）已完成（2026-08-18）**：依 `docs/PLAN.md` 完成 schema migration（`StockValuation`、`IndustryHeatSnapshot`、`Stock.sharesOutstanding`，migration `20260818130854_add_valuation_heat_shares`）、`scripts/calculate-industry-heat.ts`（已回補 20 個交易日）、`scripts/fill-gap-valuation.ts`（TWSE + TPEx 皆可查歷史日期，已抓 2026-08-17 與 08-18）、`scripts/update-shares-outstanding.ts`（已手動跑過一次，TWSE 1095 檔 + TPEx 890 檔）。估值與熱度已整合進 `daily-pipeline.ts`（放在技術指標之後、篩選之前，失敗不中斷 pipeline），冪等性與失敗路徑皆已驗證。股本更新為月頻手動執行，不進 daily pipeline。
+
 **Phase C（候選股深度資料抓取）已完成（2026-08-18）**：`scripts/fetch-candidate-details.ts` 讀取 `data/screener-results/{日期}.json` 的候選股清單，逐支依序抓取籌碼面（`InstitutionalTrading`）、月營收（`MonthRevenue`）、季報（`FinancialStatement`）、新聞（`NewsArticle`/`NewsStock`）四個面向，寫入資料庫。已用 2026-08-18 篩選結果（23 檔候選股）實測成功，零失敗。`NewsArticle.link` 已加上 `@unique` 約束（migration `20260818112801_add_news_article_link_unique`）。
 
-尚未開始：新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯、WatchlistItem 操作介面、AnalysisResult 產出流程（Phase D）、`daily-pipeline.ts` 的 cron 排程設定（腳本已可手動執行，但還沒排程）、`fetch-candidate-details.ts` 尚未整合進 `daily-pipeline.ts`（目前是獨立手動執行的腳本）。
+尚未開始/明確不做：估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯、WatchlistItem 操作介面、AnalysisResult 產出流程（Phase D）、`daily-pipeline.ts` 的 cron 排程設定（腳本已可手動執行，但還沒排程）、`fetch-candidate-details.ts` 尚未整合進 `daily-pipeline.ts`（目前是獨立手動執行的腳本）。
 
 （每次進度更新，麻煩幫我一併更新這個區塊。）
 
@@ -73,7 +81,10 @@
   - `fillOneDayTwse(date)`：用證交所 `MI_INDEX` 報表 API 補齊「指定單一天」的全上市（TWSE）市場報價，可補任意歷史日期。
   - `fillTodayTpex()`：用 TPEx OpenAPI `tpex_mainboard_daily_close_quotes` 補齊全上櫃（TPEx）市場報價；該端點不支援日期參數，永遠回傳「目前最新一天」，無法補歷史缺漏。
   執行：`npx tsx scripts/fill-daily-quotes.ts --date=YYYY-MM-DD`（CLI 模式會依序呼叫 `fillOneDayTwse(date)` 和 `fillTodayTpex()`）。
-- **`scripts/daily-pipeline.ts`**：每日排程主控腳本，串接上述腳本：檢查 `DailyQuote` 最新日期與今天的差距→依序（非平行）呼叫 `fillOneDayTwse` 補齊每個缺漏日期（僅 TWSE，TPEx 無法補歷史）→呼叫 `fillOneDayTwse(today)` + `fillTodayTpex()` 確保今天 TWSE、TPEx 都是最新→呼叫 `calculateTechnicalIndicators()`→呼叫 `runScreener()`→印出總結。任何步驟失敗會印出清楚的步驟/日期/錯誤訊息並以非 0 狀態碼結束。執行：`npx tsx scripts/daily-pipeline.ts`。**目前僅能手動執行，尚未設定 cron 排程，也尚未串接 `fetch-candidate-details.ts`。**
+- **`scripts/calculate-industry-heat.ts`**：依 `DailyQuote` 計算各產業（Sector）每日等權熱度寫入 `IndustryHeatSnapshot`。漲跌幅用 `change / (close - change) * 100` 現算（`DailyQuote` 只有漲跌價差沒有漲跌幅）；排除無產業別、當日無成交（volume = 0）、前收 ≤ 0 的股票。匯出 `calculateOneDayHeat(date: Date)`。純資料庫計算，零 API 呼叫。執行：`npx tsx scripts/calculate-industry-heat.ts`（最近一個交易日）或 `--backfill 20`（往回補 20 個「有 DailyQuote 資料的日子」），結束後印出最新一日產業排名前 5 供目視抽查。
+- **`scripts/fill-gap-valuation.ts`**：抓取指定日期的 TWSE（`BWIBBU_d`）+ TPEx（`peQryDate`）個股估值寫入 `StockValuation`，兩邊都可查任意歷史日期。只寫入 `Stock` 表已存在的代號（join 過濾），回傳日期與請求日期不符會直接 throw，回傳筆數與 Stock 表普通股差異 > 5% 會 log warning。匯出 `fillOneDayValuation(date: Date)`。執行：`npx tsx scripts/fill-gap-valuation.ts --date=YYYY-MM-DD`（也接受 `YYYYMMDD`；不帶參數抓今天）。
+- **`scripts/update-shares-outstanding.ts`**：下載 MOPS 股本 CSV（上市 `t187ap03_L` + 上櫃 `t187ap03_O`）更新 `Stock.sharesOutstanding` 與 `sharesOutstandingUpdatedAt`。**獨立手動執行，不進 daily pipeline**，每月跑一次即可。執行：`npx tsx scripts/update-shares-outstanding.ts`。
+- **`scripts/daily-pipeline.ts`**：每日排程主控腳本，串接上述腳本：檢查 `DailyQuote` 最新日期與今天的差距→依序（非平行）呼叫 `fillOneDayTwse` 補齊每個缺漏日期（僅 TWSE，TPEx 無法補歷史）→呼叫 `fillOneDayTwse(today)` + `fillTodayTpex()` 確保今天 TWSE、TPEx 都是最新→呼叫 `calculateTechnicalIndicators()`→呼叫 `fillOneDayValuation(today)` 抓估值、`calculateOneDayHeat(最新交易日)` 算產業熱度（這兩步失敗只 log 不中斷，其餘步驟照跑）→呼叫 `runScreener()`→印出總結。任何步驟失敗會印出清楚的步驟/日期/錯誤訊息並以非 0 狀態碼結束。執行：`npx tsx scripts/daily-pipeline.ts`。**目前僅能手動執行，尚未設定 cron 排程，也尚未串接 `fetch-candidate-details.ts`。**
 - **`scripts/fetch-candidate-details.ts`**：讀取 `data/screener-results/{日期}.json`（不帶 `--date` 則自動取目錄下最新一份）的候選股清單，對每支候選股依序（非平行）抓取四個面向並寫入資料庫：
   - 籌碼面：FinMind `TaiwanStockInstitutionalInvestorsBuySell`，近 30 天，依日期加總 `Foreign_Investor`/`Foreign_Dealer_Self`（外資）、`Investment_Trust`（投信）、`Dealer_self`/`Dealer_Hedging`（自營商）的 `buy - sell`，upsert 進 `InstitutionalTrading`。
   - 月營收：FinMind `TaiwanStockMonthRevenue`，近 12 個月，upsert 進 `MonthRevenue`（`revenueYoY`/`revenueMoM` 目前不計算，維持 null）。

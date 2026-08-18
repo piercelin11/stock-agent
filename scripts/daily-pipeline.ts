@@ -4,6 +4,8 @@ import { PrismaClient } from "../generated/prisma/client.js";
 import { fillOneDayTwse, fillTodayTpex } from "./fill-daily-quotes.js";
 import { calculateTechnicalIndicators } from "./calculate-technical-indicators.js";
 import { runScreener } from "./run-screener.js";
+import { fillOneDayValuation } from "./fill-gap-valuation.js";
+import { calculateOneDayHeat } from "./calculate-industry-heat.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -46,6 +48,8 @@ async function main() {
   let todayQuotesWritten = 0;
   let todayDerivativesSkipped = 0;
   let candidateCount = 0;
+  let valuationsWritten = 0;
+  let heatSectorCount = 0;
 
   // 2. 檢查缺漏
   let gapDates: string[] = [];
@@ -108,6 +112,28 @@ async function main() {
     throw new PipelineStepError("計算技術指標", "計算失敗", err);
   }
 
+  // 5.5 抓取估值（PE/PB/殖利率）：失敗不中斷 pipeline，其餘步驟照跑
+  try {
+    const valuationResult = await fillOneDayValuation(new Date(todayStr));
+    valuationsWritten = valuationResult.twse.processed + valuationResult.tpex.processed;
+  } catch (err) {
+    console.error(`[抓取估值] 處理日期 ${todayStr} 失敗（不中斷，繼續後續步驟）:`, err instanceof Error ? err.message : err);
+  }
+
+  // 5.6 計算產業熱度（依最新一個有 DailyQuote 資料的日子）：失敗不中斷 pipeline
+  try {
+    const latestQuote = await prisma.dailyQuote.findFirst({
+      orderBy: { date: "desc" },
+      select: { date: true },
+    });
+    if (latestQuote) {
+      const heatResult = await calculateOneDayHeat(latestQuote.date);
+      heatSectorCount = heatResult.sectorCount;
+    }
+  } catch (err) {
+    console.error("[產業熱度] 計算失敗（不中斷，繼續後續步驟）:", err instanceof Error ? err.message : err);
+  }
+
   // 6. 跑篩選
   try {
     const screenerResult = await runScreener();
@@ -125,6 +151,8 @@ async function main() {
   console.log(`補齊缺漏天數: ${gapDaysFilled}`);
   console.log(`今日新增報價筆數: ${todayQuotesWritten}`);
   console.log(`今日跳過權證/可轉債: ${todayDerivativesSkipped} 筆`);
+  console.log(`今日估值寫入筆數: ${valuationsWritten}`);
+  console.log(`產業熱度計算產業數: ${heatSectorCount}`);
   console.log(`篩選出候選股: ${candidateCount} 檔`);
 }
 
