@@ -10,6 +10,7 @@
 - `scripts/calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線、波動度、最大回撤、ATR、RSI、MACD 狀態等技術指標。
 - `scripts/run-screener.ts`：依條件（`scripts/screener-conditions.json`）跑全市場篩選，產出候選觀察股清單。
 - `scripts/calculate-screen-score.ts`：九因子加權，對全市場一般股票算出 0~100 的 `screenScore` 並輸出排名（篩選之外的全市場排序，兩者互補）。
+- `scripts/calculate-breakout-strength.ts`：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（觸發 → 資格門檻 → 六項強度評分），評分公式皆單調遞增，與 `calculate-screen-score.ts` 的中庸式設計哲學相反。
 - `scripts/fill-gap-valuation.ts`：抓取指定日期的個股估值（本益比/股價淨值比/殖利率）寫入 `StockValuation`，TWSE 與 TPEx 皆支援任意歷史日期。
 - `scripts/calculate-industry-heat.ts`：依每日報價計算各產業等權熱度（平均漲跌幅、漲跌家數、排名）寫入 `IndustryHeatSnapshot`，支援回補多個交易日。
 - `scripts/update-shares-outstanding.ts`：從 MOPS 公開 CSV 更新各股票已發行普通股數（月頻手動執行；市值用「股數 × 收盤價」現算，不落地存欄位）。
@@ -50,6 +51,9 @@ npx tsx scripts/run-screener.ts
 
 # 算全市場評分排名（不帶 --date 則用最新交易日）
 npx tsx scripts/calculate-screen-score.ts --date=2026-08-18
+
+# 篩出帶量突破候選股並依強度排名（不帶 --date 則用最新交易日）
+npx tsx scripts/calculate-breakout-strength.ts --date=2026-08-18
 
 # 抓取指定日期的個股估值（不帶 --date 則抓今天）
 npx tsx scripts/fill-gap-valuation.ts --date=2026-08-18
