@@ -18,6 +18,7 @@ import {
   computeBase,
   computeProximityToHigh,
   computeMarketWideReturns,
+  computeCandleShape,
   type HistoryPoint,
 } from "./breakout-shared.js";
 
@@ -51,6 +52,9 @@ interface MisRawRow {
   y?: string; // 昨收
   v?: string; // 累計成交量（張，可能缺失或 "-"）
   d?: string; // 日期
+  o?: string; // 開盤價（可能缺失或 "-"）
+  h?: string; // 盤中至今最高價（可能缺失或 "-"）
+  l?: string; // 盤中至今最低價（可能缺失或 "-"）
 }
 
 interface MisQuote {
@@ -60,6 +64,9 @@ interface MisQuote {
   prevClose: number | null;
   cumulativeVolume: number;
   date: string | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
 }
 
 function exChPrefix(market: Market): string {
@@ -114,6 +121,12 @@ async function fetchMisBatch(codes: { code: string; market: Market }[]): Promise
         prevCloseRaw === undefined || prevCloseRaw === "-" ? NaN : parseFloat(prevCloseRaw);
       const prevClose = Number.isFinite(prevCloseParsed) && prevCloseParsed > 0 ? prevCloseParsed : null;
 
+      const parsePositive = (raw: string | undefined): number | null => {
+        if (raw === undefined || raw === "-") return null;
+        const parsed = parseFloat(raw);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+      };
+
       quotes.push({
         code: row.c,
         name: row.n,
@@ -121,6 +134,9 @@ async function fetchMisBatch(codes: { code: string; market: Market }[]): Promise
         prevClose,
         cumulativeVolume,
         date: parseMisDate(row.d),
+        open: parsePositive(row.o),
+        high: parsePositive(row.h),
+        low: parsePositive(row.l),
       });
     }
     return { quotes, failed: false };
@@ -173,6 +189,7 @@ interface CandidateResult {
   estimatedFullDayVolume: number;
   marketCap: number;
   scores: {
+    candleShape: number;
     volumeStrength: number;
     breakoutMargin: number;
     firstBar: number;
@@ -416,6 +433,16 @@ async function main() {
     const volumeStrengthScore = computeVolumeStrength(t.volumeRatio);
     const breakoutMarginScore = computeBreakoutMargin(t.price, t.bollingerUpper);
 
+    // 即時型態：close 用當下即時價，high/low 用當日至今盤中最高/最低，收盤前仍可能變動，非最終分數
+    const misQuoteForShape = misQuotes.get(t.code)!;
+    const candleShapeResult = computeCandleShape({
+      open: misQuoteForShape.open,
+      high: misQuoteForShape.high,
+      low: misQuoteForShape.low,
+      close: t.price,
+    });
+    if (candleShapeResult.degraded) degraded.push("candleShape");
+
     const firstBarResult = computeFirstBar(firstBarSeriesByStock, t.code);
     if (firstBarResult.degraded) degraded.push("firstBar");
 
@@ -434,6 +461,7 @@ async function main() {
     if (rs.historyDays < 2) degraded.push("relativeStrength");
 
     const scores = {
+      candleShape: candleShapeResult.score,
       volumeStrength: volumeStrengthScore,
       breakoutMargin: breakoutMarginScore,
       firstBar: firstBarResult.score,
@@ -443,6 +471,7 @@ async function main() {
     };
 
     const totalScore =
+      scores.candleShape * WEIGHTS.candleShape +
       scores.volumeStrength * WEIGHTS.volumeStrength +
       scores.breakoutMargin * WEIGHTS.breakoutMargin +
       scores.firstBar * WEIGHTS.firstBar +

@@ -18,6 +18,7 @@ import {
   computeBase,
   computeProximityToHigh,
   computeMarketWideReturns,
+  computeCandleShape,
   type HistoryPoint,
 } from "./breakout-shared.js";
 
@@ -33,6 +34,9 @@ function toIsoDate(date: Date): string {
 interface QuoteRow {
   stockCode: string;
   name: string;
+  open: number;
+  high: number;
+  low: number;
   close: number;
   change: number;
   volume: number;
@@ -50,6 +54,9 @@ async function fetchTodayQuotes(date: Date): Promise<QuoteRow[]> {
     where: { date, stock: { securityType: "stock" } },
     select: {
       stockCode: true,
+      open: true,
+      high: true,
+      low: true,
       close: true,
       change: true,
       volume: true,
@@ -60,6 +67,9 @@ async function fetchTodayQuotes(date: Date): Promise<QuoteRow[]> {
   return quotes.map((q) => ({
     stockCode: q.stockCode,
     name: q.stock.name,
+    open: q.open,
+    high: q.high,
+    low: q.low,
     close: q.close,
     change: q.change,
     volume: Number(q.volume),
@@ -82,6 +92,7 @@ interface BreakoutResult {
   changePercent: number;
   volumeRatio: number;
   scores: {
+    candleShape: number;
     volumeStrength: number;
     breakoutMargin: number;
     firstBar: number;
@@ -273,6 +284,14 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
     const volumeStrengthScore = computeVolumeStrength(volumeRatio);
     const breakoutMarginScore = computeBreakoutMargin(q.close, bollingerUpper);
 
+    const candleShapeResult = computeCandleShape({
+      open: q.open,
+      high: q.high,
+      low: q.low,
+      close: q.close,
+    });
+    if (candleShapeResult.degraded) degraded.push("candleShape");
+
     const firstBarResult = computeFirstBar(firstBarSeriesByStock, q.stockCode);
     if (firstBarResult.degraded) degraded.push("firstBar");
 
@@ -291,6 +310,7 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
     if (rs.historyDays < 2) degraded.push("relativeStrength");
 
     const scores = {
+      candleShape: candleShapeResult.score,
       volumeStrength: volumeStrengthScore,
       breakoutMargin: breakoutMarginScore,
       firstBar: firstBarResult.score,
@@ -300,6 +320,7 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
     };
 
     const totalScore =
+      scores.candleShape * WEIGHTS.candleShape +
       scores.volumeStrength * WEIGHTS.volumeStrength +
       scores.breakoutMargin * WEIGHTS.breakoutMargin +
       scores.firstBar * WEIGHTS.firstBar +

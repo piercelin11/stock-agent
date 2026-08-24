@@ -2,18 +2,19 @@ import { PrismaClient } from "../generated/prisma/client.js";
 
 // ---- 資格門檻（可調整，calculate-breakout-strength.ts 與 check-intraday-breakout.ts 共用）----
 export const GATES = {
-  minMarketCap: 5_000_000_000, // 50 億台幣
+  minMarketCap: 3_000_000_000, // 30 億台幣（原 50 億）
   minVolumeShares: 1_000_000, // 1000 張
 };
 
 // ---- 強度評分權重（總和為 1，不需再正規化）----
 export const WEIGHTS = {
-  volumeStrength: 0.2,
-  breakoutMargin: 0.15,
-  firstBar: 0.2,
-  base: 0.2,
-  proximityToHigh: 0.15,
-  relativeStrength: 0.1,
+  candleShape: 0.15,
+  volumeStrength: 0.17,
+  breakoutMargin: 0.1275,
+  firstBar: 0.17,
+  base: 0.17,
+  proximityToHigh: 0.1275,
+  relativeStrength: 0.085,
 };
 
 export const TRIGGER_VOLUME_RATIO = 2.0;
@@ -128,8 +129,50 @@ export function computeVolumeStrength(ratio: number): number {
 // ---- 3b. breakoutMargin ----
 export function computeBreakoutMargin(close: number, bollingerUpper: number): number {
   const marginPct = ((close - bollingerUpper) / bollingerUpper) * 100;
-  const score = 40 + (marginPct / 3) * (100 - 40);
-  return clip(score, 40, 100);
+  if (marginPct <= 3) {
+    return clip(40 + (marginPct / 3) * 60, 40, 100);
+  }
+  // 超過3%乖離後，每多1%扣5分，下限60分（避免跟乖離不足的股票混在同一分數帶）
+  return clip(100 - (marginPct - 3) * 5, 60, 100);
+}
+
+// ---- 3g. candleShape ----
+export interface CandleInput {
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  close: number;
+}
+
+export function computeCandleShape(candle: CandleInput): { score: number; degraded: boolean } {
+  const { open, high, low, close } = candle;
+
+  if (open === null || high === null || low === null) {
+    return { score: 50, degraded: true };
+  }
+
+  const range = high - low;
+  if (range <= 0) {
+    // 一字線（例如鎖漲停無量交易），視為最強型態
+    return { score: 100, degraded: false };
+  }
+
+  // 上影線分數：無上影線=100分，上影線佔全天振幅40%以上=40分（floor），中間線性
+  const upperShadowRatio = (high - Math.max(open, close)) / range;
+  const shadowScore = clip(100 - (upperShadowRatio / 0.4) * 60, 40, 100);
+
+  // 收盤位置分數：收在最高點=100分，收在最低點=40分（floor）
+  const closeLocation = (close - low) / range;
+  const locScore = clip(40 + closeLocation * 60, 40, 100);
+
+  let score = shadowScore * 0.5 + locScore * 0.5;
+
+  // 收黑（綠K）額外懲罰：不論上影線多短，當日表態轉弱是獨立警訊，直接封頂
+  if (close < open) {
+    score = Math.min(score, 50);
+  }
+
+  return { score: clip(score, 0, 100), degraded: false };
 }
 
 // ---- 3c. firstBar ----
