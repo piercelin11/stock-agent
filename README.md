@@ -10,12 +10,13 @@
 - `scripts/calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線、波動度、最大回撤、ATR、RSI、MACD 狀態等技術指標。
 - `scripts/run-screener.ts`：依條件（`scripts/screener-conditions.json`）跑全市場篩選，產出候選觀察股清單。
 - `scripts/calculate-screen-score.ts`：九因子加權，對全市場一般股票算出 0~100 的 `screenScore` 並輸出排名（篩選之外的全市場排序，兩者互補）。
-- `scripts/calculate-breakout-strength.ts`：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（觸發 → 資格門檻 → 六項強度評分），評分公式皆單調遞增，與 `calculate-screen-score.ts` 的中庸式設計哲學相反。核心常數與評分函式抽在 `scripts/breakout-shared.ts`，與 `check-intraday-breakout.ts` 共用。
+- `scripts/calculate-breakout-strength.ts`：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（觸發 → 資格門檻 → 七項強度評分，含 K 棒型態）。核心常數與評分函式抽在 `scripts/breakout-shared.ts`，與 `check-intraday-breakout.ts` 共用。
 - `scripts/check-intraday-breakout.ts`：盤中一次性快照篩選，把 `calculate-breakout-strength.ts` 的邏輯提前套用在 `mis.twse.com.tw` 即時報價上，手動執行看收盤前該注意哪些股票。不排程、不接進 `daily-pipeline.ts`。
 - `scripts/fill-gap-valuation.ts`：抓取指定日期的個股估值（本益比/股價淨值比/殖利率）寫入 `StockValuation`，TWSE 與 TPEx 皆支援任意歷史日期。
 - `scripts/calculate-industry-heat.ts`：依每日報價計算各產業等權熱度（平均漲跌幅、漲跌家數、排名）寫入 `IndustryHeatSnapshot`，支援回補多個交易日。
 - `scripts/update-shares-outstanding.ts`：從 MOPS 公開 CSV 更新各股票已發行普通股數（月頻手動執行；市值用「股數 × 收盤價」現算，不落地存欄位）。
 - `scripts/fill-institutional-trading.ts`：抓取指定日期的 TWSE（`T86`）+ TPEx（`tpex_3insti_daily_trading`）三大法人買賣超寫入 `InstitutionalTrading`。TWSE 支援任意歷史日期，TPEx 不支援日期參數、永遠回傳「目前最新一天」（跟 TPEx 報價 API 同樣限制）。
+- `scripts/backfill-institutional-trading.ts`：用 FinMind API 逐支股票回補近 480 天歷史三大法人買賣超至 `InstitutionalTrading`，補上 `fill-institutional-trading.ts` 只能抓當天資料的歷史缺口。
 - `scripts/daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」五步：補齊今日 TWSE+TPEx 報價 → 抓今日 TWSE+TPEx 三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 算技術指標 → 算產業熱度。歷史缺漏回補、跑篩選皆已移出，改為個別手動執行對應腳本。
 - `scripts/fetch-candidate-details.ts`：讀取篩選結果候選股清單，逐支抓取籌碼面（三大法人買賣超）、基本面（月營收、季報）、消息面（新聞）四類資料，寫入資料庫。
 
@@ -71,6 +72,9 @@ npx tsx scripts/update-shares-outstanding.ts
 
 # 抓取指定日期的三大法人籌碼（不帶 --date 則抓今天；TPEx 端不支援指定日期，永遠回傳最新一天）
 npx tsx scripts/fill-institutional-trading.ts --date=2026-08-21
+
+# 回補近 480 天歷史三大法人籌碼（逐支股票，可用 BACKFILL_LIMIT 限制測試）
+npx tsx scripts/backfill-institutional-trading.ts
 
 # 每日主流程（補齊今日 TWSE+TPEx 報價 → 抓今日籌碼 → 抓今日估值 → 算技術指標 → 算產業熱度）
 npx tsx scripts/daily-pipeline.ts
