@@ -43,6 +43,7 @@ interface FillResult {
   newStocks: number;
   skippedDerivatives: number;
   isNonTradingDay: boolean;
+  isStaleDate?: boolean; // TPEx 專用：回傳日期與預期的「今天」不符（無法指定歷史日期造成），此時已跳過寫入
 }
 
 function toApiDate(date: string): string {
@@ -268,8 +269,11 @@ export async function fillOneDayTwse(date: string): Promise<FillResult> {
   return { date, processed, newStocks, skippedDerivatives, isNonTradingDay: false };
 }
 
-// 補齊「今天」的上櫃（TPEx）報價，TPEx OpenAPI 不支援指定歷史日期，只能拿到目前最新一天
-export async function fillTodayTpex(): Promise<FillResult> {
+// 補齊「今天」的上櫃（TPEx）報價，TPEx OpenAPI 不支援指定歷史日期，只能拿到目前最新一天。
+// expectedIsoDate 預設為系統當天日期，若 API 回傳的日期與預期不符（非交易日或資料尚未更新），
+// 跳過寫入以避免把舊資料當成當日資料覆蓋進去，並回傳 isStaleDate 供呼叫端統計警告。
+export async function fillTodayTpex(expectedIsoDate?: string): Promise<FillResult> {
+  const expected = expectedIsoDate ?? new Date().toISOString().slice(0, 10);
   const result = await fetchTpexQuotes();
 
   if (!result) {
@@ -278,12 +282,19 @@ export async function fillTodayTpex(): Promise<FillResult> {
   }
 
   const { date, rows } = result;
+  if (date !== expected) {
+    console.warn(
+      `⚠ TPEx 報價回傳日期為 ${date}，與預期日期 ${expected} 不同（可能非交易日或資料尚未更新），跳過寫入`,
+    );
+    return { date, processed: 0, newStocks: 0, skippedDerivatives: 0, isNonTradingDay: false, isStaleDate: true };
+  }
+
   const { processed, newStocks, skippedDerivatives } = await writeRows(rows, date, Market.TPEx);
 
   console.log(
     `${date} TPEx 處理完成：共 ${processed} 筆（一般股票/ETF/特別股/其他），跳過權證/可轉債 ${skippedDerivatives} 筆，新增 ${newStocks} 支之前沒見過的 Stock`,
   );
-  return { date, processed, newStocks, skippedDerivatives, isNonTradingDay: false };
+  return { date, processed, newStocks, skippedDerivatives, isNonTradingDay: false, isStaleDate: false };
 }
 
 function parseArgs(): { date: string } {

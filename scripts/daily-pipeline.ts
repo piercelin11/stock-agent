@@ -2,35 +2,16 @@ import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../generated/prisma/client.js";
 import { fillOneDayTwse, fillTodayTpex } from "./fill-daily-quotes.js";
-import { calculateTechnicalIndicators } from "./calculate-technical-indicators.js";
-import { runScreener } from "./run-screener.js";
+import { fillOneDayInstitutional } from "./fill-institutional-trading.js";
 import { fillOneDayValuation } from "./fill-gap-valuation.js";
+import { calculateTechnicalIndicators } from "./calculate-technical-indicators.js";
 import { calculateOneDayHeat } from "./calculate-industry-heat.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
 
-const FILL_DELAY_MS = 2500;
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
-}
-
-function listDatesBetween(startExclusive: Date, endInclusive: Date): string[] {
-  const dates: string[] = [];
-  const cursor = new Date(startExclusive);
-  cursor.setDate(cursor.getDate() + 1);
-
-  while (cursor <= endInclusive) {
-    dates.push(formatDate(cursor));
-    cursor.setDate(cursor.getDate() + 1);
-  }
-
-  return dates;
 }
 
 class PipelineStepError extends Error {
@@ -44,83 +25,69 @@ async function main() {
   const startedAt = new Date();
   console.log(`===== 每日主流程開始 ${startedAt.toISOString()} =====`);
 
-  let gapDaysFilled = 0;
-  let todayQuotesWritten = 0;
-  let todayDerivativesSkipped = 0;
-  let candidateCount = 0;
+  let quotesWritten = 0;
+  let quotesDerivativesSkipped = 0;
+  let institutionalWritten = 0;
   let valuationsWritten = 0;
+  let indicatorsProcessed = 0;
   let heatSectorCount = 0;
+  let warningCount = 0;
 
-  // 2. 檢查缺漏
-  let gapDates: string[] = [];
-  try {
-    const latest = await prisma.dailyQuote.findFirst({
-      orderBy: { date: "desc" },
-      select: { date: true },
-    });
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    if (latest) {
-      const latestDate = new Date(latest.date);
-      latestDate.setHours(0, 0, 0, 0);
-      gapDates = listDatesBetween(latestDate, today);
-    } else {
-      // 資料庫完全沒有資料，只補today
-      gapDates = [];
-    }
-
-    if (gapDates.length === 0) {
-      console.log("沒有缺漏日期，資料已是最新。");
-    } else {
-      console.log(`發現 ${gapDates.length} 個缺漏日期: ${gapDates.join(", ")}`);
-    }
-  } catch (err) {
-    throw new PipelineStepError("檢查缺漏", "查詢 DailyQuote 最新日期失敗", err);
-  }
-
-  // 3. 補齊缺漏（僅 TWSE，TPEx OpenAPI 不支援指定歷史日期）
-  for (const date of gapDates) {
-    try {
-      const result = await fillOneDayTwse(date);
-      if (!result.isNonTradingDay) {
-        gapDaysFilled++;
-      }
-    } catch (err) {
-      throw new PipelineStepError("補齊缺漏", `處理日期 ${date} 失敗`, err);
-    }
-    await sleep(FILL_DELAY_MS);
-  }
-
-  // 4. 確保今天的資料也是最新的（TWSE + TPEx）
   const todayStr = formatDate(new Date());
+
+  // 1. 補齊今天的報價（TWSE + TPEx）
+  let twseHasData = false;
+  let tpexHasData = false;
   try {
     const twseResult = await fillOneDayTwse(todayStr);
-    await sleep(FILL_DELAY_MS);
-    const tpexResult = await fillTodayTpex();
-    todayQuotesWritten = twseResult.processed + tpexResult.processed;
-    todayDerivativesSkipped = twseResult.skippedDerivatives + tpexResult.skippedDerivatives;
+    const tpexResult = await fillTodayTpex(todayStr);
+    quotesWritten = twseResult.processed + tpexResult.processed;
+    quotesDerivativesSkipped = twseResult.skippedDerivatives + tpexResult.skippedDerivatives;
+    twseHasData = !twseResult.isNonTradingDay;
+    tpexHasData = !tpexResult.isStaleDate && !tpexResult.isNonTradingDay;
+    if (tpexResult.isStaleDate) warningCount++;
   } catch (err) {
-    throw new PipelineStepError("補齊今日資料", `處理日期 ${todayStr} 失敗`, err);
+    throw new PipelineStepError("補齊今日報價", `處理日期 ${todayStr} 失敗`, err);
   }
 
-  // 5. 重新計算技術指標
+  // TWSE 沒開盤且 TPEx 也拿不到當日資料：今天沒有任何當日資料可用，後面的計算沒有意義，提前結束
+  if (!twseHasData && !tpexHasData) {
+    console.log(`${todayStr} TWSE 與 TPEx 皆無當日資料，判定為非交易日，跳過後續所有步驟`);
+    const finishedAt = new Date();
+    const elapsedSeconds = ((finishedAt.getTime() - startedAt.getTime()) / 1000).toFixed(1);
+    console.log(`\n===== 每日主流程結束（提前結束） ${finishedAt.toISOString()} =====`);
+    console.log(`總耗時: ${elapsedSeconds} 秒`);
+    console.log(`今日新增報價筆數: ${quotesWritten}`);
+    console.log(`今日警告: ${warningCount} 則`);
+    return;
+  }
+
+  // 2. 抓取今天的三大法人籌碼（TWSE + TPEx）
   try {
-    await calculateTechnicalIndicators();
+    const institutionalResult = await fillOneDayInstitutional(todayStr);
+    institutionalWritten = institutionalResult.twse.processed + institutionalResult.tpex.processed;
+    if (institutionalResult.tpex.isStaleDate) warningCount++;
   } catch (err) {
-    throw new PipelineStepError("計算技術指標", "計算失敗", err);
+    throw new PipelineStepError("抓取今日籌碼", `處理日期 ${todayStr} 失敗`, err);
   }
 
-  // 5.5 抓取估值（PE/PB/殖利率）：失敗不中斷 pipeline，其餘步驟照跑
+  // 3. 抓取今天的估值（本益比/股價淨值比/殖利率，TWSE + TPEx）
   try {
     const valuationResult = await fillOneDayValuation(new Date(todayStr));
     valuationsWritten = valuationResult.twse.processed + valuationResult.tpex.processed;
   } catch (err) {
-    console.error(`[抓取估值] 處理日期 ${todayStr} 失敗（不中斷，繼續後續步驟）:`, err instanceof Error ? err.message : err);
+    throw new PipelineStepError("抓取今日估值", `處理日期 ${todayStr} 失敗`, err);
   }
 
-  // 5.6 計算產業熱度（依最新一個有 DailyQuote 資料的日子）：失敗不中斷 pipeline
+  // 4. 重新計算技術指標
+  try {
+    const indicatorResult = await calculateTechnicalIndicators();
+    indicatorsProcessed = indicatorResult.processed;
+  } catch (err) {
+    throw new PipelineStepError("計算技術指標", "計算失敗", err);
+  }
+
+  // 5. 計算產業熱度（依最新一個有 DailyQuote 資料的日子，而非寫死今天，避免假日執行時查無資料）
   try {
     const latestQuote = await prisma.dailyQuote.findFirst({
       orderBy: { date: "desc" },
@@ -131,16 +98,7 @@ async function main() {
       heatSectorCount = heatResult.sectorCount;
     }
   } catch (err) {
-    console.error("[產業熱度] 計算失敗（不中斷，繼續後續步驟）:", err instanceof Error ? err.message : err);
-  }
-
-  // 6. 跑篩選
-  try {
-    const screenerResult = await runScreener();
-    candidateCount = screenerResult?.candidateCount ?? 0;
-    console.log(`今日篩選出 ${candidateCount} 檔候選股`);
-  } catch (err) {
-    throw new PipelineStepError("跑篩選", "篩選失敗", err);
+    throw new PipelineStepError("計算產業熱度", "計算失敗", err);
   }
 
   const finishedAt = new Date();
@@ -148,12 +106,13 @@ async function main() {
 
   console.log(`\n===== 每日主流程結束 ${finishedAt.toISOString()} =====`);
   console.log(`總耗時: ${elapsedSeconds} 秒`);
-  console.log(`補齊缺漏天數: ${gapDaysFilled}`);
-  console.log(`今日新增報價筆數: ${todayQuotesWritten}`);
-  console.log(`今日跳過權證/可轉債: ${todayDerivativesSkipped} 筆`);
+  console.log(`今日新增報價筆數: ${quotesWritten}`);
+  console.log(`今日跳過權證/可轉債: ${quotesDerivativesSkipped} 筆`);
+  console.log(`今日籌碼寫入筆數: ${institutionalWritten}`);
   console.log(`今日估值寫入筆數: ${valuationsWritten}`);
+  console.log(`技術指標處理筆數: ${indicatorsProcessed}`);
   console.log(`產業熱度計算產業數: ${heatSectorCount}`);
-  console.log(`篩選出候選股: ${candidateCount} 檔`);
+  console.log(`今日警告: ${warningCount} 則`);
 }
 
 main()

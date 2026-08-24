@@ -8,8 +8,7 @@ const prisma = new PrismaClient({ adapter });
 const FINMIND_TOKEN = process.env.FINMIND_API_KEY;
 const FINMIND_URL = "https://api.finmindtrade.com/api/v4/data";
 
-const CALENDAR_DAYS_BACK = 120;
-const RECENT_THRESHOLD_DAYS = 3;
+const CALENDAR_DAYS_BACK = 480;
 const REQUEST_DELAY_MS = 6500;
 const PROGRESS_INTERVAL = 50;
 
@@ -76,28 +75,12 @@ async function main() {
   startDateObj.setDate(startDateObj.getDate() - CALENDAR_DAYS_BACK);
   const startDate = formatDate(startDateObj);
 
-  const recentThreshold = new Date(today);
-  recentThreshold.setDate(recentThreshold.getDate() - RECENT_THRESHOLD_DAYS);
-
   let processed = 0;
-  let skipped = 0;
   let quotesWritten = 0;
   const failed: string[] = [];
 
   for (const stock of stocks) {
     try {
-      const latest = await prisma.dailyQuote.findFirst({
-        where: { stockCode: stock.code },
-        orderBy: { date: "desc" },
-        select: { date: true },
-      });
-
-      if (latest && latest.date >= recentThreshold) {
-        skipped++;
-        processed++;
-        continue;
-      }
-
       const rows = await fetchPriceHistory(stock.code, startDate, endDate);
 
       for (const row of rows) {
@@ -147,7 +130,6 @@ async function main() {
   console.log("\n===== 回補完成 =====");
   console.log(`處理股票數: ${processed}`);
   console.log(`寫入 DailyQuote 筆數: ${quotesWritten}`);
-  console.log(`跳過（已有近期資料）: ${skipped}`);
   console.log(`失敗: ${failed.length}`);
   if (failed.length > 0) {
     console.log(`失敗代號清單: ${failed.join(", ")}`);
