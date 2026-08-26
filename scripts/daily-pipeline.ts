@@ -16,7 +16,7 @@ function formatDate(d: Date): string {
 
 class PipelineStepError extends Error {
   constructor(step: string, detail: string, cause: unknown) {
-    super(`[${step}] ${detail}: ${cause instanceof Error ? cause.message : String(cause)}`);
+    super(`[${step}] ${detail}: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
     this.name = "PipelineStepError";
   }
 }
@@ -119,6 +119,9 @@ main()
   .catch((err) => {
     console.error("\n===== 每日主流程執行失敗 =====");
     console.error(err instanceof Error ? err.message : err);
+    if (err instanceof Error && err.cause) {
+      console.error("原因 (cause):", err.cause);
+    }
     process.exitCode = 1;
   })
   .finally(async () => {
