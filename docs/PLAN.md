@@ -1,236 +1,126 @@
-# 突破選股評分機制調整計劃
+# 盤後選股 v2（投信吃貨訊號）— `calculate-accumulation-score.ts`
 
 ## 背景與目標
 
-現行突破選股腳本（`breakout-shared.ts` / `calculate-breakout-strength.ts` / `check-intraday-breakout.ts`）評分機制存在一個結構性缺陷：所有維度都只用「收盤價」做單點比較，未使用當日 K 棒的 open/high/low，因此無法辨識「爆量突破但收黑或留長上影線」這種賣壓訊號。
+ROADMAP 第 1 階段。現有 `calculate-breakout-strength.ts` 抓「已發生的帶量突破事件」（門檻式篩選）。本任務做互補的「醞釀期」偵測：找**還沒**出現第一根突破、但籌碼/技術面已在蓄勢的股票（投信默默建倉 + 帶寬收斂 + 窒息量）。
 
-本次調整經與使用者討論確認，範圍為：
+計分採**乘法結構**：`最終分數 = 籌碼分數 × 技術就緒係數`。籌碼是主因，技術面只放大或抑制它、不能取代它。不用硬門檻（連續係數取代 cliff 式篩選），因為「投信連買幾天算數」「集中度多高算高」這些數字還沒被資料庫實際分布驗證過，先跑排名結果再肉眼/回測校準參數。落地方式比照 `calculate-screen-score.ts`：純函式、匯出 `calculateAccumulationScore(date)`、結果寫 JSON 不寫資料庫。
 
-1. **新增 K 棒型態評分維度**（`candleShape`），放在評分層，不放進觸發層或門檻層。
-2. **權重重分配**：採用「方案一：保守等比例縮放」。
-3. **修正 `breakoutMargin` 邏輯**：由現行「乖離越大分數越高（封頂）」改為「鐘型曲線」，避免獎勵過度乖離（跳空/追高風險）。
-4. **`firstBar` 邏輯維持不動**（使用者刻意保留「已站上軌 3 天以上仍給 20 分」的緩衝，不做剔除）。
-5. **`GATES.minMarketCap` 調降至 30 億台幣**；`GATES.minVolumeShares`（1000 張）維持不變。
-6. **盤中量能線性外推問題暫不處理**（使用者掃描時間點在中午過後，誤差已大幅緩解，優先度最低，本次不動）。
+已納入的落地細節：a/b 重疊改用「因子 b 排除投信」從結構上消除（非事後校準）、連續天數脆弱性改用頻率型指標、淨額帶正負號、視窗加總（非逐日比例平均）、絕對流動性下限（pool eligibility）、與突破清單互斥、輸出格式對齊突破腳本以利回測。
 
----
+## 資料現況（已確認，無前置作業）
 
-## 任務一：`breakout-shared.ts`
+`InstitutionalTrading` 已完整回補：324 個交易日（2025-05-02 → 2026-08-26）、589,786 筆、1,989 檔股票。投信 / 其他法人分數的 20 天視窗有充足歷史。（PROGRESS.md line 28「backfill 從未執行」為過時註記，實際已跑過，收尾時順手更正該行。）
 
-### 1.1 新增 `computeCandleShape` 函式
+## 設計
 
-在檔案中新增以下函式（可放在 `computeBreakoutMargin` 之後）：
+### 新檔案
 
-```ts
-export interface CandleInput {
-  open: number | null;
-  high: number | null;
-  low: number | null;
-  close: number;
-}
+- **`scripts/accumulation-shared.ts`** — 純函式庫（無 Prisma/CLI），比照 `breakout-shared.ts`。放常數（權重、視窗天數、`MIN_AVG_VOLUME_SHARES`、`READINESS_FLOOR`）與各評分函式、`computeReadinessCoefficient`、`combineFinalScore`。
+- **`scripts/calculate-accumulation-score.ts`** — 主腳本，比照 `calculate-screen-score.ts` 結構（`buildSnapshots` → 算籌碼分數 + 技術就緒係數 → 相乘排名 → 寫 `data/accumulation-score-results/{date}.json`）。
 
-export function computeCandleShape(
-  candle: CandleInput,
-): { score: number; degraded: boolean } {
-  const { open, high, low, close } = candle;
+### 重用既有程式
 
-  if (open === null || high === null || low === null) {
-    return { score: 50, degraded: true };
+- `computeBase(latestBandwidth, bandwidthHistory)` — `breakout-shared.ts:215`，**直接 import**。它算的就是「帶寬歷史百分位（深度）+ 低帶寬持續天數」，即壓縮度分數。口徑與突破腳本一致，未來兩系統結果可對比。需 ≥40 天歷史（`BASE_MIN_HISTORY_DAYS`），不足回傳 `{degraded:true}`。
+- `fetchHistoryWindow(prisma, asOfDate, codes, maxDays)` — `breakout-shared.ts:58`，抓 close + bollingerBandwidth 視窗，餵給 `computeBase` 與窒息量的多日量比。
+- `rankScore(values, lowerIsBetter, naScore)` — `breakout-shared.ts:28`，各子指標轉 cross-sectional 百分位。**維持 codebase 一致的正規化風格，不另發明算法。**
+- `clip` — `breakout-shared.ts:47`。
+- 常數命名慣例：比照 `RS_WINDOW_DAYS` / `BASE_MAX_WINDOW_DAYS`（`accumulation-shared.ts` 定 `INSTITUTIONAL_WINDOW_DAYS = 20`、`SQUEEZE_VOLUME_WINDOW_DAYS = 5`、`MIN_AVG_VOLUME_SHARES = 500_000`、`READINESS_FLOOR = 0.5` 等，寫死不留活動範圍）。
+- 候選池查詢比照 `fetchTodayQuotes` — `calculate-breakout-strength.ts:52`（`securityType: "stock"`）。
+
+### 候選池資格篩選（pool eligibility，非訊號門檻）
+
+在算分數前先排除：
+
+1. **`close > bollingerUpper`**（今日已站上上軌）→ 與 `calculate-breakout-strength.ts:131` 的觸發條件互斥，兩份清單天生不重疊。需當日 `TechnicalIndicator.bollingerUpper`。
+2. **絕對流動性下限**：近 20 日均量（`TechnicalIndicator.volumeMa20`）低於 `MIN_AVG_VOLUME_SHARES`（初值 500_000 股 = 500 張，寫在 shared 常數）→ 剔除長期沒人交易的死股，避免「量/均量」比值天生不穩的冷門股系統性霸榜。
+3. `volumeMa20` 為 null 或 ≤ 0 → 無法算窒息量，剔除。
+
+`sharesOutstanding` 為 null **不**剔除（投信分數對該股 degraded 給中性分即可）。
+
+### Step 1：籌碼分數（0~100，主排序依據）
+
+`籌碼分數 = 投信分數 × 0.7 + 其他法人分數 × 0.3`
+投信佔七成（主因子）；其他法人只當「確認性訊號」——外資/自營商方向與投信一致代表更多資金同步吃貨，不一致也不重扣、只是少加分。
+
+**投信分數** — `InstitutionalTrading.investmentTrustNetBuy`，近 `INSTITUTIONAL_WINDOW_DAYS`(=20) 個交易日，兩子指標各半權重、各自 `rankScore` 正規化後合併：
+- 子 1「買超頻率」= 窗內 `investmentTrustNetBuy > 0` 的天數 ÷ 有資料天數。頻率型，對偶發中斷一天不敏感、**不歸零**（連續天數只當次要參考記進 `detail`，不參與計分）。
+- 子 2「買超佔發行量比例」= 窗內 `investmentTrustNetBuy` 淨額加總 ÷ `sharesOutstanding`（**帶正負號**）。`sharesOutstanding` 為 null → 此子項 degraded，投信分數只用子 1。
+- `rankScore(lowerIsBetter=false)`。窗內有資料天數 < 一半 → 投信分數 degraded 給中性 50。
+
+**其他法人分數** — 排除投信，只算外資 + 自營商，近 20 天：
+- `otherInstitutionRatio = sum(foreignNetBuy + dealerNetBuy) / sum(DailyQuote.volume)` — **比例的加總**（非逐日比例平均，清淡日分母小會暴衝），**帶正負號**（倒貨為負）。
+- 排除投信 → 從結構上消除與投信分數的雙重計數，不再需要事後正交化。
+- `rankScore(lowerIsBetter=false)`。窗內資料不足 → degraded 給 50。
+
+### Step 2：技術就緒係數（0.5~1.0，調節項）
+
+`技術原始分 = 壓縮度分數 × 0.5 + 窒息量分數 × 0.5`（0~100）
+`就緒係數 = READINESS_FLOOR + (1 - READINESS_FLOOR) × 技術原始分 / 100`（`READINESS_FLOOR = 0.5` → 映射到 0.5~1.0）
+
+下限 0.5 是刻意設計：技術面完全沒收斂只把籌碼分數打對折，不歸零、不把股票從排名抹掉（「還沒收斂」≠「沒價值」，可能只是還沒到最佳進場點，肉眼校準時仍要看得到）。連續係數取代 cliff 式剔除，符合「不用硬門檻」原則。
+
+- **壓縮度分數** — 直接 `computeBase(latestBandwidth, bandwidthHistory)`：`latestBandwidth` = 當日 `TechnicalIndicator.bollingerBandwidth`；`bandwidthHistory` = 往前最多 `BASE_MAX_WINDOW_DAYS`(=240) 筆（不含當日，`fetchHistoryWindow` 取）。degraded 由 `computeBase` 自帶（<40 天）。
+- **窒息量分數** — 近 `SQUEEZE_VOLUME_WINDOW_DAYS`(=5) 天平均量比 `mean(DailyQuote.volume[t] / TechnicalIndicator.volumeMa20[t])`（多日平均，非單日，濾隨機低量雜訊）。比值越低越窒息、分數越高：`rankScore(lowerIsBetter=true)`。近5日資料不足3天 → degraded 給 50。
+- 任一子項 degraded → 該子項用中性 50 續算（係數仍算得出），degraded 標記進輸出。
+
+### Step 3：最終分數與輸出
+
+`最終分數 = 籌碼分數 × 就緒係數`
+「投信瘋買、技術面還沒收斂」→ 最終約為籌碼分數的 50~75%，仍排得進前段；「技術面完美收斂、無法人買盤」→ 籌碼分數本身趨近 0，乘上係數依然低，不會誤闖前排。
+
+**待校準參數**（先給預設，跑完看前 20~30 名再調，全寫在 `accumulation-shared.ts` 常數）：
+
+| 參數 | 初值 | 調整方向 |
+|---|---|---|
+| 籌碼分數內部：投信 / 其他法人 | 0.7 / 0.3 | — |
+| 投信分數內部：頻率 / 佔比 | 0.5 / 0.5 | — |
+| 技術原始分：壓縮度 / 窒息量 | 0.5 / 0.5 | — |
+| `READINESS_FLOOR` | 0.5 | 技術面該壓更重 → 降到 0.3~0.2；不該壓那麼重 → 拉到 0.7 |
+
+- 排名、印前 20~30 名到 console（比照 `calculate-screen-score.ts:376-381`），欄位含籌碼分數、就緒係數、最終分數、degraded。
+- 輸出 `data/accumulation-score-results/{date}.json`：
+
+  ```
+  {
+    date, windowDays: INSTITUTIONAL_WINDOW_DAYS,
+    params: { chipWeights, trustSubWeights, techWeights, readinessFloor },
+    poolStats: { totalStocks, excludedAboveBand, excludedIlliquid, scored },
+    results: [
+      { code, name, date, close,
+        chipScore, readinessCoef, finalScore, rank,
+        breakdown: { trustScore, otherInstScore, squeezeScore, quietVolumeScore },
+        detail: { trustBuyFreq, trustConsecutiveDays, trustNetRatio,
+                  otherInstRatio, squeezeDepthDays, avgVolumeRatio5d },
+        degraded: string[] }
+    ]
   }
+  ```
 
-  const range = high - low;
-  if (range <= 0) {
-    // 一字線（例如鎖漲停無量交易），視為最強型態
-    return { score: 100, degraded: false };
-  }
+  `code` + `date` 欄位格式與 `calculate-breakout-strength.ts` 輸出一致 → 之後可寫簡單比對腳本：取某天冷水區 top-N，掃描後續 N 個交易日的 `breakout-strength-results/*.json` 看命中率，驗證預測力。
 
-  // 上影線分數：無上影線=100分，上影線佔全天振幅40%以上=40分（floor），中間線性
-  const upperShadowRatio = (high - Math.max(open, close)) / range;
-  const shadowScore = clip(100 - (upperShadowRatio / 0.4) * 60, 40, 100);
+- CLI：`--date=YYYY-MM-DD`，不帶則取最新 `DailyQuote` 日期。`main()` / `isMain` guard / `prisma.$disconnect()` 比照現有腳本。
 
-  // 收盤位置分數：收在最高點=100分，收在最低點=40分（floor）
-  const closeLocation = (close - low) / range;
-  const locScore = clip(40 + closeLocation * 60, 40, 100);
+## 不做（本版範圍外）
 
-  let score = shadowScore * 0.5 + locScore * 0.5;
+- 參數的資料驅動校準（先跑結果，肉眼看前 20~30 名再調上表參數）。
+- 寫入資料庫、進 `daily-pipeline.ts`（比照 `calculate-screen-score.ts` / `calculate-breakout-strength.ts`，獨立手動執行）。
+- 冷水區→突破命中率比對腳本（輸出格式已鋪好，腳本本身之後另寫）。
 
-  // 收黑（綠K）額外懲罰：不論上影線多短，當日表態轉弱是獨立警訊，直接封頂
-  if (close < open) {
-    score = Math.min(score, 50);
-  }
+## 驗證
 
-  return { score: clip(score, 0, 100), degraded: false };
-}
-```
+1. `npx tsx scripts/calculate-accumulation-score.ts --date=<最近交易日>`：
+   - 確認 `poolStats` 合理（`excludedAboveBand` 應與當天突破腳本 `triggered` 量級相近；`excludedIlliquid` 剔掉數百檔冷門股）。
+   - top 20~30 肉眼看：應多為近期橫盤收斂、量縮、投信小幅連續進的中小型股；**不應**出現長期無量的殭屍股（若出現，調高 `MIN_AVG_VOLUME_SHARES`）。
+   - 檢查有無「投信瘋買但技術面沒收斂」的股票落在中前段（就緒係數 ~0.5~0.75）——這是乘法結構該有的行為；也確認「技術面收斂但無法人買盤」的股票確實在後段。
+   - 檢查 `degraded` 分布：TPEx 標的在投信 / 其他法人分數 degraded 偏多屬預期。
+2. 挑 2~3 檔 top 名次股票，手動用 `DailyQuote` / `InstitutionalTrading` / `TechnicalIndicator` 原始資料驗算 `detail` + `breakdown` 的中間值（投信買超頻率、其他法人集中度比例、近5日平均量比、帶寬百分位、就緒係數）。
+3. 跑 `--date` 帶一個非交易日 → 應印「無 DailyQuote，跳過」並正常結束（比照 `calculate-screen-score.ts:359`）。
+4. TypeScript 編譯無誤（`npx tsc --noEmit` 或專案既有 lint 流程）。
 
-注意事項：
-- `degraded: true` 的情境（open/high/low 缺值）沿用既有其他維度的降級風格，分數給 50、不當作扣分，但要記錄進 `degraded` 陣列。
-- floor 統一設為 40（跟 `volumeStrength`、`breakoutMargin` 一致），維持整體分數量表風格一致。
+## 收尾
 
-### 1.2 更新 `WEIGHTS`
-
-替換為「方案一：保守等比例縮放」的權重（原六項乘 0.85，讓出 0.15 給 candleShape，合計仍為 1.0）：
-
-```ts
-export const WEIGHTS = {
-  candleShape: 0.15,
-  volumeStrength: 0.17,
-  breakoutMargin: 0.1275,
-  firstBar: 0.17,
-  base: 0.17,
-  proximityToHigh: 0.1275,
-  relativeStrength: 0.085,
-};
-```
-
-驗收：`Object.values(WEIGHTS).reduce((a,b)=>a+b, 0)` 應約等於 1.0（浮點誤差可接受）。
-
-### 1.3 修正 `computeBreakoutMargin`（鐘型曲線）
-
-將現行：
-
-```ts
-export function computeBreakoutMargin(close: number, bollingerUpper: number): number {
-  const marginPct = ((close - bollingerUpper) / bollingerUpper) * 100;
-  const score = 40 + (marginPct / 3) * (100 - 40);
-  return clip(score, 40, 100);
-}
-```
-
-改為：
-
-```ts
-export function computeBreakoutMargin(close: number, bollingerUpper: number): number {
-  const marginPct = ((close - bollingerUpper) / bollingerUpper) * 100;
-  if (marginPct <= 3) {
-    return clip(40 + (marginPct / 3) * 60, 40, 100);
-  }
-  // 超過3%乖離後，每多1%扣5分，下限60分（避免跟乖離不足的股票混在同一分數帶）
-  return clip(100 - (marginPct - 3) * 5, 60, 100);
-}
-```
-
-### 1.4 調整 `GATES.minMarketCap`
-
-```ts
-export const GATES = {
-  minMarketCap: 3_000_000_000, // 30 億台幣（原 50 億）
-  minVolumeShares: 1_000_000, // 1000 張，維持不變
-};
-```
-
----
-
-## 任務二：`calculate-breakout-strength.ts`
-
-### 2.1 `QuoteRow` 介面與 `fetchTodayQuotes`：補上 open/high/low
-
-```ts
-interface QuoteRow {
-  stockCode: string;
-  name: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  change: number;
-  volume: number;
-  sharesOutstanding: number | null;
-}
-```
-
-`fetchTodayQuotes` 的 Prisma `select` 需加上 `open: true, high: true, low: true`（欄位名稱請對照實際 schema，若命名不同請對應調整），並在 `.map()` 回傳物件中一併帶出。
-
-### 2.2 匯入 `computeCandleShape`
-
-在檔案頂部的 import 區塊加入：
-
-```ts
-import {
-  // ...既有 imports
-  computeCandleShape,
-} from "./breakout-shared.js";
-```
-
-### 2.3 `BreakoutResult.scores` 型別新增欄位
-
-```ts
-scores: {
-  candleShape: number;
-  volumeStrength: number;
-  breakoutMargin: number;
-  firstBar: number;
-  base: number;
-  proximityToHigh: number;
-  relativeStrength: number;
-};
-```
-
-### 2.4 在 `results` 的 `.map()` 內計算並帶入
-
-在既有 `volumeStrengthScore` / `breakoutMarginScore` 計算附近，新增：
-
-```ts
-const candleShapeResult = computeCandleShape({
-  open: q.open,
-  high: q.high,
-  low: q.low,
-  close: q.close,
-});
-if (candleShapeResult.degraded) degraded.push("candleShape");
-```
-
-並在 `scores` 物件與 `totalScore` 加總中補上：
-
-```ts
-const scores = {
-  candleShape: candleShapeResult.score,
-  volumeStrength: volumeStrengthScore,
-  breakoutMargin: breakoutMarginScore,
-  firstBar: firstBarResult.score,
-  base: baseResult.score,
-  proximityToHigh: proximityResult.score,
-  relativeStrength: rs.score,
-};
-
-const totalScore =
-  scores.candleShape * WEIGHTS.candleShape +
-  scores.volumeStrength * WEIGHTS.volumeStrength +
-  scores.breakoutMargin * WEIGHTS.breakoutMargin +
-  scores.firstBar * WEIGHTS.firstBar +
-  scores.base * WEIGHTS.base +
-  scores.proximityToHigh * WEIGHTS.proximityToHigh +
-  scores.relativeStrength * WEIGHTS.relativeStrength;
-```
-
-### 2.5（可選）console.log 表格加一欄
-
-若要在終端機輸出也看到 candleShape 分數，可在表格 header 與資料列中加一欄；非必要，不影響 JSON 輸出，可視需求決定是否做。
-
----
-
-## 任務三：`check-intraday-breakout.ts`
-
-> 此檔案本次規劃時未能實際檢視內容，僅能依「共用 `breakout-shared.ts`」的架構推斷。實作前請先 `view` 這個檔案，確認以下事項後再套用對應修改：
-
-1. 確認此檔案是否已經在盤中快照中撈取 open/high/low（intraday 版通常會需要「今日開盤價」與「盤中至今最高/最低價」，即使收盤尚未發生）。若沒有，需比照任務二的方式補上。
-2. **重要語意差異**：盤中呼叫 `computeCandleShape` 時，`close` 參數應傳入「當下即時價」，`high`/`low` 應為「當日至今的盤中最高/最低」。這代表盤中算出來的 candleShape 分數是「當下這一刻的型態」，收盤前仍可能持續變化（例如尾盤才留下長上影線），跟收盤後 `calculate-breakout-strength.ts` 算出的最終分數不會完全一致，這是預期行為，不需要特別修正，但如果有輸出訊息或註解，建議註明這是「即時型態，收盤前可能變動」，避免使用者誤解為最終分數。
-3. 若此檔案也有自己的 `WEIGHTS` 引用或加總邏輯（而非直接 import `breakout-shared.ts` 的 `WEIGHTS`），需要同步套用任務一的權重調整。
-4. `GATES.minMarketCap` 若在此檔案有獨立引用，需確認調降至 30 億後生效。
-
----
-
-## 整體驗收標準
-
-- [ ] `WEIGHTS` 六項加新項共 7 項，總和為 1.0
-- [ ] `computeCandleShape` 對 open/high/low 缺值、`high===low`（一字線）、正常紅K、正常綠K、長上影線紅K 等情境的回傳值符合預期（建議寫幾個單元測試或手動 case 驗證）
-- [ ] `calculate-breakout-strength.ts` 跑一次後，輸出的 `results.json` 中每筆候選股的 `scores` 物件包含 `candleShape` 欄位，且 `totalScore` 有正確反映新權重
-- [ ] `GATES.minMarketCap` 確認為 `3_000_000_000`，`minVolumeShares` 維持 `1_000_000`
-- [ ] `computeBreakoutMargin` 對乖離 <3%、=3%、>3%（例如8%）三種情境分數符合鐘型曲線預期（>3%後應遞減，非持續封頂在100）
-- [ ] `check-intraday-breakout.ts` 已核對並套用對應修改（若適用）
-- [ ] TypeScript 編譯無錯誤（`tsc --noEmit` 或專案既有的 build/lint 指令）
-
-## 本次不處理（保留原狀，供未來參考）
-
-- `firstBar` 連續突破 >2 天的懲罰邏輯（使用者刻意保留 20 分緩衝，不做剔除）
-- 盤中預估量能的線性外推偏誤（使用者掃描時間為中午後，優先度最低）
+- `docs/PROGRESS.md`：新增段落記錄設計理由、實測數字、已知 caveats；順手更正 line 28「backfill-institutional-trading.ts 從未執行」（實際 `InstitutionalTrading` 已有 2025-05 起 324 個交易日的完整資料）。
+- `docs/ROADMAP.md`：勾選第 1 階段 5 個子項；若全數完成，回覆中明確提醒使用者「盤後選股 v2 階段已全部完成」。
+- `CLAUDE.md`「既有腳本」區塊：新增 `calculate-accumulation-score.ts` 與 `accumulation-shared.ts` 條目。
+- `README.md`「目前功能」「使用方式」：補上新腳本。

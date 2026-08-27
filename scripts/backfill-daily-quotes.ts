@@ -8,9 +8,11 @@ const prisma = new PrismaClient({ adapter });
 const FINMIND_TOKEN = process.env.FINMIND_API_KEY;
 const FINMIND_URL = "https://api.finmindtrade.com/api/v4/data";
 
-const CALENDAR_DAYS_BACK = 480;
 const REQUEST_DELAY_MS = 6500;
-const PROGRESS_INTERVAL = 50;
+const PROGRESS_INTERVAL = 25;
+
+// 回補起始日（可用 BACKFILL_START_DATE 覆蓋）；endDate 固定為執行當天
+const BACKFILL_START_DATE = process.env.BACKFILL_START_DATE ?? "2020-01-01";
 
 // 測試用：透過 BACKFILL_LIMIT 環境變數限制處理股票數量
 const LIMIT = process.env.BACKFILL_LIMIT ? parseInt(process.env.BACKFILL_LIMIT, 10) : undefined;
@@ -71,9 +73,9 @@ async function main() {
 
   const today = new Date();
   const endDate = formatDate(today);
-  const startDateObj = new Date(today);
-  startDateObj.setDate(startDateObj.getDate() - CALENDAR_DAYS_BACK);
-  const startDate = formatDate(startDateObj);
+  const startDate = BACKFILL_START_DATE;
+
+  console.log(`回補區間：${startDate} ~ ${endDate}`);
 
   let processed = 0;
   let quotesWritten = 0;
