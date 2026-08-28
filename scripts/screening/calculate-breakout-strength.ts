@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../generated/prisma/client.js";
+import { PrismaClient } from "../../generated/prisma/client.js";
 import {
   GATES,
   WEIGHTS,
@@ -20,7 +20,7 @@ import {
   computeMarketWideReturns,
   computeCandleShape,
   type HistoryPoint,
-} from "./breakout-shared.js";
+} from "../lib/breakout-shared.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -156,7 +156,7 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
 
   if (passedGates === 0) {
     console.log(`${dateStr}：觸發 ${triggered} 檔，通過門檻 0 檔`);
-    const outputDir = join(__dirname, "..", "data", "breakout-strength-results");
+    const outputDir = join(__dirname, "..", "..", "data", "breakout-strength-results");
     mkdirSync(outputDir, { recursive: true });
     const outputPath = join(outputDir, `${dateStr}.json`);
     writeFileSync(
@@ -372,7 +372,7 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
     );
   }
 
-  const outputDir = join(__dirname, "..", "data", "breakout-strength-results");
+  const outputDir = join(__dirname, "..", "..", "data", "breakout-strength-results");
   mkdirSync(outputDir, { recursive: true });
   const outputPath = join(outputDir, `${dateStr}.json`);
   writeFileSync(

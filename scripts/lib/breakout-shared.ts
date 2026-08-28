@@ -1,4 +1,4 @@
-import { PrismaClient } from "../generated/prisma/client.js";
+import { PrismaClient } from "../../generated/prisma/client.js";
 
 // ---- 資格門檻（可調整，calculate-breakout-strength.ts 與 check-intraday-breakout.ts 共用）----
 export const GATES = {

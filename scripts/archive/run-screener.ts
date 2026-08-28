@@ -3,7 +3,7 @@ import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../generated/prisma/client.js";
+import { PrismaClient } from "../../generated/prisma/client.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -217,7 +217,7 @@ export async function runScreener(): Promise<{ date: string; candidateCount: num
     }
   }
 
-  const outputDir = join(__dirname, "..", "data", "screener-results");
+  const outputDir = join(__dirname, "..", "..", "data", "screener-results");
   mkdirSync(outputDir, { recursive: true });
   const dateStr = targetDate.toISOString().slice(0, 10);
   const outputPath = join(outputDir, `${dateStr}.json`);

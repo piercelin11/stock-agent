@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../generated/prisma/client.js";
+import { PrismaClient } from "../../generated/prisma/client.js";
 import { fillOneDayTwse, fillTodayTpex } from "./fill-daily-quotes.js";
 import { fillOneDayInstitutional } from "./fill-institutional-trading.js";
 import { fillOneDayValuation } from "./fill-gap-valuation.js";

@@ -3,8 +3,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../generated/prisma/client.js";
-import { computeBase } from "./breakout-shared.js";
+import { PrismaClient } from "../../generated/prisma/client.js";
+import { computeBase } from "../lib/breakout-shared.js";
 import {
   INSTITUTIONAL_WINDOW_DAYS,
   SQUEEZE_VOLUME_WINDOW_DAYS,
@@ -23,7 +23,7 @@ import {
   combineTrustScore,
   computeReadinessCoefficient,
   combineFinalScore,
-} from "./accumulation-shared.js";
+} from "../lib/accumulation-shared.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -411,7 +411,7 @@ function writeOutput(
   poolStats: { totalStocks: number; excludedAboveBand: number; excludedIlliquid: number; scored: number },
   results: AccumulationResult[],
 ): void {
-  const outputDir = join(__dirname, "..", "data", "accumulation-score-results");
+  const outputDir = join(__dirname, "..", "..", "data", "accumulation-score-results");
   mkdirSync(outputDir, { recursive: true });
   const outputPath = join(outputDir, `${dateStr}.json`);
   writeFileSync(

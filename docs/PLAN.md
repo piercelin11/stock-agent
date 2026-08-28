@@ -1,126 +1,71 @@
-# 盤後選股 v2（投信吃貨訊號）— `calculate-accumulation-score.ts`
+請評估並更新 ROADMAP.md 第 3 節「歷史回測系統」，依照以下已與人類確認過的設計方向調整，不要自己重新發明架構，但可以在細節上提出你的專業判斷與疑慮。
 
-## 背景與目標
+## 背景與動機
 
-ROADMAP 第 1 階段。現有 `calculate-breakout-strength.ts` 抓「已發生的帶量突破事件」（門檻式篩選）。本任務做互補的「醞釀期」偵測：找**還沒**出現第一根突破、但籌碼/技術面已在蓄勢的股票（投信默默建倉 + 帶寬收斂 + 窒息量）。
+原規劃用 Prisma model（ParamVersion / BacktestRun / BacktestCandidate）把回測結果存進資料庫。經討論後認為：現階段目的是「反覆調整加權參數、快速看訊號有沒有預測力」，不是長期累積多人協作的正式紀錄。把這種高頻率、用完即丟、還在實驗階段的資料放進 DB schema，會增加 migration/index 維護成本，卻沒有對應的效益。因此決定：**回測階段不使用資料庫，改用檔案系統（JSON/JSONL）存放結果**。DB 化留到「參數收斂、要長期自動化監控」的更後期階段再評估，不在這次規劃範圍內。
 
-計分採**乘法結構**：`最終分數 = 籌碼分數 × 技術就緒係數`。籌碼是主因，技術面只放大或抑制它、不能取代它。不用硬門檻（連續係數取代 cliff 式篩選），因為「投信連買幾天算數」「集中度多高算高」這些數字還沒被資料庫實際分布驗證過，先跑排名結果再肉眼/回測校準參數。落地方式比照 `calculate-screen-score.ts`：純函式、匯出 `calculateAccumulationScore(date)`、結果寫 JSON 不寫資料庫。
+## 核心設計方向
 
-已納入的落地細節：a/b 重疊改用「因子 b 排除投信」從結構上消除（非事後校準）、連續天數脆弱性改用頻率型指標、淨額帶正負號、視窗加總（非逐日比例平均）、絕對流動性下限（pool eligibility）、與突破清單互斥、輸出格式對齊突破腳本以利回測。
+### 1. 回測的本質是 signal evaluation，不是交易策略模擬
 
-## 資料現況（已確認，無前置作業）
+對時間範圍內每個交易日 d，用當時的 config 跑選股純函式（`calculateAccumulationScore` / `calculateBreakoutStrength`）得到候選名單，然後用 d 之後 N 個交易日（5/10/20 日）的實際報酬回頭驗證這批訊號準不準。不涉及進出場規則、停損停利模擬（維持 ROADMAP 原本 3.4 備註「優先度低，之後再評估」的判斷）。
 
-`InstitutionalTrading` 已完整回補：324 個交易日（2025-05-02 → 2026-08-26）、589,786 筆、1,989 檔股票。投信 / 其他法人分數的 20 天視窗有充足歷史。（PROGRESS.md line 28「backfill 從未執行」為過時註記，實際已跑過，收尾時順手更正該行。）
+### 2. 訓練期 / 驗證期固定範圍，不隨參數調整而更換
 
-## 設計
+- 一開始選定一段時間範圍，切成訓練期（in-sample，較長，例如扣掉最近 2-3 個月的部分）與驗證期（out-of-sample，較短，例如最近 2-3 個月）。
+- 在訓練期反覆調參數、比較命中率變化，這階段「同一範圍、換參數」重複跑。
+- 找到候選參數組合後，拿到沒動過的驗證期跑一次做最終確認。
+- 驗證期結果不可以拿來回頭再調參數，UI 要有視覺警示提醒這件事（沿用 ROADMAP 原本 3.6 的精神）。
+- 之後要擴充 rolling window / walk-forward optimization 可以晚一點再做，初期先固定一組切分即可。
 
-### 新檔案
+### 3. 資料分層架構：把「抓資料」跟「合成分數」拆開，讓調參數的重跑幾乎即時
 
-- **`scripts/accumulation-shared.ts`** — 純函式庫（無 Prisma/CLI），比照 `breakout-shared.ts`。放常數（權重、視窗天數、`MIN_AVG_VOLUME_SHARES`、`READINESS_FLOOR`）與各評分函式、`computeReadinessCoefficient`、`combineFinalScore`。
-- **`scripts/calculate-accumulation-score.ts`** — 主腳本，比照 `calculate-screen-score.ts` 結構（`buildSnapshots` → 算籌碼分數 + 技術就緒係數 → 相乘排名 → 寫 `data/accumulation-score-results/{date}.json`）。
+這是這次規劃的核心，請仔細評估每一層的可行性與工程細節：
 
-### 重用既有程式
+**Layer 0（基準跑，慢，只在換時間範圍時需要重跑）**
+對回測範圍內每個交易日，跑一次「抓原始資料」的邏輯，把**全市場**（不是只有通過門檻的候選股）每檔股票當天所需的原始輸入，存成 JSONL（例如 `data/backtest-runs/{run-id}/raw-factors.jsonl`，一行一筆）。
 
-- `computeBase(latestBandwidth, bandwidthHistory)` — `breakout-shared.ts:215`，**直接 import**。它算的就是「帶寬歷史百分位（深度）+ 低帶寬持續天數」，即壓縮度分數。口徑與突破腳本一致，未來兩系統結果可對比。需 ≥40 天歷史（`BASE_MIN_HISTORY_DAYS`），不足回傳 `{degraded:true}`。
-- `fetchHistoryWindow(prisma, asOfDate, codes, maxDays)` — `breakout-shared.ts:58`，抓 close + bollingerBandwidth 視窗，餵給 `computeBase` 與窒息量的多日量比。
-- `rankScore(values, lowerIsBetter, naScore)` — `breakout-shared.ts:28`，各子指標轉 cross-sectional 百分位。**維持 codebase 一致的正規化風格，不另發明算法。**
-- `clip` — `breakout-shared.ts:47`。
-- 常數命名慣例：比照 `RS_WINDOW_DAYS` / `BASE_MAX_WINDOW_DAYS`（`accumulation-shared.ts` 定 `INSTITUTIONAL_WINDOW_DAYS = 20`、`SQUEEZE_VOLUME_WINDOW_DAYS = 5`、`MIN_AVG_VOLUME_SHARES = 500_000`、`READINESS_FLOOR = 0.5` 等，寫死不留活動範圍）。
-- 候選池查詢比照 `fetchTodayQuotes` — `calculate-breakout-strength.ts:52`（`securityType: "stock"`）。
+存什麼內容需要你依照兩支選股腳本的實際計算邏輯評估，但方向是：
+- accumulation：`computeTrustRawMetrics` / `computeOtherInstitutionRatio` / `computeQuietVolumeRatio` / `computeBase`（來自 breakout-shared.ts）等純函式已算好的分項分數或原始值，加上候選池門檻判斷所需的原始數值（`volumeMa20`、是否站上布林上軌等）。
+- breakout：七項分項分數（`candleShape` / `volumeStrength` / `breakoutMargin` / `firstBar` / `base` / `proximityToHigh` / `relativeStrength`），加上觸發層判斷所需的原始數值（`close`、`bollingerUpper`、`volume`、`volumeMa20`、`sharesOutstanding`）。
 
-### 候選池資格篩選（pool eligibility，非訊號門檻）
+**關鍵原因**：breakout 的 `GATES` / `TRIGGER_VOLUME_RATIO` 是門檻層參數，決定哪些股票會進候選池，跟 `WEIGHTS` 這種純加權組合層參數不同性質。如果 Layer 0 只存「當時通過門檻的股票」，之後調門檻參數就無法還原「原本沒過、換門檻後應該要過」的股票，必須重新查 DB。所以 Layer 0 必須存全市場資料，不能只存候選池。accumulation 是否有一樣的問題（例如 `MIN_AVG_VOLUME_SHARES` 或站上布林上軌的排除規則）也要一併確認並比照處理。
 
-在算分數前先排除：
+**Layer 1（輕量重算：套用門檻參數篩出候選池）**
+在記憶體中對 Layer 0 的全市場資料重新套用 `GATES` / `TRIGGER_VOLUME_RATIO`（breakout）或候選池門檻常數（accumulation），不碰 DB。
 
-1. **`close > bollingerUpper`**（今日已站上上軌）→ 與 `calculate-breakout-strength.ts:131` 的觸發條件互斥，兩份清單天生不重疊。需當日 `TechnicalIndicator.bollingerUpper`。
-2. **絕對流動性下限**：近 20 日均量（`TechnicalIndicator.volumeMa20`）低於 `MIN_AVG_VOLUME_SHARES`（初值 500_000 股 = 500 張，寫在 shared 常數）→ 剔除長期沒人交易的死股，避免「量/均量」比值天生不穩的冷門股系統性霸榜。
-3. `volumeMa20` 為 null 或 ≤ 0 → 無法算窒息量，剔除。
+**Layer 2（更輕量：套用權重參數做加權組合、排名）**
+對候選池套用 `WEIGHTS` / `CHIP_WEIGHTS` / `TECH_WEIGHTS` / `READINESS_FLOOR` 等純加權組合，排名、算總分，不碰 DB。
 
-`sharesOutstanding` 為 null **不**剔除（投信分數對該股 degraded 給中性分即可）。
+**Layer 3（統計評估）**
+對 Layer 2 輸出的候選名單，抓事後報酬（5/10/20 日）、跟 benchmark 比較、算命中率/平均報酬/勝率/賺賠比，並按時間分段看穩定性、按分數分層（前10名 vs 前30名 vs 全部候選）驗證分數高低是否真的對應報酬高低。
 
-### Step 1：籌碼分數（0~100，主排序依據）
+目的：使用者調整 Layer 1/2 的參數時，UI 應該能在幾秒內重新算出結果並更新圖表，不需要每次都重新查資料庫；只有換整個時間範圍時才需要重跑 Layer 0。
 
-`籌碼分數 = 投信分數 × 0.7 + 其他法人分數 × 0.3`
-投信佔七成（主因子）；其他法人只當「確認性訊號」——外資/自營商方向與投信一致代表更多資金同步吃貨，不一致也不重扣、只是少加分。
+### 4. 輸出檔案結構（請你依此為基礎細化，不必完全照抄路徑命名）
 
-**投信分數** — `InstitutionalTrading.investmentTrustNetBuy`，近 `INSTITUTIONAL_WINDOW_DAYS`(=20) 個交易日，兩子指標各半權重、各自 `rankScore` 正規化後合併：
-- 子 1「買超頻率」= 窗內 `investmentTrustNetBuy > 0` 的天數 ÷ 有資料天數。頻率型，對偶發中斷一天不敏感、**不歸零**（連續天數只當次要參考記進 `detail`，不參與計分）。
-- 子 2「買超佔發行量比例」= 窗內 `investmentTrustNetBuy` 淨額加總 ÷ `sharesOutstanding`（**帶正負號**）。`sharesOutstanding` 為 null → 此子項 degraded，投信分數只用子 1。
-- `rankScore(lowerIsBetter=false)`。窗內有資料天數 < 一半 → 投信分數 degraded 給中性 50。
+```
+data/backtest-runs/{run-id}/
+  config.json          # 這次基準跑的時間範圍、策略
+  raw-factors.jsonl     # Layer 0 輸出：全市場、每個交易日的分項分數與原始值
+  returns.jsonl          # 每檔股票每天的未來 N 日報酬與 benchmark（可併入 raw-factors 或分開，請評估）
+```
 
-**其他法人分數** — 排除投信，只算外資 + 自營商，近 20 天：
-- `otherInstitutionRatio = sum(foreignNetBuy + dealerNetBuy) / sum(DailyQuote.volume)` — **比例的加總**（非逐日比例平均，清淡日分母小會暴衝），**帶正負號**（倒貨為負）。
-- 排除投信 → 從結構上消除與投信分數的雙重計數，不再需要事後正交化。
-- `rankScore(lowerIsBetter=false)`。窗內資料不足 → degraded 給 50。
+「重新計算」（調 Layer 1/2 參數）的結果不必然要落地成檔案，可以先在記憶體/前端 state 暫存，使用者主動要保留比較時才手動存成一份 named 結果（對應原本 ParamVersion 的「具名版本」概念，但用檔案而非 DB row 實現）。
 
-### Step 2：技術就緒係數（0.5~1.0，調節項）
+### 5. UI 分成兩種操作，成本不同
 
-`技術原始分 = 壓縮度分數 × 0.5 + 窒息量分數 × 0.5`（0~100）
-`就緒係數 = READINESS_FLOOR + (1 - READINESS_FLOOR) × 技術原始分 / 100`（`READINESS_FLOOR = 0.5` → 映射到 0.5~1.0）
+- 「執行基準跑」：選策略 + 時間範圍（訓練期/驗證期）→ 觸發 Layer 0，這步驟慢，需要進度條/背景執行（沿用原 ROADMAP 3.3「背景任務執行」的构想，只是輸出改成檔案而非寫 DB）。
+- 「調整參數」：滑桿/輸入框改 Layer 1/2 的參數 → 幾秒內重新計算並更新結果儀表板（命中率、報酬分布、訓練 vs 驗證並排），這步驟應該做到接近即時。
+- 版本比較頁維持原 ROADMAP 構想，但比較的對象是「不同參數的重新計算結果」，不一定要求都已落地存檔。
 
-下限 0.5 是刻意設計：技術面完全沒收斂只把籌碼分數打對折，不歸零、不把股票從排名抹掉（「還沒收斂」≠「沒價值」，可能只是還沒到最佳進場點，肉眼校準時仍要看得到）。連續係數取代 cliff 式剔除，符合「不用硬門檻」原則。
+## 請你做的事
 
-- **壓縮度分數** — 直接 `computeBase(latestBandwidth, bandwidthHistory)`：`latestBandwidth` = 當日 `TechnicalIndicator.bollingerBandwidth`；`bandwidthHistory` = 往前最多 `BASE_MAX_WINDOW_DAYS`(=240) 筆（不含當日，`fetchHistoryWindow` 取）。degraded 由 `computeBase` 自帶（<40 天）。
-- **窒息量分數** — 近 `SQUEEZE_VOLUME_WINDOW_DAYS`(=5) 天平均量比 `mean(DailyQuote.volume[t] / TechnicalIndicator.volumeMa20[t])`（多日平均，非單日，濾隨機低量雜訊）。比值越低越窒息、分數越高：`rankScore(lowerIsBetter=true)`。近5日資料不足3天 → degraded 給 50。
-- 任一子項 degraded → 該子項用中性 50 續算（係數仍算得出），degraded 標記進輸出。
+1. 重寫 ROADMAP.md 第 3 節（3.1 ~ 3.7），反映上述設計；3.2「回測資料表」整節應該從「新增 Prisma model」改為「檔案輸出格式設計」，說明 Layer 0-3 各自的檔案內容與職責。
+2. 檢查 accumulation 的候選池門檻邏輯（`buildCandidatePool` 裡的「站上布林上軌排除」與 `MIN_AVG_VOLUME_SHARES` 門檻）是否跟 breakout 一樣有「Layer 0 需存全市場」的問題，並在 ROADMAP 中明確寫出你的判斷。
+3. 針對「Layer 0 該存分項分數還是原始輸入資料」這個取捨（存分項分數重算快但不夠彈性去驗證分項函式本身的改動；存原始輸入更彈性但重算變慢）給出你的建議並說明理由，寫進 ROADMAP。
+4. 評估這個檔案化方案是否會讓「效果評估模組」（3.4）、「統計匯總模組」（3.5）的實作方式需要跟著調整（例如原本設計是在 Prisma 查詢層做統計，現在要在讀 JSONL 之後用程式碼算），並更新對應章節。
+5. 如果你認為某些部分維持 DB 化其實更合理（例如某個子功能特別不適合用檔案處理），請明確提出來討論，不要默默照抄我的方案，我要的是你的專業判斷。
+6. 更新後的 3.7 回測 UI 章節，需要反映「基準跑（慢）」與「調參數重算（快）」這兩種操作在 UI 上的區別，以及對應的使用者體驗預期。
 
-### Step 3：最終分數與輸出
-
-`最終分數 = 籌碼分數 × 就緒係數`
-「投信瘋買、技術面還沒收斂」→ 最終約為籌碼分數的 50~75%，仍排得進前段；「技術面完美收斂、無法人買盤」→ 籌碼分數本身趨近 0，乘上係數依然低，不會誤闖前排。
-
-**待校準參數**（先給預設，跑完看前 20~30 名再調，全寫在 `accumulation-shared.ts` 常數）：
-
-| 參數 | 初值 | 調整方向 |
-|---|---|---|
-| 籌碼分數內部：投信 / 其他法人 | 0.7 / 0.3 | — |
-| 投信分數內部：頻率 / 佔比 | 0.5 / 0.5 | — |
-| 技術原始分：壓縮度 / 窒息量 | 0.5 / 0.5 | — |
-| `READINESS_FLOOR` | 0.5 | 技術面該壓更重 → 降到 0.3~0.2；不該壓那麼重 → 拉到 0.7 |
-
-- 排名、印前 20~30 名到 console（比照 `calculate-screen-score.ts:376-381`），欄位含籌碼分數、就緒係數、最終分數、degraded。
-- 輸出 `data/accumulation-score-results/{date}.json`：
-
-  ```
-  {
-    date, windowDays: INSTITUTIONAL_WINDOW_DAYS,
-    params: { chipWeights, trustSubWeights, techWeights, readinessFloor },
-    poolStats: { totalStocks, excludedAboveBand, excludedIlliquid, scored },
-    results: [
-      { code, name, date, close,
-        chipScore, readinessCoef, finalScore, rank,
-        breakdown: { trustScore, otherInstScore, squeezeScore, quietVolumeScore },
-        detail: { trustBuyFreq, trustConsecutiveDays, trustNetRatio,
-                  otherInstRatio, squeezeDepthDays, avgVolumeRatio5d },
-        degraded: string[] }
-    ]
-  }
-  ```
-
-  `code` + `date` 欄位格式與 `calculate-breakout-strength.ts` 輸出一致 → 之後可寫簡單比對腳本：取某天冷水區 top-N，掃描後續 N 個交易日的 `breakout-strength-results/*.json` 看命中率，驗證預測力。
-
-- CLI：`--date=YYYY-MM-DD`，不帶則取最新 `DailyQuote` 日期。`main()` / `isMain` guard / `prisma.$disconnect()` 比照現有腳本。
-
-## 不做（本版範圍外）
-
-- 參數的資料驅動校準（先跑結果，肉眼看前 20~30 名再調上表參數）。
-- 寫入資料庫、進 `daily-pipeline.ts`（比照 `calculate-screen-score.ts` / `calculate-breakout-strength.ts`，獨立手動執行）。
-- 冷水區→突破命中率比對腳本（輸出格式已鋪好，腳本本身之後另寫）。
-
-## 驗證
-
-1. `npx tsx scripts/calculate-accumulation-score.ts --date=<最近交易日>`：
-   - 確認 `poolStats` 合理（`excludedAboveBand` 應與當天突破腳本 `triggered` 量級相近；`excludedIlliquid` 剔掉數百檔冷門股）。
-   - top 20~30 肉眼看：應多為近期橫盤收斂、量縮、投信小幅連續進的中小型股；**不應**出現長期無量的殭屍股（若出現，調高 `MIN_AVG_VOLUME_SHARES`）。
-   - 檢查有無「投信瘋買但技術面沒收斂」的股票落在中前段（就緒係數 ~0.5~0.75）——這是乘法結構該有的行為；也確認「技術面收斂但無法人買盤」的股票確實在後段。
-   - 檢查 `degraded` 分布：TPEx 標的在投信 / 其他法人分數 degraded 偏多屬預期。
-2. 挑 2~3 檔 top 名次股票，手動用 `DailyQuote` / `InstitutionalTrading` / `TechnicalIndicator` 原始資料驗算 `detail` + `breakdown` 的中間值（投信買超頻率、其他法人集中度比例、近5日平均量比、帶寬百分位、就緒係數）。
-3. 跑 `--date` 帶一個非交易日 → 應印「無 DailyQuote，跳過」並正常結束（比照 `calculate-screen-score.ts:359`）。
-4. TypeScript 編譯無誤（`npx tsc --noEmit` 或專案既有 lint 流程）。
-
-## 收尾
-
-- `docs/PROGRESS.md`：新增段落記錄設計理由、實測數字、已知 caveats；順手更正 line 28「backfill-institutional-trading.ts 從未執行」（實際 `InstitutionalTrading` 已有 2025-05 起 324 個交易日的完整資料）。
-- `docs/ROADMAP.md`：勾選第 1 階段 5 個子項；若全數完成，回覆中明確提醒使用者「盤後選股 v2 階段已全部完成」。
-- `CLAUDE.md`「既有腳本」區塊：新增 `calculate-accumulation-score.ts` 與 `accumulation-shared.ts` 條目。
-- `README.md`「目前功能」「使用方式」：補上新腳本。
+完成後，用 diff 或條列方式跟我說明你對第 1、2、3、5 點的判斷與理由，讓我確認後再真的寫入 ROADMAP.md。

@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient, SecurityType, Market } from "../generated/prisma/client.js";
-import { fetchJson } from "./http.js";
+import { PrismaClient, SecurityType, Market } from "../../generated/prisma/client.js";
+import { fetchJson } from "../lib/http.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });

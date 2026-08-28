@@ -4,23 +4,29 @@
 
 ## 目前功能
 
-- `top20-gainers.js`：抓取當日 TWSE + TPEx 收盤資料，篩選出一般股票（排除 ETF、權證、特別股等），依漲幅排序（尚未整合進資料庫）。
-- `scripts/backfill-daily-quotes.ts`：用 FinMind API 逐支股票回補歷史報價至 `DailyQuote`，回補區間預設 `2020-01-01` 起（`BACKFILL_START_DATE` 覆蓋）到執行當天。
-- `scripts/fill-daily-quotes.ts`：補齊全市場報價，內部依市場分開處理——TWSE 用證交所 `MI_INDEX` 報表 API，支援指定任意單一天（可補歷史缺漏）；TPEx 用櫃買中心 OpenAPI（跟 `top20-gainers.js` 同源），該 API 不支援指定日期，只能補「目前最新一天」。皆會自動新增資料庫沒有的股票記錄。
-- `scripts/calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線、波動度、最大回撤、ATR、RSI、MACD 狀態等技術指標。
-- `scripts/run-screener.ts`：依條件（`scripts/screener-conditions.json`）跑全市場篩選，產出候選觀察股清單。
-- `scripts/calculate-screen-score.ts`：九因子加權，對全市場一般股票算出 0~100 的 `screenScore` 並輸出排名（篩選之外的全市場排序，兩者互補）。
-- `scripts/calculate-breakout-strength.ts`：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（觸發 → 資格門檻 → 七項強度評分，含 K 棒型態）。核心常數與評分函式抽在 `scripts/breakout-shared.ts`，與 `check-intraday-breakout.ts` 共用。
-- `scripts/calculate-accumulation-score.ts`：盤後選股 v2「投信吃貨訊號」——找還沒突破、但籌碼/技術面在醞釀的股票，與 `calculate-breakout-strength.ts` 互補。乘法計分：`籌碼分數（投信動能×0.7 + 排除投信的外資/自營商集中度×0.3）× 技術就緒係數（布林壓縮度/窒息量合成，下限 0.5）`。候選池先排除「已站上布林上軌」與「近 20 日均量 < 500 張」。待校準參數集中在 `scripts/accumulation-shared.ts`。不接進 `daily-pipeline.ts`。
-- `scripts/check-intraday-breakout.ts`：盤中一次性快照篩選，把 `calculate-breakout-strength.ts` 的邏輯提前套用在 `mis.twse.com.tw` 即時報價上，手動執行看收盤前該注意哪些股票。不排程、不接進 `daily-pipeline.ts`。
-- `scripts/fill-gap-valuation.ts`：抓取指定日期的個股估值（本益比/股價淨值比/殖利率）寫入 `StockValuation`，TWSE 與 TPEx 皆支援任意歷史日期。
-- `scripts/calculate-industry-heat.ts`：依每日報價計算各產業等權熱度（平均漲跌幅、漲跌家數、排名）寫入 `IndustryHeatSnapshot`，支援回補多個交易日。
-- `scripts/update-shares-outstanding.ts`：從 MOPS 公開 CSV 更新各股票已發行普通股數（月頻手動執行；市值用「股數 × 收盤價」現算，不落地存欄位）。
-- `scripts/fill-institutional-trading.ts`：抓取指定日期的 TWSE（`T86`）+ TPEx（`tpex_3insti_daily_trading`）三大法人買賣超寫入 `InstitutionalTrading`。TWSE 支援任意歷史日期，TPEx 不支援日期參數、永遠回傳「目前最新一天」（跟 TPEx 報價 API 同樣限制）。
-- `scripts/backfill-institutional-trading.ts`：用 FinMind API 逐支股票回補歷史三大法人買賣超至 `InstitutionalTrading`（回補區間同 `backfill-daily-quotes.ts`，預設 `2020-01-01` 起），補上 `fill-institutional-trading.ts` 只能抓當天資料的歷史缺口。
-- `scripts/backfill-6y.sh`：一次跑完 6 年歷史回補的四步接力（報價 → 三大法人 → 重算整段技術指標 → 重算整段產業熱度），log 寫到 `logs/backfill_6y_{timestamp}.log`。
-- `scripts/daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」五步：補齊今日 TWSE+TPEx 報價 → 抓今日 TWSE+TPEx 三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 算技術指標 → 算產業熱度。歷史缺漏回補、跑篩選皆已移出，改為個別手動執行對應腳本。三個抓取步驟的對外請求走 `scripts/http.ts` 的 `fetchJson`（3 次 retry + 30s timeout），單一暫時性網路錯誤不會讓整條 pipeline 中斷。
-- `scripts/fetch-candidate-details.ts`：讀取篩選結果候選股清單，逐支抓取籌碼面（三大法人買賣超）、基本面（月營收、季報）、消息面（新聞）四類資料，寫入資料庫。
+`scripts/` 依用途分子資料夾：`pipeline/`（每日自動）、`screening/`（選股，手動）、`backfill/`（歷史回補，偶爾手動）、`lib/`（純函式庫）、`archive/`（已停用，不維護）。
+
+### `scripts/pipeline/`
+
+- `daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」五步：補齊今日 TWSE+TPEx 報價 → 抓今日三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 算技術指標 → 算產業熱度。歷史缺漏回補、跑選股皆為個別手動執行。三個抓取步驟的對外請求走 `scripts/lib/http.ts` 的 `fetchJson`（3 次 retry + 30s timeout），單一暫時性網路錯誤不會讓整條 pipeline 中斷。
+- `fill-daily-quotes.ts`：補齊全市場報價——TWSE 用證交所 `MI_INDEX` 報表 API，支援指定任意單一天（可補歷史缺漏）；TPEx 用櫃買中心 OpenAPI，不支援指定日期，只能補「目前最新一天」。皆會自動新增資料庫沒有的股票記錄。
+- `fill-institutional-trading.ts`：抓取指定日期的 TWSE（`T86`）+ TPEx（`tpex_3insti_daily_trading`）三大法人買賣超寫入 `InstitutionalTrading`。TWSE 支援任意歷史日期，TPEx 不支援日期參數、永遠回傳「目前最新一天」。
+- `fill-gap-valuation.ts`：抓取指定日期的個股估值（本益比/股價淨值比/殖利率）寫入 `StockValuation`，TWSE 與 TPEx 皆支援任意歷史日期。
+- `calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線、波動度、最大回撤、ATR、RSI、MACD 狀態等技術指標。
+- `calculate-industry-heat.ts`：依每日報價計算各產業等權熱度（平均漲跌幅、漲跌家數、排名）寫入 `IndustryHeatSnapshot`，支援回補多個交易日。
+
+### `scripts/screening/`
+
+- `calculate-breakout-strength.ts`：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（觸發 → 資格門檻 → 七項強度評分，含 K 棒型態）。核心常數與評分函式抽在 `scripts/lib/breakout-shared.ts`，與 `check-intraday-breakout.ts` 共用。
+- `calculate-accumulation-score.ts`：盤後選股 v2「投信吃貨訊號」——找還沒突破、但籌碼/技術面在醞釀的股票，與 `calculate-breakout-strength.ts` 互補。乘法計分：`籌碼分數（投信動能×0.7 + 排除投信的外資/自營商集中度×0.3）× 技術就緒係數（布林壓縮度/窒息量合成，下限 0.5）`。候選池先排除「已站上布林上軌」與「近 20 日均量 < 500 張」。待校準參數集中在 `scripts/lib/accumulation-shared.ts`。不接進 `daily-pipeline.ts`。
+- `check-intraday-breakout.ts`：盤中一次性快照篩選，把 `calculate-breakout-strength.ts` 的邏輯提前套用在 `mis.twse.com.tw` 即時報價上，手動執行看收盤前該注意哪些股票。不排程、不接進 `daily-pipeline.ts`。
+
+### `scripts/backfill/`
+
+- `backfill-daily-quotes.ts`：用 FinMind API 逐支股票回補歷史報價至 `DailyQuote`，回補區間預設 `2020-01-01` 起（`BACKFILL_START_DATE` 覆蓋）到執行當天。
+- `backfill-institutional-trading.ts`：用 FinMind API 逐支股票回補歷史三大法人買賣超至 `InstitutionalTrading`（回補區間同上），補上 `fill-institutional-trading.ts` 只能抓當天資料的歷史缺口。
+- `backfill-benchmark-quotes.ts`：用 FinMind API 回補回測用大盤基準標的（目前 0050）的 `DailyQuote`，只寫報價、不碰技術指標/籌碼。
+- `update-shares-outstanding.ts`：從 MOPS 公開 CSV 更新各股票已發行普通股數（月頻手動執行；市值用「股數 × 收盤價」現算，不落地存欄位）。
 
 ## 環境需求
 
@@ -42,57 +48,51 @@ FINMIND_API_KEY="<可選，未設定則使用未註冊額度 300次/小時>"
 # 初次建置資料庫（股票清單 + 產業別）
 npx prisma db seed
 
-# 逐支股票回補歷史報價（預設 2020-01-01 起；BACKFILL_START_DATE 覆蓋起始日）
-npx tsx scripts/backfill-daily-quotes.ts
+# 每日主流程（補齊今日 TWSE+TPEx 報價 → 抓今日籌碼 → 抓今日估值 → 算技術指標 → 算產業熱度）
+npx tsx scripts/pipeline/daily-pipeline.ts
+
+# --- pipeline 各步驟也可單獨執行 ---
 
 # 補齊指定單一天的全市場報價（TWSE 可指定任意歷史日期，TPEx 固定補「目前最新一天」）
-npx tsx scripts/fill-daily-quotes.ts --date=2026-08-14
+npx tsx scripts/pipeline/fill-daily-quotes.ts --date=2026-08-14
 
 # 計算技術指標（全市場；或帶股票代號只重算那幾支）
-npx tsx scripts/calculate-technical-indicators.ts
-npx tsx scripts/calculate-technical-indicators.ts 4104
-
-# 跑篩選
-npx tsx scripts/run-screener.ts
-
-# 算全市場評分排名（不帶 --date 則用最新交易日）
-npx tsx scripts/calculate-screen-score.ts --date=2026-08-18
-
-# 篩出帶量突破候選股並依強度排名（不帶 --date 則用最新交易日）
-npx tsx scripts/calculate-breakout-strength.ts --date=2026-08-18
-
-# 盤後選股 v2：投信吃貨訊號排名（不帶 --date 則用最新交易日）
-npx tsx scripts/calculate-accumulation-score.ts --date=2026-08-26
-
-# 盤中一次性快照篩選（無參數，本質是「現在」的快照）
-npx tsx scripts/check-intraday-breakout.ts
+npx tsx scripts/pipeline/calculate-technical-indicators.ts
+npx tsx scripts/pipeline/calculate-technical-indicators.ts 4104
 
 # 抓取指定日期的個股估值（不帶 --date 則抓今天）
-npx tsx scripts/fill-gap-valuation.ts --date=2026-08-18
-
-# 計算產業熱度（不帶參數算最近一個交易日；--backfill N 往回補 N 個交易日）
-npx tsx scripts/calculate-industry-heat.ts --backfill 20
-
-# 更新已發行股數（月頻手動執行）
-npx tsx scripts/update-shares-outstanding.ts
+npx tsx scripts/pipeline/fill-gap-valuation.ts --date=2026-08-18
 
 # 抓取指定日期的三大法人籌碼（不帶 --date 則抓今天；TPEx 端不支援指定日期，永遠回傳最新一天）
-npx tsx scripts/fill-institutional-trading.ts --date=2026-08-21
+npx tsx scripts/pipeline/fill-institutional-trading.ts --date=2026-08-21
+
+# 計算產業熱度（不帶參數算最近一個交易日；--backfill N 往回補 N 個交易日）
+npx tsx scripts/pipeline/calculate-industry-heat.ts --backfill 20
+
+# --- 選股（手動）---
+
+# 篩出帶量突破候選股並依強度排名（不帶 --date 則用最新交易日）
+npx tsx scripts/screening/calculate-breakout-strength.ts --date=2026-08-18
+
+# 盤後選股 v2：投信吃貨訊號排名（不帶 --date 則用最新交易日）
+npx tsx scripts/screening/calculate-accumulation-score.ts --date=2026-08-26
+
+# 盤中一次性快照篩選（無參數，本質是「現在」的快照）
+npx tsx scripts/screening/check-intraday-breakout.ts
+
+# --- 歷史回補（偶爾手動）---
+
+# 逐支股票回補歷史報價（預設 2020-01-01 起；BACKFILL_START_DATE 覆蓋起始日）
+npx tsx scripts/backfill/backfill-daily-quotes.ts
 
 # 回補歷史三大法人籌碼（逐支股票，預設 2020-01-01 起，可用 BACKFILL_LIMIT 限制測試）
-npx tsx scripts/backfill-institutional-trading.ts
+npx tsx scripts/backfill/backfill-institutional-trading.ts
 
-# 一次跑完 6 年歷史回補四步接力（背景執行，log 在 logs/backfill_6y_*.log）
-nohup sh scripts/backfill-6y.sh > /dev/null 2>&1 &
+# 回補大盤基準標的報價（目前 0050，回測用）
+npx tsx scripts/backfill/backfill-benchmark-quotes.ts
 
-# 每日主流程（補齊今日 TWSE+TPEx 報價 → 抓今日籌碼 → 抓今日估值 → 算技術指標 → 算產業熱度）
-npx tsx scripts/daily-pipeline.ts
-
-# 抓取候選股深度資料（籌碼/基本面/消息面），預設讀最新一份篩選結果
-npx tsx scripts/fetch-candidate-details.ts --date=2026-08-18
-
-# 舊版：不寫入資料庫，只印出當日漲幅前 20 名
-node top20-gainers.js
+# 更新已發行股數（月頻手動執行）
+npx tsx scripts/backfill/update-shares-outstanding.ts
 ```
 
 ## 專案規劃

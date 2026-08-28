@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient, Prisma } from "../generated/prisma/client.js";
+import { PrismaClient } from "../../generated/prisma/client.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -9,13 +9,14 @@ const FINMIND_TOKEN = process.env.FINMIND_API_KEY;
 const FINMIND_URL = "https://api.finmindtrade.com/api/v4/data";
 
 const REQUEST_DELAY_MS = 6500;
-const PROGRESS_INTERVAL = 25;
 
-// 回補起始日（可用 BACKFILL_START_DATE 覆蓋）；endDate 固定為執行當天
+// 回測大盤基準標的。目前只有 0050；之後要加 006208 / 其他就往陣列 push。
+// 不碰 TechnicalIndicator / InstitutionalTrading——基準只需要收盤價算報酬。
+const BENCHMARK_CODES = ["0050"];
+
+// 回補起始日（可用 BACKFILL_START_DATE 覆蓋）；endDate 固定為執行當天。
+// FinMind 單支查 6 年不會被截斷（CLAUDE.md 已驗證）。
 const BACKFILL_START_DATE = process.env.BACKFILL_START_DATE ?? "2020-01-01";
-
-// 測試用：透過 BACKFILL_LIMIT 環境變數限制處理股票數量
-const LIMIT = process.env.BACKFILL_LIMIT ? parseInt(process.env.BACKFILL_LIMIT, 10) : undefined;
 
 interface FinMindPriceRow {
   date: string; // "2026-08-14"
@@ -36,7 +37,11 @@ function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-async function fetchPriceHistory(stockId: string, startDate: string, endDate: string): Promise<FinMindPriceRow[]> {
+async function fetchPriceHistory(
+  stockId: string,
+  startDate: string,
+  endDate: string,
+): Promise<FinMindPriceRow[]> {
   const url = new URL(FINMIND_URL);
   url.searchParams.set("dataset", "TaiwanStockPrice");
   url.searchParams.set("data_id", stockId);
@@ -62,35 +67,41 @@ async function main() {
     console.warn("警告: 未設定 FINMIND_API_KEY，將以未註冊額度（300次/小時）呼叫 API。");
   }
 
-  const stocks = await prisma.stock.findMany({
-    where: { securityType: "stock" },
-    select: { code: true, market: true },
-    orderBy: { code: "asc" },
-    ...(LIMIT ? { take: LIMIT } : {}),
-  });
-
-  console.log(`共 ${stocks.length} 支一般股票待處理${LIMIT ? `（測試模式，限制 ${LIMIT} 支）` : ""}。`);
-
   const today = new Date();
   const endDate = formatDate(today);
   const startDate = BACKFILL_START_DATE;
 
+  console.log(`基準標的：${BENCHMARK_CODES.join(", ")}`);
   console.log(`回補區間：${startDate} ~ ${endDate}`);
+  console.log(
+    "注意：0050 未還原股價，除息日 close 含假跌幅；若基準報酬對除息敏感，日後改抓 TaiwanStockPriceAdj。\n",
+  );
 
-  let processed = 0;
   let quotesWritten = 0;
   const failed: string[] = [];
 
-  for (const stock of stocks) {
+  for (const code of BENCHMARK_CODES) {
+    // 基準標的必須已存在於 Stock 表（0050 由 seed 建立，securityType=etf）。
+    const stock = await prisma.stock.findUnique({
+      where: { code },
+      select: { code: true, market: true, name: true },
+    });
+    if (!stock) {
+      console.error(`Stock 表沒有 ${code}，跳過（先確認 seed 有建立此標的）`);
+      failed.push(code);
+      continue;
+    }
+
     try {
-      const rows = await fetchPriceHistory(stock.code, startDate, endDate);
+      const rows = await fetchPriceHistory(code, startDate, endDate);
+      console.log(`${code} ${stock.name}：FinMind 回傳 ${rows.length} 筆`);
 
       for (const row of rows) {
         const date = new Date(row.date);
         const change = row.spread ?? 0;
 
         await prisma.dailyQuote.upsert({
-          where: { stockCode_date: { stockCode: stock.code, date } },
+          where: { stockCode_date: { stockCode: code, date } },
           update: {
             open: row.open,
             high: row.max,
@@ -101,7 +112,7 @@ async function main() {
             source: stock.market,
           },
           create: {
-            stockCode: stock.code,
+            stockCode: code,
             date,
             open: row.open,
             high: row.max,
@@ -114,28 +125,17 @@ async function main() {
         });
         quotesWritten++;
       }
-
-      processed++;
-
-      if (processed % PROGRESS_INTERVAL === 0) {
-        console.log(`已處理 ${processed}/${stocks.length}`);
-      }
     } catch (err) {
-      console.error(`處理 ${stock.code} 失敗:`, err instanceof Error ? err.message : err);
-      failed.push(stock.code);
-      processed++;
+      console.error(`處理 ${code} 失敗:`, err instanceof Error ? err.message : err);
+      failed.push(code);
     }
 
     await sleep(REQUEST_DELAY_MS);
   }
 
   console.log("\n===== 回補完成 =====");
-  console.log(`處理股票數: ${processed}`);
   console.log(`寫入 DailyQuote 筆數: ${quotesWritten}`);
-  console.log(`失敗: ${failed.length}`);
-  if (failed.length > 0) {
-    console.log(`失敗代號清單: ${failed.join(", ")}`);
-  }
+  console.log(`失敗: ${failed.length}${failed.length > 0 ? `（${failed.join(", ")}）` : ""}`);
 }
 
 main()

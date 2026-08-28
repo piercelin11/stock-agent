@@ -13,7 +13,8 @@
       ▼
 歷史回測系統  ◄── 優先
   ├─ 腳本參數化（前置）
-  ├─ 批次模擬 + 效果評估 + 訓練/驗證期切分
+  ├─ Layer 0 基準跑（全市場原始因子落地 JSONL）
+  ├─ 記憶體重算（套門檻 → rankScore → 加權 → 統計）+ 訓練/驗證期切分
   └─ 回測儀表板（版本比較、個股檢視）
       │
       ▼
@@ -49,53 +50,112 @@
 
 驗證選股訊號有沒有預測力，並提供「調參數 → 看訓練期表現 → 用驗證期確認」的閉環。優先回測兩個策略：**冷水區選股（accumulation）** 與 **第一根突破（breakout-strength / intraday-breakout）**。交易策略測試（停損停利、進出場規則）不列進 ROADMAP，僅在 3.4 備註為未來可能擴充。
 
+**這階段不使用資料庫存回測結果。** 現在的目的是反覆調加權參數、快速看訊號有沒有預測力，是實驗性高頻迭代，不是多人協作的正式紀錄。把這種用完即丟的資料放進 Prisma schema 會增加 migration / index 維護成本卻沒有對應效益。改用檔案系統（JSON / JSONL）。DB 化留到「參數收斂、要長期自動化監控」的更後期再評估，不在這次規劃範圍。
+
+### 3.0 核心架構：四層資料流
+
+把「抓資料」跟「合成分數」拆開，讓調參數的重跑幾乎即時。這是整個回測系統的骨幹。
+
+```
+Layer 0    全市場原始因子（慢，只在換時間範圍時重跑）        → 落地 JSONL
+Layer 0.5  未來 N 日報酬 cache（全域，跨策略共用）           → 落地 JSONL
+Layer 1    套門檻參數篩候選池（記憶體，即時）
+Layer 2    分項函式 → 重算 rankScore → 加權排名（記憶體，即時）
+Layer 3    接 Layer 0.5 算命中率 / 報酬分布 / 穩定性（記憶體，即時）
+```
+
+**為什麼 Layer 0 必須存全市場、不能只存候選池：**
+兩支選股腳本各有一組**硬性門檻**（breakout 的 `GATES` / `TRIGGER_VOLUME_RATIO`、accumulation 的 `MIN_AVG_VOLUME_SHARES` 與「站上布林上軌排除」），這些門檻是可調參數，決定哪些股票進候選池。若 Layer 0 只存「當時通過門檻的股票」，之後調寬門檻就無法還原「原本沒過、調寬後應該要進來」的股票。所以 Layer 0 存全市場每一檔。
+
+**accumulation 的門檻和 breakout 同性質，且更麻煩（rankScore 穿透問題）：**
+- `MIN_AVG_VOLUME_SHARES`（近 20 日均量下限，`accumulation-shared.ts` 匯出的常數，3.1 列為可覆蓋 config）→ 與 breakout 的 `GATES` 完全同性質，必須存全市場的 `volumeMa20` 才能事後重篩。
+- 「站上布林上軌排除」（`close > bollingerUpper`）→ 這條不是可調參數，是與 breakout 清單互斥的結構規則，不因調參而變；但為了讓 Layer 0 資料完整、也讓「若之後想放寬互斥規則」有還原空間，仍存全市場、在 Layer 1 才套。
+- **rankScore 穿透**：accumulation 的四個分項（投信頻率 / 投信淨買比 / 其他法人集中度 / 窒息量）和 breakout 的 `relativeStrength`，都是**跨候選池的百分位排名**（`rankScore`）。候選池成員一變（調 `MIN_AVG_VOLUME_SHARES`），每檔的百分位分數就跟著變。因此 **Layer 2 必須在篩完池之後「重跑一次 rankScore」**，不能沿用 Layer 0 時期算的分數。
+
 ### 3.1 腳本參數化（前置）
 
 - [ ] `calculateAccumulationScore(date, config?)` — `config` 可覆蓋 `accumulation-shared.ts` 的所有常數（`CHIP_WEIGHTS` / `TRUST_SUB_WEIGHTS` / `TECH_WEIGHTS` / `READINESS_FLOOR` / 視窗天數 / `MIN_AVG_VOLUME_SHARES`），不傳則回退現有預設。輸出 JSON 已內嵌 `params` 區塊，格式沿用
 - [ ] `calculateBreakoutStrength(date, config?)` — `config` 可覆蓋 `breakout-shared.ts` 的 `GATES` / `WEIGHTS` / `TRIGGER_VOLUME_RATIO` / 各視窗常數，不傳則回退
-- [ ] `breakout-shared.ts` 內嵌的 magic number（`computeVolumeStrength` 的 2×→40/6×→100、`computeBreakoutMargin` 的 3% 轉折、`computeBase` 的 0.6/0.4 權重等）評估哪些值得抽成 config、哪些維持寫死
+- [ ] **明確區分兩類參數**（分層架構靠這個切）：「門檻類」（`GATES` / `TRIGGER_VOLUME_RATIO` / `MIN_AVG_VOLUME_SHARES`…決定誰進候選池，走 Layer 1）vs「加權 / 曲線類」（`WEIGHTS` / `CHIP_WEIGHTS` / 映射轉折點…決定分數怎麼組，走 Layer 2）。`config` 型別建議照這兩類分成兩個子物件
+- [ ] `breakout-shared.ts` 內嵌的 magic number（`computeVolumeStrength` 的 2×→40/6×→100、`computeBreakoutMargin` 的 3% 轉折、`computeBase` 的 0.6/0.4 權重等）評估哪些值得抽成 config、哪些維持寫死。**凡是可能成為校準對象的曲線轉折點，Layer 0 就必須存它的原始輸入而非成品分數**（見 3.2）
 - [ ] 從 `check-intraday-breakout.ts` 的私有 `main()` 抽出可呼叫的純函式（目前完全沒匯出），供回測用歷史資料模擬盤中快照——**注意**：TPEx 盤中/歷史端點限制（見 CLAUDE.md），盤中訊號的歷史回測可能只能對 TWSE 或只能用收盤資料近似
 - [ ] 確認參數化沒改變預設行為：對同一天用「不傳 config」與「傳等於預設值的 config」跑，輸出需完全一致
 
-### 3.2 回測資料表（新增 Prisma model）
+### 3.2 檔案輸出格式設計（取代原「回測資料表」）
 
-- [ ] `ParamVersion` — 具名參數版本（`name` 如 "v1-保守" / "v2-投信為主"、`strategy` enum、`config Json`、`createdAt`、`notes`）。可存多版並排比較，不互相覆蓋
-- [ ] `BacktestRun` — 一次回測執行（`paramVersionId`、`strategy`、`trainStart`/`trainEnd`/`validStart`/`validEnd`、`status`、`progress`、`startedAt`/`finishedAt`、彙總統計 `summary Json`）
-- [ ] `BacktestCandidate` — 回測期內每個交易日每檔候選股（`backtestRunId`、`date`、`stockCode`、`score`、`rank`、`factorBreakdown Json`、以及事後算出的 `returnN Json`（5/10/20 日報酬）、`hitBenchmark Boolean`、`period` train/valid）。量大，這張表要加好 index
-- [ ] migration
+不新增 Prisma model。改設計 Layer 0–3 各自的檔案內容與職責。
 
-### 3.3 批次歷史模擬引擎
+**共通原則：Layer 0 存「原始輸入值」，不存成品分項分數、不存 rankScore 結果。** 兩個理由：
+1. **rankScore 穿透**（見 3.0）：分項分數是「在某個候選池裡的百分位」，候選池一變就失效，必須事後重算，所以只能存排名前的原始比率。
+2. **曲線可校準**：`computeVolumeStrength`（2×→40）、`computeBreakoutMargin`（3% 轉折）、`computeBase`（0.6/0.4）這些映射曲線，肉眼校準時很可能想調。存成品分數 = 鎖死曲線；存原始值（量比幾倍、乖離幾 %）= 想改曲線不用重跑 Layer 0。重算成本是純算術（全市場約 1900 檔 × 交易日數 × 7 函式 ≈ 千萬次純函式呼叫，秒級），不心疼。
 
-- [ ] 對回測期內每個交易日，用給定 `config` 跑一次選股純函式，產生當天候選名單，寫入 `BacktestCandidate`（不只存記憶體——要反覆比對）
-- [ ] 背景任務執行（可能跑幾百個交易日）：Server Action 觸發 → 背景 worker 逐日跑 → 更新 `BacktestRun.progress`，UI 輪詢進度
-- [ ] 資料完整性檢查：回測期需要的 `DailyQuote` / `TechnicalIndicator` / `InstitutionalTrading` 是否齊全（目前 `InstitutionalTrading` 有 2025-05-02 起 324 個交易日；`TechnicalIndicator` 歷史視窗看 `backfill-daily-quotes` 補到哪）
+**檔案結構：**
 
-### 3.4 效果評估模組（與選股邏輯分離）
+```
+data/backtest-runs/{run-id}/
+  config.json                 # 時間範圍（訓練/驗證）、策略、選股純函式的 code 版本（git hash 或手動版號）
+  raw-factors/{date}.jsonl    # Layer 0 輸出，按交易日分檔，一行一檔股票
+  versions/{name}.json        # 使用者主動保留的具名重算結果（對應原 ParamVersion 概念）
+  versions/index.json         # 具名版本清單：name / config / 建立時間 / 統計摘要 pointer
+  summary/{name}.json         # （選配）Layer 3 統計輸出，若要跨 session 保留
 
-- [ ] 對每筆候選股，用訊號日之後的 `DailyQuote` OHLC 獨立計算：訊號後 N 日（5/10/20，可設定）報酬率
-- [ ] 對照組：同期大盤報酬（加權指數）或同期隨機挑股，作為 benchmark
-- [ ] `hitBenchmark` = 該候選股 N 日報酬是否贏過 benchmark
-- [ ] （選配）簡單停損停利規則模擬：用後續 OHLC 判斷先觸發停利還是停損，算實際報酬——**優先度低，先做「訊號有沒有預測力」，這塊之後再擴充**
+data/backtest-cache/
+  forward-returns.jsonl       # Layer 0.5，全域、非 run 專屬，(date, code) → N 日報酬 + benchmark
+```
 
-### 3.5 統計匯總模組
+- **`config.json`**：`code` 版本很重要——`raw-factors` 只在「選股純函式本身沒改」時可重用；函式改了要重跑 Layer 0。
+- **`raw-factors/{date}.jsonl`（Layer 0）**：全市場每檔一行。內容分兩塊——
+  - **門檻判斷裸值**：`close` / `bollingerUpper` / `volume` / `volumeMa20` / `sharesOutstanding`（＋ accumulation 額外需要的、breakout 額外需要的）。
+  - **rankScore 前的原始聚合值**：
+    - accumulation：投信 20 日淨買超天數比例、投信淨買超股數 ÷ 股本、(外資+自營商淨買超加總) ÷ (成交量加總)、近 5 日 `volume/volumeMa20` 均值、當日 bandwidth ＋ 前 240 日 bandwidth 陣列。
+    - breakout：量比（`volume/volumeMa20`）、乖離率（`(close−bollingerUpper)/bollingerUpper`）、K 棒 OHLC、firstBar 需要的近 30 日 `close`+`bollingerUpper` 序列、當日 bandwidth ＋ 前 240 日 bandwidth 陣列、proximity 需要的近 240 日 `close`、RS 需要的近 61 日 `close`。
+  - **按交易日分檔**的理由：Layer 1 可串流逐日讀；換時間範圍時只補新日期的檔；單一巨檔（估計 300MB–1GB）不好處理。
+  - **體積退路**：若 `raw-factors` 體積失控，`computeBase` 的 240 日 bandwidth 陣列可退成只存兩個中間量（depthScore、durationDays），代價是放棄調 `computeBase` 內部邏輯。**預設存完整陣列**，這只是退路。
+- **`forward-returns.jsonl`（Layer 0.5）**：(date, code) → { ret5, ret10, ret20, benchmarkRet5/10/20 }。只跟「日期＋股票代號」有關，跟策略、參數完全無關 → breakout 和 accumulation 跑同期間**共用同一份**，算過的 (date, code) 就不再算。不放進某次 run 的資料夾。
+- **Layer 1/2/3 不落地**：篩池 + 分項函式 + rankScore + 加權 + 統計全在記憶體 / 前端 state。使用者主動要保留比較時才存成 `versions/{name}.json`。
 
-- [ ] 彙總每次 `BacktestRun`：命中率（贏過 benchmark 比例）、平均/中位數報酬、勝率、賺賠比、最大回撤
-- [ ] 按時間分段的穩定性（避免只在某段市況特別準）——例如每季一個 bucket
-- [ ] 訓練期與驗證期分開統計、同一組參數跑
+### 3.3 Layer 0 基準跑（批次歷史模擬引擎）
+
+- [ ] 對回測區間內每個交易日，用選股純函式撈 DB 算出**全市場每檔**的門檻裸值 + rankScore 前原始聚合值，寫入 `raw-factors/{date}.jsonl`。**不套任何門檻、不算成品分數、不寫 DB**
+- [ ] 背景任務執行（可能跑幾百個交易日）：Server Action 觸發 → 背景 worker 逐日跑 → 寫進度檔（或記憶體進度），UI 輪詢
+- [ ] **資料完整性檢查（這步仍查 DB）**：Layer 0 開跑前確認回測區間的 `DailyQuote` / `TechnicalIndicator` / `InstitutionalTrading` 覆蓋率。**兩個待確認事項**：
+  - `InstitutionalTrading` 實際資料範圍——CLAUDE.md 寫「2025-05-02 起 324 個交易日」，`accumulation-shared.ts` 附近的說明寫「已回補至 6 年」，**兩者矛盾**，決定 accumulation 回測區間能拉多長，實作前先確認以哪個為準
+  - Layer 0 正確性前提是 `TechnicalIndicator` 已完整回填**整個回測區間**（`bollingerUpper` / `bollingerBandwidth` / `volumeMa20` 是逐日重算寫入的，查歷史某天安全），否則早期日期候選池會因指標缺值而大量 degraded / 被剔除，污染回測結果
+
+### 3.4 效果評估模組（產生 Layer 0.5 report cache）
+
+- [ ] 對回測區間內每個 (交易日, 全市場股票)，用該日之後的 `DailyQuote` OHLC 算 N 日（5/10/20，可設定）報酬率，寫入 `forward-returns.jsonl`。算過的 (date, code) 跳過
+- [ ] 對照組：同期大盤報酬（加權指數）作為 benchmark，一併寫進同一份 cache
+- [ ] 命中判定（`ret_N > benchmarkRet_N`）放在 Layer 3 算，不寫進 cache（cache 只放與策略無關的原始報酬）
+- [ ] （選配）簡單停損停利規則模擬：用後續 OHLC 判斷先觸發停利還是停損——**優先度低，先做「訊號有沒有預測力」，這塊之後再擴充**
+
+### 3.5 統計匯總模組（讀 JSONL 用 JS 算，非 Prisma 查詢層）
+
+- [ ] 抽成純函式 `computeBacktestStats(candidates, forwardReturns)` — 輸入 Layer 2 的候選名單 + Layer 0.5 的報酬 cache，輸出：命中率（贏過 benchmark 比例）、平均 / 中位數報酬、勝率、賺賠比、最大回撤
+- [ ] 按時間分段的穩定性（避免只在某段市況特別準）——每季一個 bucket
+- [ ] 按分數分層驗證單調性：前 10 名 vs 前 30 名 vs 全候選，看分數高低是否真的對應報酬高低
+- [ ] 訓練期與驗證期分開統計、用同一組參數跑
+- [ ] 純函式好處：不依賴 DB、好單測；這些統計本來就不是 SQL aggregate 一句話能算的
 
 ### 3.6 訓練/驗證期切分
 
-- [ ] `BacktestRun` 明確記錄「這組參數是在哪段訓練期調出來的」
-- [ ] 驗證期結果與訓練期分開顯示，用同一組參數跑
+- [ ] 一開始固定一段時間範圍，切訓練期（in-sample，較長，例如扣掉最近 2–3 個月）與驗證期（out-of-sample，較短，最近 2–3 個月）。**範圍固定，不隨參數調整而更換**
+- [ ] 訓練期反覆調參：改 Layer 1/2 參數 → 重跑 Layer 1/2/3（記憶體，即時）→ 比較命中率變化
+- [ ] `config.json` 記錄「這組參數是在哪段訓練期調出來的」
+- [ ] 驗證期需要**顯式「解鎖」動作** + 紅色警示；驗證期跑完的結果**自動落地存檔**（避免使用者「看一眼就回去調參」當沒看過）
 - [ ] UI 視覺警示：不要用驗證期資料回頭調參數（那樣驗證期就失去意義）
+- [ ] rolling window / walk-forward optimization 明列為之後再做，初期先固定一組切分
 
 ### 3.7 回測 UI
 
-- [ ] **設定頁**：參數輸入面板（`GATES` / `WEIGHTS` / 各因子轉折點常數）、日期範圍（訓練/驗證分開選、視覺警示）、版本命名與存檔
-- [ ] **執行頁**：觸發批次、進度條、跑完後的原始候選名單表
-- [ ] **結果儀表板頁**：命中率/平均報酬/勝率/賺賠比等關鍵指標卡片 + 圖表（報酬分布直方圖、命中率隨時間折線圖、訓練 vs 驗證並排）
+分兩種操作，成本差很多：
+
+- [ ] **執行基準跑（慢）**：選策略 + 時間範圍（訓練/驗證分開選）→ 觸發 Layer 0 + Layer 0.5 cache miss 的部分 → 進度條 / 背景執行。預期數十秒到數分鐘，視區間長度。跑完顯示全市場原始因子已就緒
+- [ ] **調整參數（快）**：滑桿 / 輸入框改門檻（Layer 1）或加權 / 曲線轉折（Layer 2）→ Layer 1/2/3 記憶體重算 → **目標 <2 秒**更新儀表板。這是整個設計的賣點，UI 做成滑桿即時回饋
+- [ ] **設定頁**：參數輸入面板（門檻類 / 加權類分區）、日期範圍（訓練/驗證分開選、視覺警示）、版本命名與存檔
+- [ ] **結果儀表板頁**：命中率 / 平均報酬 / 勝率 / 賺賠比等指標卡片 + 圖表（報酬分布直方圖、命中率隨時間折線圖、訓練 vs 驗證並排）
 - [ ] **個股檢視頁**：單一候選股當天完整評分明細 + 後續實際走勢圖 + 是否命中，方便肉眼校準時對照
-- [ ] **版本比較頁**：至少兩組參數版本並排顯示各項統計，這是「肉眼校準權重」最實際會用到的功能
+- [ ] **版本比較頁**：至少兩組參數版本並排顯示各項統計。比較對象是「不同參數的重新計算結果」，不一定都已落地存檔（記憶體 / 前端 state 暫存即可，主動保留才寫 `versions/{name}.json`）
 - [ ] 用回測框架回頭完成第 1 階段的「參數校準」待辦
 
 ## 4. 選股 → 挑股 → 觀察清單流程（日常操作殼）

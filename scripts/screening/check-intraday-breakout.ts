@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient, Market } from "../generated/prisma/client.js";
+import { PrismaClient, Market } from "../../generated/prisma/client.js";
 import {
   GATES,
   WEIGHTS,
@@ -20,7 +20,7 @@ import {
   computeMarketWideReturns,
   computeCandleShape,
   type HistoryPoint,
-} from "./breakout-shared.js";
+} from "../lib/breakout-shared.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -314,7 +314,7 @@ async function main() {
     console.log(`觸發帶價+帶量: ${triggered.length} 檔`);
     console.log(`通過資格門檻: 0 檔`);
 
-    const outputDir = join(__dirname, "..", "data", "intraday-breakout-snapshots");
+    const outputDir = join(__dirname, "..", "..", "data", "intraday-breakout-snapshots");
     mkdirSync(outputDir, { recursive: true });
     const timestamp = now.toISOString().slice(0, 19).replaceAll(":", "-");
     const outputPath = join(outputDir, `${timestamp}.json`);
@@ -542,7 +542,7 @@ async function main() {
   console.log(`觸發帶價+帶量: ${triggered.length} 檔`);
   console.log(`通過資格門檻: ${passed.length} 檔`);
 
-  const outputDir = join(__dirname, "..", "data", "intraday-breakout-snapshots");
+  const outputDir = join(__dirname, "..", "..", "data", "intraday-breakout-snapshots");
   mkdirSync(outputDir, { recursive: true });
   const timestamp = now.toISOString().slice(0, 19).replaceAll(":", "-");
   const outputPath = join(outputDir, `${timestamp}.json`);

@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../generated/prisma/client.js";
+import { PrismaClient } from "../../generated/prisma/client.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -380,7 +380,7 @@ export async function calculateScreenScore(date: Date): Promise<{
     console.log(`${String(r.rank).padEnd(6)}${r.code.padEnd(8)}${r.name.padEnd(12)}${r.screenScore.toFixed(2)}`);
   }
 
-  const outputDir = join(__dirname, "..", "data", "screen-score-results");
+  const outputDir = join(__dirname, "..", "..", "data", "screen-score-results");
   mkdirSync(outputDir, { recursive: true });
   const outputPath = join(outputDir, `${dateStr}.json`);
   writeFileSync(outputPath, JSON.stringify({ date: dateStr, results }, null, 2));
