@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, SecurityType, Market } from "../generated/prisma/client.js";
+import { fetchJson } from "./http.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -151,14 +152,7 @@ async function fetchTwseQuotes(date: string): Promise<ParsedRow[] | null> {
   url.searchParams.set("date", toApiDate(date));
   url.searchParams.set("type", "ALL");
 
-  const res = await fetch(url.toString(), {
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
-  if (!res.ok) {
-    throw new Error(`MI_INDEX API 請求失敗 (${date}): ${res.status} ${res.statusText}`);
-  }
-
-  const body = (await res.json()) as MiIndexResponse;
+  const body = await fetchJson<MiIndexResponse>(url.toString());
   if (!body.tables) {
     // 非交易日或無資料時，回應不含 tables 欄位
     return null;
@@ -174,14 +168,7 @@ async function fetchTwseQuotes(date: string): Promise<ParsedRow[] | null> {
 
 // TPEx OpenAPI 不支援指定日期查詢，只能拿到目前的最新一天，跟 top20-gainers.js 同源
 async function fetchTpexQuotes(): Promise<{ date: string; rows: ParsedRow[] } | null> {
-  const res = await fetch(TPEX_QUOTES_URL, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
-  if (!res.ok) {
-    throw new Error(`TPEx OpenAPI 請求失敗: ${res.status} ${res.statusText}`);
-  }
-
-  const body = (await res.json()) as TpexRow[];
+  const body = await fetchJson<TpexRow[]>(TPEX_QUOTES_URL);
   const firstRow = body[0];
   if (!Array.isArray(body) || firstRow === undefined) {
     return null;

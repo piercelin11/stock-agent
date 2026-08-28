@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, Market, SecurityType } from "../generated/prisma/client.js";
+import { fetchJson } from "./http.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -69,12 +70,7 @@ async function fetchTwseValuations(isoDate: string): Promise<ValuationRow[] | nu
   url.searchParams.set("date", isoDate.replaceAll("-", ""));
   url.searchParams.set("selectType", "ALL");
 
-  const res = await fetch(url.toString(), { headers: { "User-Agent": "Mozilla/5.0" } });
-  if (!res.ok) {
-    throw new Error(`TWSE BWIBBU_d 請求失敗 (${isoDate}): ${res.status} ${res.statusText}`);
-  }
-
-  const body = (await res.json()) as TwseBwibbuResponse;
+  const body = await fetchJson<TwseBwibbuResponse>(url.toString());
   if (body.stat !== "OK" || !body.data) {
     // 非交易日的 stat 是「很抱歉，沒有符合條件的資料!」
     return null;
@@ -101,12 +97,7 @@ async function fetchTpexValuations(isoDate: string): Promise<ValuationRow[] | nu
   url.searchParams.set("id", "");
   url.searchParams.set("response", "json");
 
-  const res = await fetch(url.toString(), { headers: { "User-Agent": "Mozilla/5.0" } });
-  if (!res.ok) {
-    throw new Error(`TPEx peQryDate 請求失敗 (${isoDate}): ${res.status} ${res.statusText}`);
-  }
-
-  const body = (await res.json()) as TpexPeQryResponse;
+  const body = await fetchJson<TpexPeQryResponse>(url.toString());
   const table = body.tables?.[0];
   if (!table || table.totalCount === 0 || !table.data || table.data.length === 0) {
     // 非交易日 totalCount 為 0

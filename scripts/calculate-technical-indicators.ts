@@ -139,9 +139,10 @@ function macdStatusSeries(closes: number[]): (string | null)[] {
   return status;
 }
 
-export async function calculateTechnicalIndicators(): Promise<{ processed: number; indicatorsWritten: number }> {
+// codes 傳入時只重算這幾支（例：某支股票事後補齊報價後單獨補指標），不傳則跑全市場一般股票
+export async function calculateTechnicalIndicators(codes?: string[]): Promise<{ processed: number; indicatorsWritten: number }> {
   const stocks = await prisma.stock.findMany({
-    where: { securityType: "stock" },
+    where: { securityType: "stock", ...(codes ? { code: { in: codes } } : {}) },
     select: { code: true },
     orderBy: { code: "asc" },
   });
@@ -226,7 +227,9 @@ export async function calculateTechnicalIndicators(): Promise<{ processed: numbe
 
 const isMain = process.argv[1] && import.meta.url === new URL(process.argv[1], "file://").href;
 if (isMain) {
-  calculateTechnicalIndicators()
+  // 可選：傳股票代號當參數，只重算那幾支（npx tsx scripts/calculate-technical-indicators.ts 4104 2330）
+  const codeArgs = process.argv.slice(2).filter((a) => /^\d{4}[A-Z]?$/.test(a));
+  calculateTechnicalIndicators(codeArgs.length > 0 ? codeArgs : undefined)
     .catch((err) => {
       console.error("技術指標計算失敗:", err);
       process.exit(1);

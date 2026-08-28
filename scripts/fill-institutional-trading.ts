@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, Market, SecurityType } from "../generated/prisma/client.js";
+import { fetchJson } from "./http.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -81,12 +82,7 @@ async function fetchTwseInstitutional(isoDate: string): Promise<InstitutionalRow
   url.searchParams.set("selectType", "ALL");
   url.searchParams.set("response", "json");
 
-  const res = await fetch(url.toString(), { headers: { "User-Agent": "Mozilla/5.0" } });
-  if (!res.ok) {
-    throw new Error(`TWSE T86 請求失敗 (${isoDate}): ${res.status} ${res.statusText}`);
-  }
-
-  const body = (await res.json()) as TwseT86Response;
+  const body = await fetchJson<TwseT86Response>(url.toString());
   if (body.stat !== "OK" || !body.data) {
     // 非交易日的 stat 是「很抱歉，沒有符合條件的資料!」
     return null;
@@ -110,12 +106,7 @@ async function fetchTwseInstitutional(isoDate: string): Promise<InstitutionalRow
 
 // TPEx OpenAPI 不支援指定日期查詢，只能拿到目前的最新一天
 async function fetchTpexInstitutional(): Promise<{ date: string; rows: InstitutionalRow[] } | null> {
-  const res = await fetch(TPEX_URL, { headers: { "User-Agent": "Mozilla/5.0" } });
-  if (!res.ok) {
-    throw new Error(`TPEx tpex_3insti_daily_trading 請求失敗: ${res.status} ${res.statusText}`);
-  }
-
-  const body = (await res.json()) as TpexInstitutionalRow[];
+  const body = await fetchJson<TpexInstitutionalRow[]>(TPEX_URL);
   const firstRow = body[0];
   if (!Array.isArray(body) || firstRow === undefined) {
     return null;

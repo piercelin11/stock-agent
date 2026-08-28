@@ -19,7 +19,7 @@
 - `scripts/fill-institutional-trading.ts`：抓取指定日期的 TWSE（`T86`）+ TPEx（`tpex_3insti_daily_trading`）三大法人買賣超寫入 `InstitutionalTrading`。TWSE 支援任意歷史日期，TPEx 不支援日期參數、永遠回傳「目前最新一天」（跟 TPEx 報價 API 同樣限制）。
 - `scripts/backfill-institutional-trading.ts`：用 FinMind API 逐支股票回補歷史三大法人買賣超至 `InstitutionalTrading`（回補區間同 `backfill-daily-quotes.ts`，預設 `2020-01-01` 起），補上 `fill-institutional-trading.ts` 只能抓當天資料的歷史缺口。
 - `scripts/backfill-6y.sh`：一次跑完 6 年歷史回補的四步接力（報價 → 三大法人 → 重算整段技術指標 → 重算整段產業熱度），log 寫到 `logs/backfill_6y_{timestamp}.log`。
-- `scripts/daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」五步：補齊今日 TWSE+TPEx 報價 → 抓今日 TWSE+TPEx 三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 算技術指標 → 算產業熱度。歷史缺漏回補、跑篩選皆已移出，改為個別手動執行對應腳本。
+- `scripts/daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」五步：補齊今日 TWSE+TPEx 報價 → 抓今日 TWSE+TPEx 三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 算技術指標 → 算產業熱度。歷史缺漏回補、跑篩選皆已移出，改為個別手動執行對應腳本。三個抓取步驟的對外請求走 `scripts/http.ts` 的 `fetchJson`（3 次 retry + 30s timeout），單一暫時性網路錯誤不會讓整條 pipeline 中斷。
 - `scripts/fetch-candidate-details.ts`：讀取篩選結果候選股清單，逐支抓取籌碼面（三大法人買賣超）、基本面（月營收、季報）、消息面（新聞）四類資料，寫入資料庫。
 
 ## 環境需求
@@ -48,8 +48,9 @@ npx tsx scripts/backfill-daily-quotes.ts
 # 補齊指定單一天的全市場報價（TWSE 可指定任意歷史日期，TPEx 固定補「目前最新一天」）
 npx tsx scripts/fill-daily-quotes.ts --date=2026-08-14
 
-# 計算技術指標
+# 計算技術指標（全市場；或帶股票代號只重算那幾支）
 npx tsx scripts/calculate-technical-indicators.ts
+npx tsx scripts/calculate-technical-indicators.ts 4104
 
 # 跑篩選
 npx tsx scripts/run-screener.ts
