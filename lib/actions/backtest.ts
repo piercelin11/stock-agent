@@ -3,6 +3,33 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import {
+  parseBreakoutRow,
+  parseAccumulationRow,
+  replayBreakoutRange,
+  replayAccumulationRange,
+  type BreakoutRawRow,
+  type AccumulationRawRow,
+} from "../../scripts/lib/backtest-replay";
+import {
+  resolveBreakoutConfig,
+  type BreakoutConfig,
+} from "../../scripts/lib/breakout-shared";
+import {
+  resolveAccumulationConfig,
+  type AccumulationConfig,
+} from "../../scripts/lib/accumulation-shared";
+import {
+  computeBacktestStats,
+  type BacktestStats,
+  type CandidatePick,
+} from "../../scripts/lib/backtest-stats";
+import { loadForwardReturns } from "../../scripts/backtest/load-forward-returns";
+
+// forward-returns cache 預設 horizons（與 build-forward-returns.ts 的 FORWARD_RETURN_HORIZONS 一致）。
+// 這裡不 import 該常數以免把 build-forward-returns.ts（含 dotenv / Prisma 的 module-level import）
+// 拉進 Next bundler；實際跑時優先讀 forward-returns.meta.json 的 horizons。
+const DEFAULT_HORIZONS = [5, 10, 20];
 
 // Layer 0 背景任務的 Server Actions（PLAN §5.1）。
 // 模式照 CLAUDE.md「背景任務」段：spawn detached 子進程 → 子進程覆寫 progress.json → 這裡輪詢讀檔。
@@ -136,4 +163,121 @@ export async function listBacktestRuns(): Promise<RunSummary[]> {
 
   summaries.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
   return summaries;
+}
+
+// ========================================================================
+// PLAN §5.1：forward-returns cache 補齊（spawn）+ 完整重算 + 統計摘要（同步）
+// ========================================================================
+
+const CACHE_DIR = join(REPO_ROOT, "data", "backtest-cache");
+
+// 補齊某區間的 forward-returns cache：spawn detached 子進程跑 build-forward-returns.ts
+// （可能幾分鐘），比照 startLayer0Run / CLAUDE.md 背景任務模式，action 立刻回傳。
+export async function ensureForwardReturns(input: {
+  start: string;
+  end: string;
+}): Promise<{ started: boolean }> {
+  const { start, end } = input;
+  if (!ISO_DATE.test(start) || !ISO_DATE.test(end)) {
+    throw new Error("start / end 需為 YYYY-MM-DD");
+  }
+  if (start > end) throw new Error("start 不可晚於 end");
+
+  const tsxCli = join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
+  const script = join(REPO_ROOT, "scripts", "backtest", "build-forward-returns.ts");
+  const child = spawn(
+    process.execPath,
+    ["--max-old-space-size=4096", tsxCli, script, `--start=${start}`, `--end=${end}`],
+    { detached: true, stdio: "ignore", cwd: REPO_ROOT },
+  );
+  child.unref();
+  return { started: true };
+}
+
+function readRunConfig(runId: string): { strategy: string; range: { start: string; end: string } | null } {
+  const cfgPath = join(RUNS_DIR, runId, "config.json");
+  if (!existsSync(cfgPath)) throw new Error(`找不到 run ${runId} 的 config.json`);
+  const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+  return { strategy: cfg.strategy ?? "", range: cfg.range ?? null };
+}
+
+function readMetaHorizons(): number[] {
+  const metaPath = join(CACHE_DIR, "forward-returns.meta.json");
+  if (!existsSync(metaPath)) return DEFAULT_HORIZONS;
+  try {
+    const meta = JSON.parse(readFileSync(metaPath, "utf8")) as { horizons?: number[] };
+    return Array.isArray(meta.horizons) && meta.horizons.length > 0 ? meta.horizons : DEFAULT_HORIZONS;
+  } catch {
+    return DEFAULT_HORIZONS;
+  }
+}
+
+// 讀 raw-factors/*.jsonl → 逐日 parse → Map<date, rows>
+function loadRawFactorsByDate<T>(
+  runId: string,
+  parse: (o: Record<string, unknown>) => T,
+): Map<string, T[]> {
+  const dir = join(RUNS_DIR, runId, "raw-factors");
+  const byDate = new Map<string, T[]>();
+  if (!existsSync(dir)) return byDate;
+  for (const f of readdirSync(dir).filter((x) => x.endsWith(".jsonl"))) {
+    const date = f.replace(/\.jsonl$/, "");
+    const content = readFileSync(join(dir, f), "utf8");
+    const rows: T[] = [];
+    for (const line of content.split("\n")) {
+      if (line.trim().length === 0) continue;
+      rows.push(parse(JSON.parse(line) as Record<string, unknown>));
+    }
+    byDate.set(date, rows);
+  }
+  return byDate;
+}
+
+// 對某個已完成的 run，用 DEFAULT config（或傳入 override）跑一次完整重算 + 統計，回摘要。
+// 【同步、Next.js 進程內】純記憶體 + 純函式（讀 .jsonl → replayXxxRange → computeBacktestStats），
+// 不 spawn 子進程（跟 Layer 0 不同——Layer 0 慢且查 DB，這個快且純算）。
+export async function runBacktestSummary(input: {
+  runId: string;
+  configOverride?: unknown;
+  horizons?: number[];
+  split?: { trainEnd: string; validStart: string };
+}): Promise<BacktestStats> {
+  const { runId, configOverride } = input;
+  if (!/^[\w-]+$/.test(runId)) throw new Error("runId 不合法");
+
+  const { strategy } = readRunConfig(runId);
+  const horizons = input.horizons ?? readMetaHorizons();
+  const forwardReturns = loadForwardReturns();
+
+  const picks: CandidatePick[] = [];
+
+  if (strategy === "breakout") {
+    const config: BreakoutConfig = resolveBreakoutConfig(
+      (configOverride as Parameters<typeof resolveBreakoutConfig>[0]) ?? undefined,
+    );
+    const byDate = loadRawFactorsByDate<BreakoutRawRow>(runId, parseBreakoutRow);
+    const replayed = replayBreakoutRange(byDate, config);
+    for (const [, results] of replayed) {
+      for (const r of results) {
+        picks.push({ date: r.date, code: r.code, score: r.totalScore, rank: r.rank });
+      }
+    }
+  } else if (strategy === "accumulation") {
+    const config: AccumulationConfig = resolveAccumulationConfig(
+      (configOverride as Parameters<typeof resolveAccumulationConfig>[0]) ?? undefined,
+    );
+    const byDate = loadRawFactorsByDate<AccumulationRawRow>(runId, parseAccumulationRow);
+    const replayed = replayAccumulationRange(byDate, config);
+    for (const [, results] of replayed) {
+      for (const r of results) {
+        picks.push({ date: r.date, code: r.code, score: r.finalScore, rank: r.rank });
+      }
+    }
+  } else {
+    throw new Error(`run ${runId} 的 strategy 不明：${strategy}`);
+  }
+
+  const options: Parameters<typeof computeBacktestStats>[2] = { horizons };
+  if (input.split) options.split = input.split;
+  return computeBacktestStats(picks, forwardReturns, options);
 }

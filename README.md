@@ -6,7 +6,7 @@
 
 ### 資料層（`scripts/`）
 
-`scripts/` 依用途分子資料夾：`pipeline/`（每日自動）、`screening/`（選股，手動）、`backtest/`（回測 Layer 0 引擎 + 資料完整性檢查）、`backfill/`（歷史回補，偶爾手動）、`lib/`（純函式庫 + 撈 DB helper）、`archive/`（已停用，不維護）。
+`scripts/` 依用途分子資料夾：`pipeline/`（每日自動）、`screening/`（選股，手動）、`backtest/`（回測四層：Layer 0 因子引擎 + Layer 0.5 forward-returns cache + 資料完整性檢查；Layer 1/2/3 純函式在 `lib/`）、`backfill/`（歷史回補，偶爾手動）、`lib/`（純函式庫 + 撈 DB helper）、`archive/`（已停用，不維護）。
 
 ### `scripts/pipeline/`
 
@@ -28,6 +28,10 @@
 
 - `check-data-completeness.ts`：給定回測區間，掃 `DailyQuote` / `TechnicalIndicator` / `InstitutionalTrading` 三表覆蓋率，抓「整段缺日期」與「單股缺漏」（`thinStocks`：實際筆數 / 應有筆數 < 0.9；區間中途上市的新股不誤報）。回報但不自動修，有 hard failure（覆蓋率 < 95% 等）時 exit 1。獨立可跑，也被 `run-layer0.ts` 開跑前呼叫。
 - `run-layer0.ts`：Layer 0 批次歷史模擬引擎。對區間每個交易日，用選股純函式撈全市場每檔的「門檻裸值 + rankScore 前的原始聚合值」寫入 `data/backtest-runs/{run-id}/raw-factors/{date}.jsonl`（一行一檔，不套門檻/不算分數/不寫 DB）。同時寫 `config.json`（range / strategy / git hash / `sharedLibHash` / `windowConfig`）與 `progress.json`（背景任務進度，原子寫）。`--resume=<run-id>` 從斷點續跑。搭配前端 `/backtest` 頁的按鈕觸發（`lib/actions/backtest.ts` spawn detached 子進程）。`data/backtest-runs/` 已進 `.gitignore`，需手動清。
+- `build-forward-returns.ts`：Layer 0.5 forward-returns cache。對區間每個 (交易日, 全市場一般股票) 用之後的 `DailyQuote` 算 5/10/20 日報酬 + 0050 同期報酬，寫入 `data/backtest-cache/forward-returns.jsonl`（全域、跨策略共用，算過的 (date, code) 跳過；`--force` 重算）。「第 N 天」用該股自己的報價序列數，不足 N 筆記 `null`。命中判定不寫進 cache。
+- `load-forward-returns.ts`：`loadForwardReturns()` → `ForwardReturnLookup`，供統計模組 / Server Action 讀 cache。
+
+`scripts/lib/` 的回測純函式：`backtest-replay.ts`（Layer 1/2 記憶體重算 `replayBreakout` / `replayAccumulation` + `*Range`，逐位元對齊 screening 腳本）、`backtest-stats.ts`（Layer 3 `computeBacktestStats` → 命中率 / 平均·中位數報酬 / 勝率 / 賺賠比 / 最大回撤 / 按季 / 分數分層 / train-valid 分段）、`backtest-stats.test.ts`（`pnpm tsx --test`）。
 
 ### `scripts/backfill/`
 
@@ -40,12 +44,12 @@
 
 Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4 + Recharts。目前只有骨架：
 
-- `app/`：`layout.tsx`（側邊欄殼）、`page.tsx`（dashboard，顯示 DB 連通性卡片 + Recharts smoke 圖）、`backtest/page.tsx`（Layer 0 基準跑：策略/日期輸入 + 觸發鈕 + 進度條 + run 清單）。
+- `app/`：`layout.tsx`（側邊欄殼）、`page.tsx`（dashboard，顯示 DB 連通性卡片 + Recharts smoke 圖）、`backtest/page.tsx`（Layer 0 基準跑：策略/日期輸入 + 觸發鈕 + 進度條 + run 清單；每個完成的 run 有「跑統計摘要」按鈕顯示 hitRate / 平均報酬 / byTopN 等數字；另有「補 forward-returns cache」按鈕）。
 - `lib/prisma.ts`：`PrismaClient` 單例（`globalThis` 快取，dev hot reload 不爆連線池），檔頭 `import "server-only"`。**只能在 Server Component / Server Action import。**
 - `lib/actions/`：Server Actions（不建 REST/GraphQL API），檔頭 `"use server"`。
 - `components/`：`ui/`（手刻基礎元件）、`ChartSmoke.tsx`。
 
-業務頁面（回測 UI、選股、觀察清單）尚未實作。
+完整回測 UI（參數滑桿即時回饋、儀表板圖表、個股檢視、版本比較）與選股 / 觀察清單頁尚未實作——`/backtest` 目前只有 Layer 0 觸發 + 統計摘要的最小驗證入口。
 
 ## 環境需求
 
@@ -125,6 +129,13 @@ pnpm tsx scripts/backtest/run-layer0.ts --strategy=accumulation --start=2024-01-
 # 斷點續跑
 pnpm tsx scripts/backtest/run-layer0.ts --resume=breakout-20260830-143012
 # 或從前端 /backtest 頁按鈕觸發（背景子進程 + 進度條輪詢）
+
+# Layer 0.5 forward-returns cache（全域、跨策略共用；算過的 (date, code) 跳過）
+pnpm tsx scripts/backtest/build-forward-returns.ts --start=2024-01-02 --end=2026-05-30
+# 改了報酬定義時重算：--force / 自訂 horizon：--horizons=5,10,20,60
+
+# 統計純函式單測
+pnpm tsx --test scripts/lib/backtest-stats.test.ts
 
 # --- 歷史回補（偶爾手動）---
 

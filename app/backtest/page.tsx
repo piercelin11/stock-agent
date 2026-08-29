@@ -1,4 +1,6 @@
 import { BacktestRunner } from "../../components/BacktestRunner";
+import { BacktestSummary } from "../../components/BacktestSummary";
+import { ForwardReturnsBuilder } from "../../components/ForwardReturnsBuilder";
 import { Card } from "../../components/ui/Card";
 import { listBacktestRuns } from "../../lib/actions/backtest";
 
@@ -20,52 +22,49 @@ export default async function BacktestPage() {
         <BacktestRunner />
       </Card>
 
+      <Card title="Layer 0.5 forward-returns cache">
+        <ForwardReturnsBuilder />
+      </Card>
+
       <Card title="已有的 run">
         {runs.length === 0 ? (
           <div className="text-sm text-slate-400">尚無 run。</div>
         ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-xs text-slate-400">
-                <th className="py-1 pr-4">run-id</th>
-                <th className="py-1 pr-4">策略</th>
-                <th className="py-1 pr-4">區間</th>
-                <th className="py-1 pr-4">進度</th>
-                <th className="py-1 pr-4">狀態</th>
-                <th className="py-1">建立時間</th>
-              </tr>
-            </thead>
-            <tbody>
-              {runs.map((r) => (
-                <tr key={r.runId} className="border-t border-slate-100">
-                  <td className="py-1.5 pr-4 font-mono text-xs text-slate-700">{r.runId}</td>
-                  <td className="py-1.5 pr-4">{r.strategy || "—"}</td>
-                  <td className="py-1.5 pr-4 text-slate-600">
+          <div className="space-y-6">
+            {runs.map((r) => (
+              <div key={r.runId} className="rounded border border-slate-100 p-3">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                  <span className="font-mono text-xs text-slate-700">{r.runId}</span>
+                  <span className="text-slate-600">{r.strategy || "—"}</span>
+                  <span className="text-slate-600">
                     {r.range ? `${r.range.start} → ${r.range.end}` : "—"}
-                  </td>
-                  <td className="py-1.5 pr-4 tabular-nums text-slate-600">
+                  </span>
+                  <span className="tabular-nums text-slate-600">
                     {r.completedDays !== null && r.totalDays !== null
                       ? `${r.completedDays}/${r.totalDays}`
                       : "—"}
-                  </td>
-                  <td className="py-1.5 pr-4">
-                    <span
-                      className={
-                        r.status === "done"
-                          ? "text-green-600"
-                          : r.status === "error"
-                            ? "text-red-600"
-                            : "text-slate-600"
-                      }
-                    >
-                      {r.status ?? "—"}
-                    </span>
-                  </td>
-                  <td className="py-1.5 text-xs text-slate-500">{r.createdAt ?? "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </span>
+                  <span
+                    className={
+                      r.status === "done"
+                        ? "text-green-600"
+                        : r.status === "error"
+                          ? "text-red-600"
+                          : "text-slate-600"
+                    }
+                  >
+                    {r.status ?? "—"}
+                  </span>
+                  <span className="text-xs text-slate-500">{r.createdAt ?? "—"}</span>
+                </div>
+                {r.status === "done" ? (
+                  <div className="mt-3">
+                    <BacktestSummary runId={r.runId} />
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
         )}
       </Card>
     </div>

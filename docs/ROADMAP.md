@@ -124,18 +124,18 @@ data/backtest-cache/
 
 ### 3.4 效果評估模組（產生 Layer 0.5 report cache）
 
-- [ ] 對回測區間內每個 (交易日, 全市場股票)，用該日之後的 `DailyQuote` OHLC 算 N 日（5/10/20，可設定）報酬率，寫入 `forward-returns.jsonl`。算過的 (date, code) 跳過
-- [ ] 對照組：同期大盤報酬（加權指數）作為 benchmark，一併寫進同一份 cache
-- [ ] 命中判定（`ret_N > benchmarkRet_N`）放在 Layer 3 算，不寫進 cache（cache 只放與策略無關的原始報酬）
+- [x] 對回測區間內每個 (交易日, 全市場股票)，用該日之後的 `DailyQuote` OHLC 算 N 日（5/10/20，可設定）報酬率，寫入 `forward-returns.jsonl`。算過的 (date, code) 跳過 → `scripts/backtest/build-forward-returns.ts`（`buildForwardReturns()` + CLI + `isMain` guard；「第 N 天」用該股自己的報價序列數，不足 N 筆記 null）
+- [x] 對照組：同期大盤報酬（0050，未還原）作為 benchmark，一併寫進同一份 cache（benchmark 用全市場交易日曆算第 N 天，缺日往後找並記 `benchmarkGapDays`）
+- [x] 命中判定（`ret_N > benchmarkRet_N`）放在 Layer 3 算，不寫進 cache（cache 只放與策略無關的原始報酬）
 - [ ] （選配）簡單停損停利規則模擬：用後續 OHLC 判斷先觸發停利還是停損——**優先度低，先做「訊號有沒有預測力」，這塊之後再擴充**
 
 ### 3.5 統計匯總模組（讀 JSONL 用 JS 算，非 Prisma 查詢層）
 
-- [ ] 抽成純函式 `computeBacktestStats(candidates, forwardReturns)` — 輸入 Layer 2 的候選名單 + Layer 0.5 的報酬 cache，輸出：命中率（贏過 benchmark 比例）、平均 / 中位數報酬、勝率、賺賠比、最大回撤
-- [ ] 按時間分段的穩定性（避免只在某段市況特別準）——每季一個 bucket
-- [ ] 按分數分層驗證單調性：前 10 名 vs 前 30 名 vs 全候選，看分數高低是否真的對應報酬高低
-- [ ] 訓練期與驗證期分開統計、用同一組參數跑
-- [ ] 純函式好處：不依賴 DB、好單測；這些統計本來就不是 SQL aggregate 一句話能算的
+- [x] 抽成純函式 `computeBacktestStats(candidates, forwardReturns, options)` — 輸入 Layer 2 的候選名單 + Layer 0.5 的報酬 cache，輸出：命中率（贏過 benchmark 比例）、平均 / 中位數報酬、超額報酬、勝率、賺賠比、最大回撤 → `scripts/lib/backtest-stats.ts`
+- [x] 按時間分段的穩定性（避免只在某段市況特別準）——每季一個 bucket（`byQuarter`）
+- [x] 按分數分層驗證單調性：前 10 名 vs 前 30 名 vs 全候選（`byTopN`，切點可設定，預設 `[10, 30, Infinity]`）
+- [x] 訓練期與驗證期分開統計、用同一組參數跑（`options.split` → `bySplit.train` / `bySplit.valid`；不做鎖定行為，留 3.6）
+- [x] 純函式好處：不依賴 DB、好單測；`scripts/lib/backtest-stats.test.ts`（專案首個單測檔，`node:test` + tsx，7 組手算案例）
 
 ### 3.6 訓練/驗證期切分
 
