@@ -4,6 +4,10 @@
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
+  // Emit extensionless relative imports in the generated client so both tsx
+  // (scripts/, nodenext) and Turbopack (app/, bundler resolution) can resolve
+  // them. With the default "js" specifiers Turbopack fails to map .js -> .ts.
+  importFileExtension = ""
 }
 
 datasource db {

@@ -42,20 +42,39 @@
 ## 開發慣例
 
 - Prisma model 單數命名（`Stock` 不是 `Stocks`），欄位用 camelCase（`stockCode` 不是 `stock_code`）。
-- 新增/更新基礎資料（股票清單、產業別）用 `npx prisma db seed`（會執行 `prisma/seed.ts`），不要每次手寫新腳本。
+- **套件管理器是 pnpm**（2026-08-28 從 npm 轉換）。`package.json` 的 `packageManager` 欄位鎖 `pnpm@8.15.4`（corepack）。`.npmrc` 設 `node-linker=hoisted`——扁平 `node_modules` 佈局，讓 `generated/prisma` client、tsx 腳本、plist 的絕對路徑都能照舊解析，代價是放棄 pnpm 的嚴格 phantom-dependency 檢查。指令一律 `pnpm ...`（`pnpm dev` / `pnpm tsx scripts/...` / `pnpm prisma ...` / `pnpm exec tsc --noEmit`）。lockfile 是 `pnpm-lock.yaml`，`package-lock.json` 已刪。
+- 新增/更新基礎資料（股票清單、產業別）用 `pnpm prisma db seed`（會執行 `prisma/seed.ts`），不要每次手寫新腳本。
 - `.env` 的資料庫連線變數名稱是 Prisma 預設的 `DATABASE_URL`。
 - **Prisma 版本為 7.9.1**（比原始規劃文件 `docs/PLAN.md` 假設的版本新），與舊版 Prisma 有以下差異，之後新增功能時要注意：
   - 連線字串不寫在 `schema.prisma` 的 `datasource.url`，而是在 `prisma.config.ts` 的 `datasource.url`（仍然讀取 `DATABASE_URL`）。
   - `PrismaClient` 需要搭配 driver adapter 初始化，本專案用 `@prisma/adapter-pg`：
     ```ts
     import { PrismaPg } from "@prisma/adapter-pg";
-    import { PrismaClient } from "../generated/prisma/client.js";
+    import { PrismaClient } from "../generated/prisma/client";
     const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
     const prisma = new PrismaClient({ adapter });
     ```
   - Prisma Client 產出位置是 `generated/prisma`（非預設的 `node_modules/@prisma/client`），且是 ESM-only（用了 `import.meta.url`），因此整個專案 `package.json` 設定為 `"type": "module"`。
+  - **`schema.prisma` 的 `generator client` 設 `importFileExtension = ""`**（2026-08-28 加）：讓 generated client 內部的相對 import 不帶副檔名，這樣 tsx（`scripts/`，nodenext）與 Turbopack（`app/`，bundler resolution）都能解析。原本預設帶 `.js` 會讓 Turbopack 找不到 `./enums.ts` 等檔。**因此 import client 時也不要帶 `.js`**（`from "../generated/prisma/client"`，舊腳本裡殘留的 `.js` 仍能跑但不一致）。改 schema 後要 `pnpm prisma generate`。
   - TS 執行工具用 **tsx**，不是 `ts-node`（`ts-node` 與剛發布的 TypeScript 7 新架構不相容）。
   - Prisma seed 指令設定在 `prisma.config.ts` 的 `migrations.seed`，不是 `package.json` 的 `"prisma"` 欄位（後者在 Prisma 7 已不生效）。
+  - `prisma.config.ts` 的 `datasource.url` 寫 `process.env["DATABASE_URL"] ?? ""`（`?? ""` 是為了滿足 `exactOptionalPropertyTypes`，否則 `next build` 的整專案 typecheck 會失敗）。
+
+## 前端（Next.js + Prisma）
+
+2026-08-28 建立的前端骨架（ROADMAP 第 2 節）。這階段只搭殼，業務頁面留給後續 PLAN。
+
+- **技術棧**：Next.js 16.3.3（App Router，Turbopack）+ React 19 + Tailwind CSS v4 + Recharts 3。TS 7 / Prisma 7 / ESM 這組合實測直接可跑，沒有降版或改 webpack。
+- **目錄**：前端在 repo 根目錄 `app/`（**不開 `web/` 子目錄、不做 monorepo**）——前端要 import 的 `generated/prisma`、`scripts/screening/*`、`scripts/lib/*` 都在根目錄，開子目錄只會讓 import path 變複雜。
+- **`lib/`（根目錄，新）vs `scripts/lib/`（既有）**：`lib/` 放 **Next/React 世界**的共用碼（Prisma 單例、Server Actions、格式化 helper）；`scripts/lib/` 維持是**純 Node 函式庫**（`http.ts` / `breakout-shared.ts` / `accumulation-shared.ts`），不 import React。兩個名字相近但職責分明。
+- **Prisma 單例**：`lib/prisma.ts` 把 `PrismaClient` 掛 `globalThis` 快取（dev hot reload 不會爆連線池），保留 `PrismaPg` driver adapter 寫法。**檔頭 `import "server-only"`**——`scripts/lib/` 與 `lib/` 名字太像，這是唯一能在 build 時擋下「client component 誤 import `lib/prisma.ts`」的機制。只能在 Server Component / Server Action import。
+- **Server Actions**（不建 REST/GraphQL）：檔案放 `lib/actions/*.ts`，檔頭 `"use server"`。action 只做「呼叫 Prisma / 純函式 → 回傳可序列化 plain object」。回傳 `Date` 要先轉字串、`Decimal` 要 `.toNumber()` / `.toString()`，在 action 邊界轉掉（`Decimal` 直接丟 client component 會壞）。
+- **`app/page.tsx` 等會查 DB 的頁面檔頭加 `export const dynamic = "force-dynamic";`**——否則 `next build` 會試圖靜態預渲染、在 build time 連本機 Postgres（CI / 沒開 DB 時直接失敗）。
+- **`*.css` import**：tsconfig 有 `noUncheckedSideEffectImports: true`，會擋 `import "./globals.css"`。對策是 `app/globals.css.d.ts` 內容 `declare module "*.css";`。**不要為此關掉該旗標**（`scripts/` 也吃這個旗標）。
+- **`next.config.ts` 的 `serverExternalPackages`**：列 `@prisma/client` / `@prisma/adapter-pg` / `pg`，讓 Prisma 相關套件走 Node 原生 require 不進 bundler（generated client 用 `import.meta.url` 定位 engine，被打包會找不到路徑）。
+- **背景任務**：模式是「Server Action `spawn` 一個 detached 子進程 → 子進程每步覆寫 `data/xxx/progress.json` → 另一個 Server Action 輪詢讀檔 → client component `setInterval` poll」。**`spawn` 用 `process.execPath` + `node_modules/tsx/dist/cli.mjs` 絕對路徑 + 目標腳本當參數**，不要用 `pnpm tsx` / `npx tsx`（detached 子進程解析 launcher 慢、PATH 依賴）。`.npmrc` 設 `node-linker=hoisted`，所以 `node_modules/tsx/dist/cli.mjs` 是扁平路徑、解析得到。目前 PoC 在 `scripts/_poc/` + `lib/actions/poc.ts` + `components/PocRunner.tsx`，回測 PLAN 開始時整組刪除。
+- **指令**：`pnpm dev`（開發）、`pnpm build`、`pnpm start`。
+- **tsconfig**：Next 首次 `dev` 會自動改 tsconfig（加 `moduleResolution: "bundler"`、`plugins: [{name:"next"}]`、`include` 等），已一併調 `module: "esnext"` 讓 scripts 與 app 共用同一份。`pnpm exec tsc --noEmit` 對 `scripts/` 維持乾淨。
 
 ## 目前進度
 
@@ -67,25 +86,25 @@
 
 ### `scripts/pipeline/` — 每日排程
 
-- **`daily-pipeline.ts`**：每日排程主控腳本，五步：補今日 TWSE+TPEx 報價 → 抓今日籌碼 → 抓今日估值 → 算技術指標 → 算產業熱度。任一步驟失敗印錯誤並非 0 結束。**非當日資料防呆**：報價步驟後若 TWSE+TPEx 皆無當日資料，提前結束整支 pipeline 並印警告數。無 `isMain` guard，`import` 這支即會執行 `main()`。`npx tsx scripts/pipeline/daily-pipeline.ts`。搭配 `daily_pipeline.plist`（每天 17:00 觸發，**尚未部署到 launchd、檔案也尚未建立**）。
-- **`fill-daily-quotes.ts`**：補齊全市場報價，自動新增 `Stock`、upsert `DailyQuote`。匯出 `fillOneDayTwse(date)`（`MI_INDEX`，可補任意歷史日）與 `fillTodayTpex(expectedIsoDate?)`（TPEx OpenAPI，只能拿「目前最新一天」，日期不符會跳過寫入並回傳 `isStaleDate: true`）。對外 fetch 走 `lib/http.ts` 的 `fetchJson`（3 次 retry + 30s timeout）。`npx tsx scripts/pipeline/fill-daily-quotes.ts --date=YYYY-MM-DD`。
-- **`fill-institutional-trading.ts`**：抓指定日期 TWSE（`T86`，可查任意歷史日）+ TPEx（`tpex_3insti_daily_trading`，只能拿最新一天）三大法人買賣超寫入 `InstitutionalTrading`。只 upsert 已存在的一般股票，不新增股票。對外 fetch 走 `lib/http.ts` 的 `fetchJson`。匯出 `fillOneDayInstitutional(date)`。`npx tsx scripts/pipeline/fill-institutional-trading.ts --date=YYYY-MM-DD`。**尚無下游消費者**（`calculate-breakout-strength.ts` 不讀，`calculate-accumulation-score.ts` 有讀）。
-- **`fill-gap-valuation.ts`**：抓指定日期 TWSE（`BWIBBU_d`）+ TPEx（`peQryDate`）估值寫入 `StockValuation`，兩邊皆可查任意歷史日期。對外 fetch 走 `lib/http.ts` 的 `fetchJson`。匯出 `fillOneDayValuation(date)`。`npx tsx scripts/pipeline/fill-gap-valuation.ts --date=YYYY-MM-DD`（不帶參數抓今天）。
-- **`calculate-technical-indicators.ts`**：依 `DailyQuote` 算 MA5/10/20/60、布林通道、量能均線、`volatility20d`/`maxDrawdown20d`/`atr20`/`rsi14`/`macdStatus`，寫入 `TechnicalIndicator`（對每支股票的全部歷史 `DailyQuote` 逐日重算）。匯出 `calculateTechnicalIndicators(codes?: string[])`——傳代號陣列只重算那幾支，不傳跑全市場一般股票。`npx tsx scripts/pipeline/calculate-technical-indicators.ts`（全市場）或 `... 4104 2330`（指定股票）。
-- **`calculate-industry-heat.ts`**：依 `DailyQuote` 算各產業每日等權熱度寫入 `IndustryHeatSnapshot`（純資料庫計算，零 API）。匯出 `calculateOneDayHeat(date)`。`npx tsx scripts/pipeline/calculate-industry-heat.ts`（最近交易日）或 `--backfill 20`。
+- **`daily-pipeline.ts`**：每日排程主控腳本，五步：補今日 TWSE+TPEx 報價 → 抓今日籌碼 → 抓今日估值 → 算技術指標 → 算產業熱度。任一步驟失敗印錯誤並非 0 結束。**非當日資料防呆**：報價步驟後若 TWSE+TPEx 皆無當日資料，提前結束整支 pipeline 並印警告數。無 `isMain` guard，`import` 這支即會執行 `main()`。`pnpm tsx scripts/pipeline/daily-pipeline.ts`。搭配 `daily_pipeline.plist`（每天 17:00 觸發，**尚未部署到 launchd、檔案也尚未建立**）。
+- **`fill-daily-quotes.ts`**：補齊全市場報價，自動新增 `Stock`、upsert `DailyQuote`。匯出 `fillOneDayTwse(date)`（`MI_INDEX`，可補任意歷史日）與 `fillTodayTpex(expectedIsoDate?)`（TPEx OpenAPI，只能拿「目前最新一天」，日期不符會跳過寫入並回傳 `isStaleDate: true`）。對外 fetch 走 `lib/http.ts` 的 `fetchJson`（3 次 retry + 30s timeout）。`pnpm tsx scripts/pipeline/fill-daily-quotes.ts --date=YYYY-MM-DD`。
+- **`fill-institutional-trading.ts`**：抓指定日期 TWSE（`T86`，可查任意歷史日）+ TPEx（`tpex_3insti_daily_trading`，只能拿最新一天）三大法人買賣超寫入 `InstitutionalTrading`。只 upsert 已存在的一般股票，不新增股票。對外 fetch 走 `lib/http.ts` 的 `fetchJson`。匯出 `fillOneDayInstitutional(date)`。`pnpm tsx scripts/pipeline/fill-institutional-trading.ts --date=YYYY-MM-DD`。**尚無下游消費者**（`calculate-breakout-strength.ts` 不讀，`calculate-accumulation-score.ts` 有讀）。
+- **`fill-gap-valuation.ts`**：抓指定日期 TWSE（`BWIBBU_d`）+ TPEx（`peQryDate`）估值寫入 `StockValuation`，兩邊皆可查任意歷史日期。對外 fetch 走 `lib/http.ts` 的 `fetchJson`。匯出 `fillOneDayValuation(date)`。`pnpm tsx scripts/pipeline/fill-gap-valuation.ts --date=YYYY-MM-DD`（不帶參數抓今天）。
+- **`calculate-technical-indicators.ts`**：依 `DailyQuote` 算 MA5/10/20/60、布林通道、量能均線、`volatility20d`/`maxDrawdown20d`/`atr20`/`rsi14`/`macdStatus`，寫入 `TechnicalIndicator`（對每支股票的全部歷史 `DailyQuote` 逐日重算）。匯出 `calculateTechnicalIndicators(codes?: string[])`——傳代號陣列只重算那幾支，不傳跑全市場一般股票。`pnpm tsx scripts/pipeline/calculate-technical-indicators.ts`（全市場）或 `... 4104 2330`（指定股票）。
+- **`calculate-industry-heat.ts`**：依 `DailyQuote` 算各產業每日等權熱度寫入 `IndustryHeatSnapshot`（純資料庫計算，零 API）。匯出 `calculateOneDayHeat(date)`。`pnpm tsx scripts/pipeline/calculate-industry-heat.ts`（最近交易日）或 `--backfill 20`。
 
 ### `scripts/screening/` — 選股（手動）
 
-- **`calculate-breakout-strength.ts`**：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（三層：觸發→資格門檻→強度評分，評分公式皆單調遞增，不用鐘型曲線）。共用邏輯在 `lib/breakout-shared.ts`。結果不寫資料庫，輸出至 `data/breakout-strength-results/{date}.json`。匯出 `calculateBreakoutStrength(date)`。`npx tsx scripts/screening/calculate-breakout-strength.ts --date=YYYY-MM-DD`。
-- **`calculate-accumulation-score.ts`**：盤後選股 v2「投信吃貨訊號」——找還沒出現第一根突破、但籌碼/技術面在醞釀的股票，與 `calculate-breakout-strength.ts`（找已發生的突破）互補。計分為**乘法結構**：`最終分數 = 籌碼分數 × 技術就緒係數`。籌碼分數（主排序依據）= 投信分數 × 0.7 + 其他法人分數 × 0.3；技術就緒係數 = 壓縮度/窒息量合成後線性映射到 `READINESS_FLOOR`~1.0（下限 0.5）。候選池先剔除「今日已站上布林上軌」（與突破清單互斥）與「近 20 日均量 < `MIN_AVG_VOLUME_SHARES`(=500 張)」（低流動性死股）。結果不寫資料庫，輸出至 `data/accumulation-score-results/{date}.json`（`code`+`date` 欄位格式對齊突破腳本，方便日後回測命中率）。匯出 `calculateAccumulationScore(date)`。`npx tsx scripts/screening/calculate-accumulation-score.ts --date=YYYY-MM-DD`。**獨立手動執行，不進 daily-pipeline**。待校準參數集中在 `lib/accumulation-shared.ts`，首版未校準（前段偏大型股）。
-- **`check-intraday-breakout.ts`**：盤中一次性快照篩選，把 `calculate-breakout-strength.ts` 的三層邏輯套用在 `mis.twse.com.tw` 即時報價上（社群逆向工程端點，非官方文件）。**一次性手動執行，不排程、不接進 daily-pipeline**，不支援 `--date`。批次查詢（120 檔/批，1.5 秒節流），`elapsedRatio` 現算預估全天量。與 `calculate-breakout-strength.ts` 評分邏輯 100% 共用，但當日 close/volume/OHLC/布林上軌全是即時或估計值（vs 盤後版的定案值），比較基準日也差一天（即時價 vs T-1 上軌）。結果輸出至 `data/intraday-breakout-snapshots/{timestamp}.json`。`npx tsx scripts/screening/check-intraday-breakout.ts`。
+- **`calculate-breakout-strength.ts`**：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（三層：觸發→資格門檻→強度評分，評分公式皆單調遞增，不用鐘型曲線）。共用邏輯在 `lib/breakout-shared.ts`。結果不寫資料庫，輸出至 `data/breakout-strength-results/{date}.json`。匯出 `calculateBreakoutStrength(date)`。`pnpm tsx scripts/screening/calculate-breakout-strength.ts --date=YYYY-MM-DD`。
+- **`calculate-accumulation-score.ts`**：盤後選股 v2「投信吃貨訊號」——找還沒出現第一根突破、但籌碼/技術面在醞釀的股票，與 `calculate-breakout-strength.ts`（找已發生的突破）互補。計分為**乘法結構**：`最終分數 = 籌碼分數 × 技術就緒係數`。籌碼分數（主排序依據）= 投信分數 × 0.7 + 其他法人分數 × 0.3；技術就緒係數 = 壓縮度/窒息量合成後線性映射到 `READINESS_FLOOR`~1.0（下限 0.5）。候選池先剔除「今日已站上布林上軌」（與突破清單互斥）與「近 20 日均量 < `MIN_AVG_VOLUME_SHARES`(=500 張)」（低流動性死股）。結果不寫資料庫，輸出至 `data/accumulation-score-results/{date}.json`（`code`+`date` 欄位格式對齊突破腳本，方便日後回測命中率）。匯出 `calculateAccumulationScore(date)`。`pnpm tsx scripts/screening/calculate-accumulation-score.ts --date=YYYY-MM-DD`。**獨立手動執行，不進 daily-pipeline**。待校準參數集中在 `lib/accumulation-shared.ts`，首版未校準（前段偏大型股）。
+- **`check-intraday-breakout.ts`**：盤中一次性快照篩選，把 `calculate-breakout-strength.ts` 的三層邏輯套用在 `mis.twse.com.tw` 即時報價上（社群逆向工程端點，非官方文件）。**一次性手動執行，不排程、不接進 daily-pipeline**，不支援 `--date`。批次查詢（120 檔/批，1.5 秒節流），`elapsedRatio` 現算預估全天量。與 `calculate-breakout-strength.ts` 評分邏輯 100% 共用，但當日 close/volume/OHLC/布林上軌全是即時或估計值（vs 盤後版的定案值），比較基準日也差一天（即時價 vs T-1 上軌）。結果輸出至 `data/intraday-breakout-snapshots/{timestamp}.json`。`pnpm tsx scripts/screening/check-intraday-breakout.ts`。
 
 ### `scripts/backfill/` — 歷史回補（偶爾手動）
 
-- **`backfill-daily-quotes.ts`**：FinMind 逐支回補歷史報價至 `DailyQuote`（只跑 `securityType=stock`）。回補區間為 `BACKFILL_START_DATE`（預設 `2020-01-01`）到執行當天，實測 FinMind 單支查詢 6 年不會被截斷。`npx tsx scripts/backfill/backfill-daily-quotes.ts`（`BACKFILL_LIMIT` 限制測試支數；`BACKFILL_START_DATE=YYYY-MM-DD` 覆蓋起始日）。
-- **`backfill-institutional-trading.ts`**：逐支一般股票用 FinMind 回補歷史三大法人買賣超至 `InstitutionalTrading`（TWSE 可回補任意歷史，TPEx 受端點限制效果有限）。回補區間同上。單支失敗不中斷。`npx tsx scripts/backfill/backfill-institutional-trading.ts`（`BACKFILL_LIMIT=10` 小量測試）。**已執行完成（首輪）**：`InstitutionalTrading` 現有 2025-05-02 起 324 個交易日、約 59 萬筆、1989 檔（2026-08-27 起以 `2020-01-01` 起始日重跑回補至 6 年，回補結果待確認實際覆蓋範圍）。
-- **`backfill-benchmark-quotes.ts`**：FinMind 回補回測用大盤基準標的的 `DailyQuote`（目前 `BENCHMARK_CODES = ["0050"]`，要加 006208／其他改陣列）。**只寫 `DailyQuote`，不碰 `TechnicalIndicator` / `InstitutionalTrading`**——基準只需要收盤價算報酬。0050 為未還原股價，除息日 `close` 含假跌幅；若基準報酬對除息敏感，日後改抓 `TaiwanStockPriceAdj`。`npx tsx scripts/backfill/backfill-benchmark-quotes.ts`。**已執行**：0050 已補 2020-01-02 ~ 今，約 1612 筆。
-- **`update-shares-outstanding.ts`**：下載 MOPS 股本 CSV 更新 `Stock.sharesOutstanding`。**獨立手動執行，月頻，不進 daily pipeline**。`npx tsx scripts/backfill/update-shares-outstanding.ts`。
+- **`backfill-daily-quotes.ts`**：FinMind 逐支回補歷史報價至 `DailyQuote`（只跑 `securityType=stock`）。回補區間為 `BACKFILL_START_DATE`（預設 `2020-01-01`）到執行當天，實測 FinMind 單支查詢 6 年不會被截斷。`pnpm tsx scripts/backfill/backfill-daily-quotes.ts`（`BACKFILL_LIMIT` 限制測試支數；`BACKFILL_START_DATE=YYYY-MM-DD` 覆蓋起始日）。
+- **`backfill-institutional-trading.ts`**：逐支一般股票用 FinMind 回補歷史三大法人買賣超至 `InstitutionalTrading`（TWSE 可回補任意歷史，TPEx 受端點限制效果有限）。回補區間同上。單支失敗不中斷。`pnpm tsx scripts/backfill/backfill-institutional-trading.ts`（`BACKFILL_LIMIT=10` 小量測試）。**已執行完成（6 年回補）**：2026-08-28 實測 `InstitutionalTrading` 涵蓋 **2020-01-02 → 2026-08-28、約 1476 個交易日、2,662,485 筆、每年 1808~1983 檔**（逐年筆數：2020=349,547／2021=376,427／2022=388,570／2023=392,978／2024=429,336／2025=432,544／2026(至 08-28)=293,083）。與 `DailyQuote`（3,066,466 筆）、`TechnicalIndicator`（3,060,066 筆）同為 2020-01-02 起，可支撐 accumulation 回測拉滿 6 年區間。（舊紀錄「2025-05-02 起 324 個交易日」已過時，是 2026-08-27 6 年回補前的狀態。）
+- **`backfill-benchmark-quotes.ts`**：FinMind 回補回測用大盤基準標的的 `DailyQuote`（目前 `BENCHMARK_CODES = ["0050"]`，要加 006208／其他改陣列）。**只寫 `DailyQuote`，不碰 `TechnicalIndicator` / `InstitutionalTrading`**——基準只需要收盤價算報酬。0050 為未還原股價，除息日 `close` 含假跌幅；若基準報酬對除息敏感，日後改抓 `TaiwanStockPriceAdj`。`pnpm tsx scripts/backfill/backfill-benchmark-quotes.ts`。**已執行**：0050 已補 2020-01-02 ~ 今，約 1612 筆。
+- **`update-shares-outstanding.ts`**：下載 MOPS 股本 CSV 更新 `Stock.sharesOutstanding`。**獨立手動執行，月頻，不進 daily pipeline**。`pnpm tsx scripts/backfill/update-shares-outstanding.ts`。
 
 ### `scripts/lib/` — 純函式庫
 
@@ -113,3 +132,13 @@
 ## docs/ROADMAP.md 維護
 
 完成 ROADMAP 上的某個 todo 項目後，順手把對應的 `- [ ]` 打勾成 `- [x]`，不要留給使用者自己對照勾選。若某個階段（如「1. 盤後選股 v2」）底下所有項目都打勾完成，在該次回覆裡明確提醒使用者這個階段已全部完成；若整份 ROADMAP 所有階段都完成，額外提醒使用者可以考慮規劃下一輪內容。這份文件是持續累積更新的（做完的項目打勾保留、不刪除），跟 `docs/PLAN.md`（單一任務的實作規格書，做完即被下一份取代）角色不同，不要混用或互相覆蓋內容。
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

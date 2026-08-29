@@ -18,6 +18,15 @@ logs/
 # Prisma
 prisma/*.db
 
+# Next.js
+/.next/
+/next-env.d.ts
+/out/
+tsconfig.tsbuildinfo
+
+# Background-task PoC scratch output (see docs/PLAN.md §9; delete with _poc files)
+/data/_poc/
+
 # OS
 .DS_Store
 

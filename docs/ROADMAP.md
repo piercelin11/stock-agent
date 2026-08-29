@@ -40,11 +40,11 @@
 
 回測 UI 與後續日常操作介面共用的殼。這階段只搭骨架、不做業務頁面。
 
-- [ ] 在既有 repo 內建 Next.js（App Router）。專案目前零前端（`package.json` 無 next/react，`src/` 空）——決定放 `app/` 還是 `web/` 子目錄、與 `scripts/` 共用 `generated/prisma` client
-- [ ] **Next.js + Prisma 單例**：dev hot reload 會重複建立 connection pool，用 `globalThis` 快取 `PrismaClient`（搭配既有的 `PrismaPg` driver adapter 寫法）
-- [ ] 不另建 REST/GraphQL API，一律用 **Server Actions** 直接呼叫 Prisma 與選股純函式
-- [ ] 圖表庫定案（傾向 Recharts）、基本版面/導覽/樣式方案
-- [ ] 背景任務機制：回測會跑幾百個交易日，需要「Server Action 觸發 → 背景 worker → UI 輪詢進度」的模式，先確立怎麼做（獨立 node 進程 / worker、進度寫 DB）
+- [x] 在既有 repo 內建 Next.js（App Router）。決定放 repo 根目錄 `app/`（不開 `web/` 子目錄、不做 monorepo），與 `scripts/` 共用 `generated/prisma` client。Next 16.3.3 + Turbopack + TS 7 + ESM 直接可跑，無需降版或 `--webpack`
+- [x] **Next.js + Prisma 單例**：`lib/prisma.ts` 用 `globalThis` 快取 `PrismaClient`（保留 `PrismaPg` driver adapter 寫法），檔頭 `import "server-only"` 當誤 import 護欄。hot reload 多次不會讓連線數持續增長
+- [x] 不另建 REST/GraphQL API，一律用 **Server Actions**（`lib/actions/*.ts`）。已有 `getDbHealth()` 示範讀真實 DB 數字上首頁
+- [x] 圖表庫定案 **Recharts**（`components/ChartSmoke.tsx` smoke 圖）、版面/導覽 = Tailwind CSS v4 + 手刻 `components/ui/` + `app/layout.tsx` 側邊欄
+- [x] 背景任務機制定案：**獨立 Node 子進程（`spawn` tsx cli.mjs 絕對路徑）+ 進度寫檔 + Server Action 輪詢**。PoC 在 `scripts/_poc/` + `lib/actions/poc.ts` + `components/PocRunner.tsx`，下一份 PLAN（回測）開始時刪除換成真的 Layer 0 runner
 
 ## 3. 歷史回測系統 ◄── 優先
 
@@ -118,9 +118,9 @@ data/backtest-cache/
 
 - [ ] 對回測區間內每個交易日，用選股純函式撈 DB 算出**全市場每檔**的門檻裸值 + rankScore 前原始聚合值，寫入 `raw-factors/{date}.jsonl`。**不套任何門檻、不算成品分數、不寫 DB**
 - [ ] 背景任務執行（可能跑幾百個交易日）：Server Action 觸發 → 背景 worker 逐日跑 → 寫進度檔（或記憶體進度），UI 輪詢
-- [ ] **資料完整性檢查（這步仍查 DB）**：Layer 0 開跑前確認回測區間的 `DailyQuote` / `TechnicalIndicator` / `InstitutionalTrading` 覆蓋率。**兩個待確認事項**：
-  - `InstitutionalTrading` 實際資料範圍——CLAUDE.md 寫「2025-05-02 起 324 個交易日」，`accumulation-shared.ts` 附近的說明寫「已回補至 6 年」，**兩者矛盾**，決定 accumulation 回測區間能拉多長，實作前先確認以哪個為準
-  - Layer 0 正確性前提是 `TechnicalIndicator` 已完整回填**整個回測區間**（`bollingerUpper` / `bollingerBandwidth` / `volumeMa20` 是逐日重算寫入的，查歷史某天安全），否則早期日期候選池會因指標缺值而大量 degraded / 被剔除，污染回測結果
+- [ ] **資料完整性檢查（這步仍查 DB）**：Layer 0 開跑前確認回測區間的 `DailyQuote` / `TechnicalIndicator` / `InstitutionalTrading` 覆蓋率。**已釐清**：
+  - `InstitutionalTrading` 實際資料範圍（2026-08-28 查 DB 確認）：**2020-01-02 → 2026-08-28、約 1476 個交易日、266 萬筆**，與 `DailyQuote` / `TechnicalIndicator` 同起點。舊紀錄「2025-05-02 起 324 個交易日」是 2026-08-27 6 年回補前的狀態，已過時。**accumulation 回測區間可拉滿 6 年**，唯一注意早期年份每日檔數略少（2020 每日約 1808 檔 vs 2025 約 1983 檔），屬正常（當時上市家數較少）。
+  - Layer 0 正確性前提是 `TechnicalIndicator` 已完整回填**整個回測區間**（`bollingerUpper` / `bollingerBandwidth` / `volumeMa20` 是逐日重算寫入的，查歷史某天安全），否則早期日期候選池會因指標缺值而大量 degraded / 被剔除，污染回測結果。已知 2026-08-27 6 年回補時 4104 曾只寫 326 筆報價再事後補回 1616 筆（技術指標亦已用單股參數補算），完整性檢查腳本要能抓出這類單股缺漏
 
 ### 3.4 效果評估模組（產生 Layer 0.5 report cache）
 

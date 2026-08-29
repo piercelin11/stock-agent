@@ -6,7 +6,9 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
   },
   "repository": {
     "type": "git",
@@ -16,6 +18,10 @@
   "author": "",
   "license": "ISC",
   "type": "module",
+  "packageManager": "pnpm@8.15.4",
+  "engines": {
+    "node": ">=22"
+  },
   "bugs": {
     "url": "https://github.com/piercelin11/stock-agent/issues"
   },
@@ -25,12 +31,22 @@
     "@prisma/client": "^7.9.1",
     "@types/node": "^26.2.0",
     "dotenv": "^17.4.2",
+    "next": "^16.3.3",
     "pg": "^8.23.0",
     "prisma": "^7.9.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "recharts": "^3.10.1",
+    "server-only": "^0.0.1",
     "typescript": "^7.0.2"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
     "@types/pg": "^8.21.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^4.3.3",
     "tsx": "^4.23.12"
   }
 }
