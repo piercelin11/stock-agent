@@ -24,7 +24,7 @@ prisma/*.db
 /out/
 tsconfig.tsbuildinfo
 
-# Background-task PoC scratch output (see docs/PLAN.md §9; delete with _poc files)
+# Background-task PoC scratch output (removed with _poc files; kept harmless)
 /data/_poc/
 
 # OS

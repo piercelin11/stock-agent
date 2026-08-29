@@ -3,13 +3,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../../generated/prisma/client.js";
+import { PrismaClient } from "../../generated/prisma/client";
+import type { DeepPartial } from "../lib/types";
 import {
-  GATES,
-  WEIGHTS,
-  TRIGGER_VOLUME_RATIO,
-  BASE_MAX_WINDOW_DAYS,
-  RS_WINDOW_DAYS,
   rankScore,
   fetchHistoryWindow,
   computeVolumeStrength,
@@ -19,13 +15,17 @@ import {
   computeProximityToHigh,
   computeMarketWideReturns,
   computeCandleShape,
+  resolveBreakoutConfig,
+  type BreakoutConfig,
   type HistoryPoint,
-} from "../lib/breakout-shared.js";
+} from "../lib/breakout-shared";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma = new PrismaClient({ adapter });
+function makePrisma(): PrismaClient {
+  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+  return new PrismaClient({ adapter });
+}
 
 function toIsoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -49,7 +49,7 @@ interface IndicatorRow {
   volumeMa20: number | null;
 }
 
-async function fetchTodayQuotes(date: Date): Promise<QuoteRow[]> {
+async function fetchTodayQuotes(prisma: PrismaClient, date: Date): Promise<QuoteRow[]> {
   const quotes = await prisma.dailyQuote.findMany({
     where: { date, stock: { securityType: "stock" } },
     select: {
@@ -77,7 +77,11 @@ async function fetchTodayQuotes(date: Date): Promise<QuoteRow[]> {
   }));
 }
 
-async function fetchIndicatorsForDate(date: Date, codes: string[]): Promise<Map<string, IndicatorRow>> {
+async function fetchIndicatorsForDate(
+  prisma: PrismaClient,
+  date: Date,
+  codes: string[],
+): Promise<Map<string, IndicatorRow>> {
   const rows = await prisma.technicalIndicator.findMany({
     where: { date, stockCode: { in: codes } },
     select: { stockCode: true, bollingerUpper: true, bollingerBandwidth: true, volumeMa20: true },
@@ -106,13 +110,41 @@ interface BreakoutResult {
   degraded: string[];
 }
 
-export async function calculateBreakoutStrength(date: Date): Promise<{
+export interface CalculateBreakoutOptions {
+  prisma?: PrismaClient;
+  config?: DeepPartial<BreakoutConfig>;
+}
+
+export async function calculateBreakoutStrength(
+  date: Date,
+  options: CalculateBreakoutOptions = {},
+): Promise<{
   date: string;
   isNonTradingDay: boolean;
   stats: { totalStocks: number; triggered: number; passedGates: number };
 }> {
+  const prisma = options.prisma ?? makePrisma();
+  const ownsPrisma = options.prisma === undefined;
+  const config = resolveBreakoutConfig(options.config);
+  try {
+    return await runCalculation(prisma, date, config);
+  } finally {
+    if (ownsPrisma) await prisma.$disconnect();
+  }
+}
+
+async function runCalculation(
+  prisma: PrismaClient,
+  date: Date,
+  config: BreakoutConfig,
+): Promise<{
+  date: string;
+  isNonTradingDay: boolean;
+  stats: { totalStocks: number; triggered: number; passedGates: number };
+}> {
+  const { gate, score } = config;
   const dateStr = toIsoDate(date);
-  const quotes = await fetchTodayQuotes(date);
+  const quotes = await fetchTodayQuotes(prisma, date);
 
   if (quotes.length === 0) {
     console.log(`${dateStr} 無任何 DailyQuote 資料（非交易日？），跳過`);
@@ -122,14 +154,14 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
   const totalStocks = quotes.length;
   const codes = quotes.map((q) => q.stockCode);
 
-  const todayIndicators = await fetchIndicatorsForDate(date, codes);
+  const todayIndicators = await fetchIndicatorsForDate(prisma, date, codes);
 
   // 第一層：觸發條件
   const triggeredQuotes = quotes.filter((q) => {
     const ind = todayIndicators.get(q.stockCode);
     if (!ind || ind.bollingerUpper === null || ind.volumeMa20 === null || ind.volumeMa20 <= 0) return false;
     const passPrice = q.close > ind.bollingerUpper;
-    const passVolume = q.volume / ind.volumeMa20 >= TRIGGER_VOLUME_RATIO;
+    const passVolume = q.volume / ind.volumeMa20 >= gate.triggerVolumeRatio;
     return passPrice && passVolume;
   });
 
@@ -143,8 +175,8 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
       return false;
     }
     const marketCap = q.sharesOutstanding * q.close;
-    const passCap = marketCap >= GATES.minMarketCap;
-    const passVolume = q.volume >= GATES.minVolumeShares;
+    const passCap = marketCap >= gate.minMarketCap;
+    const passVolume = q.volume >= gate.minVolumeShares;
     return passCap && passVolume;
   });
 
@@ -162,7 +194,13 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
     writeFileSync(
       outputPath,
       JSON.stringify(
-        { date: dateStr, gates: GATES, weights: WEIGHTS, stats: { totalStocks, triggered, passedGates }, results: [] },
+        {
+          date: dateStr,
+          gates: gate,
+          weights: score.weights,
+          stats: { totalStocks, triggered, passedGates },
+          results: [],
+        },
         null,
         2,
       ),
@@ -181,7 +219,7 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
   const prevDate = prevDayRow?.date ?? null;
 
   // firstBar 用：逐日 close+bollingerUpper 序列（近期，往回抓多一點確保能數到連續天數斷點）
-  const firstBarLookbackDays = 30;
+  const firstBarLookbackDays = score.firstBarLookbackDays;
   const [firstBarQuotes, firstBarIndicators] = prevDate
     ? await Promise.all([
         prisma.dailyQuote.findMany({
@@ -244,7 +282,7 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
 
   // base 用：T-1 往前最多 240 筆 bandwidth（不含今天）
   const baseHistoryByStock: Map<string, HistoryPoint[]> = prevDate
-    ? await fetchHistoryWindow(prisma, prevDate, passedCodes, BASE_MAX_WINDOW_DAYS)
+    ? await fetchHistoryWindow(prisma, prevDate, passedCodes, score.baseMaxWindowDays)
     : new Map();
 
   // proximityToHigh 用：T-1 往前最多 240 筆 close（不含今天）
@@ -263,11 +301,15 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
       list = [];
       marketHistoryByStock.set(row.stockCode, list);
     }
-    if (list.length < RS_WINDOW_DAYS + 1) list.push(row);
+    if (list.length < score.rsWindowDays + 1) list.push(row);
   }
 
-  const { returns: marketReturns, historyDays: rsHistoryDays } = computeMarketWideReturns(codes, marketHistoryByStock);
-  const rsScoresAllMarket = rankScore(marketReturns, false, 50);
+  const { returns: marketReturns, historyDays: rsHistoryDays } = computeMarketWideReturns(
+    codes,
+    marketHistoryByStock,
+    score.rsWindowDays,
+  );
+  const rsScoresAllMarket = rankScore(marketReturns, false, score.naScore);
   const rsScoreByCode = new Map(codes.map((c, i) => [c, { score: rsScoresAllMarket[i]!, historyDays: rsHistoryDays.get(c) ?? 0 }]));
 
   const results: BreakoutResult[] = passedQuotes.map((q) => {
@@ -281,8 +323,12 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
 
     const degraded: string[] = [];
 
-    const volumeStrengthScore = computeVolumeStrength(volumeRatio);
-    const breakoutMarginScore = computeBreakoutMargin(q.close, bollingerUpper);
+    const volumeStrengthScore = computeVolumeStrength(volumeRatio, score.curves.volumeStrength);
+    const breakoutMarginScore = computeBreakoutMargin(
+      q.close,
+      bollingerUpper,
+      score.curves.breakoutMargin,
+    );
 
     const candleShapeResult = computeCandleShape({
       open: q.open,
@@ -298,12 +344,22 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
     const stockBaseHistory = baseHistoryByStock.get(q.stockCode) ?? [];
     const yesterdayBandwidth = stockBaseHistory.length > 0 ? stockBaseHistory[0]!.bollingerBandwidth : null;
     const bandwidthHistoryForRank = stockBaseHistory.map((p) => p.bollingerBandwidth);
-    const baseResult = computeBase(yesterdayBandwidth, bandwidthHistoryForRank);
+    const baseResult = computeBase(
+      yesterdayBandwidth,
+      bandwidthHistoryForRank,
+      score.baseMinHistoryDays,
+      score.curves.base,
+    );
     if (baseResult.degraded) degraded.push("base");
 
     const stockProximityHistory = proximityHistoryByStock.get(q.stockCode) ?? [];
     const proximityCloseHistory = stockProximityHistory.map((p) => p.close);
-    const proximityResult = computeProximityToHigh(q.close, proximityCloseHistory);
+    const proximityResult = computeProximityToHigh(
+      q.close,
+      proximityCloseHistory,
+      score.proximityShortWindow,
+      score.proximityLongWindow,
+    );
     if (proximityResult.degraded) degraded.push("proximityToHigh240");
 
     const rs = rsScoreByCode.get(q.stockCode)!;
@@ -320,13 +376,13 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
     };
 
     const totalScore =
-      scores.candleShape * WEIGHTS.candleShape +
-      scores.volumeStrength * WEIGHTS.volumeStrength +
-      scores.breakoutMargin * WEIGHTS.breakoutMargin +
-      scores.firstBar * WEIGHTS.firstBar +
-      scores.base * WEIGHTS.base +
-      scores.proximityToHigh * WEIGHTS.proximityToHigh +
-      scores.relativeStrength * WEIGHTS.relativeStrength;
+      scores.candleShape * score.weights.candleShape +
+      scores.volumeStrength * score.weights.volumeStrength +
+      scores.breakoutMargin * score.weights.breakoutMargin +
+      scores.firstBar * score.weights.firstBar +
+      scores.base * score.weights.base +
+      scores.proximityToHigh * score.weights.proximityToHigh +
+      scores.relativeStrength * score.weights.relativeStrength;
 
     return {
       code: q.stockCode,
@@ -380,8 +436,8 @@ export async function calculateBreakoutStrength(date: Date): Promise<{
     JSON.stringify(
       {
         date: dateStr,
-        gates: GATES,
-        weights: WEIGHTS,
+        gates: gate,
+        weights: score.weights,
         stats: { totalStocks, triggered, passedGates },
         results,
       },
@@ -410,15 +466,21 @@ async function main() {
 
   let targetDate = argDate;
   if (!targetDate) {
-    const latest = await prisma.dailyQuote.findFirst({
-      orderBy: { date: "desc" },
-      select: { date: true },
-    });
-    if (!latest) {
-      console.log("資料庫裡沒有任何 DailyQuote 資料。");
-      return;
+    // 找最新交易日需要一個 client；用一次性 client 查完即關，正式計算的 client 由 calculateBreakoutStrength 內部自建
+    const bootstrapPrisma = makePrisma();
+    try {
+      const latest = await bootstrapPrisma.dailyQuote.findFirst({
+        orderBy: { date: "desc" },
+        select: { date: true },
+      });
+      if (!latest) {
+        console.log("資料庫裡沒有任何 DailyQuote 資料。");
+        return;
+      }
+      targetDate = latest.date;
+    } finally {
+      await bootstrapPrisma.$disconnect();
     }
-    targetDate = latest.date;
   }
 
   await calculateBreakoutStrength(targetDate);
@@ -426,12 +488,8 @@ async function main() {
 
 const isMain = process.argv[1] && import.meta.url === new URL(process.argv[1], "file://").href;
 if (isMain) {
-  main()
-    .catch((err) => {
-      console.error("breakoutStrength 計算失敗:", err);
-      process.exit(1);
-    })
-    .finally(async () => {
-      await prisma.$disconnect();
-    });
+  main().catch((err) => {
+    console.error("breakoutStrength 計算失敗:", err);
+    process.exit(1);
+  });
 }

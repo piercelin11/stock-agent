@@ -44,7 +44,7 @@
 - [x] **Next.js + Prisma 單例**：`lib/prisma.ts` 用 `globalThis` 快取 `PrismaClient`（保留 `PrismaPg` driver adapter 寫法），檔頭 `import "server-only"` 當誤 import 護欄。hot reload 多次不會讓連線數持續增長
 - [x] 不另建 REST/GraphQL API，一律用 **Server Actions**（`lib/actions/*.ts`）。已有 `getDbHealth()` 示範讀真實 DB 數字上首頁
 - [x] 圖表庫定案 **Recharts**（`components/ChartSmoke.tsx` smoke 圖）、版面/導覽 = Tailwind CSS v4 + 手刻 `components/ui/` + `app/layout.tsx` 側邊欄
-- [x] 背景任務機制定案：**獨立 Node 子進程（`spawn` tsx cli.mjs 絕對路徑）+ 進度寫檔 + Server Action 輪詢**。PoC 在 `scripts/_poc/` + `lib/actions/poc.ts` + `components/PocRunner.tsx`，下一份 PLAN（回測）開始時刪除換成真的 Layer 0 runner
+- [x] 背景任務機制定案：**獨立 Node 子進程（`spawn` tsx cli.mjs 絕對路徑）+ 進度寫檔 + Server Action 輪詢**。PoC（`scripts/_poc/` + `lib/actions/poc.ts` + `components/PocRunner.tsx`）已於回測系列第一份 PLAN（3.1 腳本參數化）開始時刪除；模式記錄在 CLAUDE.md「背景任務」段，真的 Layer 0 runner 待 3.3
 
 ## 3. 歷史回測系統 ◄── 優先
 
@@ -74,12 +74,12 @@ Layer 3    接 Layer 0.5 算命中率 / 報酬分布 / 穩定性（記憶體，�
 
 ### 3.1 腳本參數化（前置）
 
-- [ ] `calculateAccumulationScore(date, config?)` — `config` 可覆蓋 `accumulation-shared.ts` 的所有常數（`CHIP_WEIGHTS` / `TRUST_SUB_WEIGHTS` / `TECH_WEIGHTS` / `READINESS_FLOOR` / 視窗天數 / `MIN_AVG_VOLUME_SHARES`），不傳則回退現有預設。輸出 JSON 已內嵌 `params` 區塊，格式沿用
-- [ ] `calculateBreakoutStrength(date, config?)` — `config` 可覆蓋 `breakout-shared.ts` 的 `GATES` / `WEIGHTS` / `TRIGGER_VOLUME_RATIO` / 各視窗常數，不傳則回退
-- [ ] **明確區分兩類參數**（分層架構靠這個切）：「門檻類」（`GATES` / `TRIGGER_VOLUME_RATIO` / `MIN_AVG_VOLUME_SHARES`…決定誰進候選池，走 Layer 1）vs「加權 / 曲線類」（`WEIGHTS` / `CHIP_WEIGHTS` / 映射轉折點…決定分數怎麼組，走 Layer 2）。`config` 型別建議照這兩類分成兩個子物件
-- [ ] `breakout-shared.ts` 內嵌的 magic number（`computeVolumeStrength` 的 2×→40/6×→100、`computeBreakoutMargin` 的 3% 轉折、`computeBase` 的 0.6/0.4 權重等）評估哪些值得抽成 config、哪些維持寫死。**凡是可能成為校準對象的曲線轉折點，Layer 0 就必須存它的原始輸入而非成品分數**（見 3.2）
-- [ ] 從 `check-intraday-breakout.ts` 的私有 `main()` 抽出可呼叫的純函式（目前完全沒匯出），供回測用歷史資料模擬盤中快照——**注意**：TPEx 盤中/歷史端點限制（見 CLAUDE.md），盤中訊號的歷史回測可能只能對 TWSE 或只能用收盤資料近似
-- [ ] 確認參數化沒改變預設行為：對同一天用「不傳 config」與「傳等於預設值的 config」跑，輸出需完全一致
+- [x] `calculateAccumulationScore(date, { prisma?, config? })` — `config` 可覆蓋 `accumulation-shared.ts` 的所有常數（`CHIP_WEIGHTS` / `TRUST_SUB_WEIGHTS` / `TECH_WEIGHTS` / `READINESS_FLOOR` / 視窗天數 / `MIN_AVG_VOLUME_SHARES`），不傳則回退現有預設。輸出 JSON 的 `params` 區塊改成輸出實際生效的 resolved config（`gate` + `score` 兩子物件）
+- [x] `calculateBreakoutStrength(date, { prisma?, config? })` — `config` 可覆蓋 `breakout-shared.ts` 的 `GATES` / `WEIGHTS` / `TRIGGER_VOLUME_RATIO` / 各視窗常數 / 抽出的曲線轉折點，不傳則回退
+- [x] **明確區分兩類參數**（分層架構靠這個切）：`config` 型別分 `gate`（門檻類：`minMarketCap` / `minVolumeShares` / `triggerVolumeRatio` / `minAvgVolumeShares`，決定誰進候選池，走 Layer 1）與 `score`（加權 / 曲線 / 視窗類：`weights` / `chipWeights` / `curves` / `*WindowDays` 等，決定分數怎麼組，走 Layer 2）兩子物件。degraded 門檻（`baseMinHistoryDays` / `minInstitutionalDaysRatio` 等）歸 `score`（不剔除股票，只降級分項）
+- [x] `breakout-shared.ts` 內嵌的 magic number 逐項評估：**抽出** `computeVolumeStrength`（2×→40/6×→100）、`computeBreakoutMargin`（3% 轉折 + 每 1% 扣 5 分 + 下限 60）、`computeBase`（0.6/0.4 權重 + duration 封頂 40 天）進 `config.score.curves`；**維持寫死** `computeCandleShape` / `computeProximityScale` / `computeFirstBar`（離散規則）/ `computeBase` 的 p25 門檻（改了語意就變），各在函式上方加 `// TODO(backtest)` 註記
+- [x] 從 `check-intraday-breakout.ts` 的私有 `main()` 抽出 `checkIntradayBreakout({ prisma?, config?, now? })`（`main()` 變薄殼）——`now` 一併參數化供回測注入時間。**注意**：TPEx 盤中/歷史端點限制（見 CLAUDE.md），盤中訊號的歷史回測可能只能對 TWSE 或只能用收盤資料近似
+- [x] 確認參數化沒改變預設行為：對 breakout `2026-08-18` / `2026-08-21` / `2026-08-27`、accumulation `2026-08-26` 建黃金檔，改動後「不傳 config」與「傳 `DEFAULT_*_CONFIG`」重跑，`results` 陣列皆逐位元相同
 
 ### 3.2 檔案輸出格式設計（取代原「回測資料表」）
 

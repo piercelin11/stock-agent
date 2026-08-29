@@ -3,13 +3,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient, Market } from "../../generated/prisma/client.js";
+import { PrismaClient, Market } from "../../generated/prisma/client";
+import type { DeepPartial } from "../lib/types";
 import {
-  GATES,
-  WEIGHTS,
-  TRIGGER_VOLUME_RATIO,
-  BASE_MAX_WINDOW_DAYS,
-  RS_WINDOW_DAYS,
   rankScore,
   fetchHistoryWindow,
   computeVolumeStrength,
@@ -19,13 +15,17 @@ import {
   computeProximityToHigh,
   computeMarketWideReturns,
   computeCandleShape,
+  resolveBreakoutConfig,
+  type BreakoutConfig,
   type HistoryPoint,
-} from "../lib/breakout-shared.js";
+} from "../lib/breakout-shared";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma = new PrismaClient({ adapter });
+function makePrisma(): PrismaClient {
+  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+  return new PrismaClient({ adapter });
+}
 
 const MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp";
 const BATCH_SIZE = 120;
@@ -202,8 +202,26 @@ interface CandidateResult {
   degraded: string[];
 }
 
-async function main() {
-  const now = new Date();
+export interface CheckIntradayBreakoutOptions {
+  prisma?: PrismaClient;
+  config?: DeepPartial<BreakoutConfig>;
+  now?: Date;
+}
+
+export async function checkIntradayBreakout(options: CheckIntradayBreakoutOptions = {}): Promise<void> {
+  const prisma = options.prisma ?? makePrisma();
+  const ownsPrisma = options.prisma === undefined;
+  const config = resolveBreakoutConfig(options.config);
+  const now = options.now ?? new Date();
+  try {
+    await runSnapshot(prisma, config, now);
+  } finally {
+    if (ownsPrisma) await prisma.$disconnect();
+  }
+}
+
+async function runSnapshot(prisma: PrismaClient, config: BreakoutConfig, now: Date): Promise<void> {
+  const { gate, score } = config;
   const { raw: elapsedRatioRaw, clipped: elapsedRatio } = computeElapsedRatio(now);
 
   if (elapsedRatioRaw < 0.05) {
@@ -268,7 +286,7 @@ async function main() {
 
     const estimatedFullDayVolume = quote.cumulativeVolume / elapsedRatio;
     const volumeRatio = estimatedFullDayVolume / ind.volumeMa20;
-    const passVolume = volumeRatio >= TRIGGER_VOLUME_RATIO;
+    const passVolume = volumeRatio >= gate.triggerVolumeRatio;
     if (!passVolume) continue;
 
     triggered.push({
@@ -294,8 +312,8 @@ async function main() {
       return false;
     }
     const marketCap = sharesOutstanding * t.price;
-    const passCap = marketCap >= GATES.minMarketCap;
-    const passVolume = t.estimatedFullDayVolume >= GATES.minVolumeShares;
+    const passCap = marketCap >= gate.minMarketCap;
+    const passVolume = t.estimatedFullDayVolume >= gate.minVolumeShares;
     return passCap && passVolume;
   });
 
@@ -324,8 +342,8 @@ async function main() {
         {
           queriedAt: now.toISOString(),
           elapsedRatio,
-          gates: GATES,
-          weights: WEIGHTS,
+          gates: gate,
+          weights: score.weights,
           stats: { totalQueried: codes.length, failedCount, triggered: triggered.length, passedGates: 0 },
           results: [],
         },
@@ -338,7 +356,7 @@ async function main() {
   }
 
   // firstBar：即時價 vs T-1 上軌，往回接 T-2 以前的連續天數
-  const firstBarLookbackDays = 30;
+  const firstBarLookbackDays = score.firstBarLookbackDays;
   const priorDate = prevDate; // T-1（已是最新一筆 DailyQuote）
   const [firstBarQuotes, firstBarIndicators] = priorDate
     ? await Promise.all([
@@ -401,7 +419,7 @@ async function main() {
 
   // base / proximityToHigh：T-1 往前最多 240 筆（不含今天，直接重用收盤版邏輯與輸入）
   const baseHistoryByStock = priorDate
-    ? await fetchHistoryWindow(prisma, priorDate, passedCodes, BASE_MAX_WINDOW_DAYS)
+    ? await fetchHistoryWindow(prisma, priorDate, passedCodes, score.baseMaxWindowDays)
     : new Map<string, HistoryPoint[]>();
   const proximityHistoryByStock = baseHistoryByStock;
 
@@ -420,18 +438,26 @@ async function main() {
   }
   for (const row of marketHistoryRows) {
     const list = marketHistoryByStock.get(row.stockCode);
-    if (list && list.length < RS_WINDOW_DAYS + 1) list.push(row);
+    if (list && list.length < score.rsWindowDays + 1) list.push(row);
   }
 
-  const { returns: marketReturns, historyDays: rsHistoryDays } = computeMarketWideReturns(codes, marketHistoryByStock);
-  const rsScoresAllMarket = rankScore(marketReturns, false, 50);
+  const { returns: marketReturns, historyDays: rsHistoryDays } = computeMarketWideReturns(
+    codes,
+    marketHistoryByStock,
+    score.rsWindowDays,
+  );
+  const rsScoresAllMarket = rankScore(marketReturns, false, score.naScore);
   const rsScoreByCode = new Map(codes.map((c, i) => [c, { score: rsScoresAllMarket[i]!, historyDays: rsHistoryDays.get(c) ?? 0 }]));
 
   const results: CandidateResult[] = passed.map((t) => {
     const degraded: string[] = [];
 
-    const volumeStrengthScore = computeVolumeStrength(t.volumeRatio);
-    const breakoutMarginScore = computeBreakoutMargin(t.price, t.bollingerUpper);
+    const volumeStrengthScore = computeVolumeStrength(t.volumeRatio, score.curves.volumeStrength);
+    const breakoutMarginScore = computeBreakoutMargin(
+      t.price,
+      t.bollingerUpper,
+      score.curves.breakoutMargin,
+    );
 
     // 即時型態：close 用當下即時價，high/low 用當日至今盤中最高/最低，收盤前仍可能變動，非最終分數
     const misQuoteForShape = misQuotes.get(t.code)!;
@@ -449,12 +475,22 @@ async function main() {
     const stockBaseHistory = baseHistoryByStock.get(t.code) ?? [];
     const latestBandwidth = stockBaseHistory.length > 0 ? stockBaseHistory[0]!.bollingerBandwidth : null;
     const bandwidthHistoryForRank = stockBaseHistory.map((p) => p.bollingerBandwidth);
-    const baseResult = computeBase(latestBandwidth, bandwidthHistoryForRank);
+    const baseResult = computeBase(
+      latestBandwidth,
+      bandwidthHistoryForRank,
+      score.baseMinHistoryDays,
+      score.curves.base,
+    );
     if (baseResult.degraded) degraded.push("base");
 
     const stockProximityHistory = proximityHistoryByStock.get(t.code) ?? [];
     const proximityCloseHistory = stockProximityHistory.map((p) => p.close);
-    const proximityResult = computeProximityToHigh(t.price, proximityCloseHistory);
+    const proximityResult = computeProximityToHigh(
+      t.price,
+      proximityCloseHistory,
+      score.proximityShortWindow,
+      score.proximityLongWindow,
+    );
     if (proximityResult.degraded) degraded.push("proximityToHigh240");
 
     const rs = rsScoreByCode.get(t.code)!;
@@ -471,13 +507,13 @@ async function main() {
     };
 
     const totalScore =
-      scores.candleShape * WEIGHTS.candleShape +
-      scores.volumeStrength * WEIGHTS.volumeStrength +
-      scores.breakoutMargin * WEIGHTS.breakoutMargin +
-      scores.firstBar * WEIGHTS.firstBar +
-      scores.base * WEIGHTS.base +
-      scores.proximityToHigh * WEIGHTS.proximityToHigh +
-      scores.relativeStrength * WEIGHTS.relativeStrength;
+      scores.candleShape * score.weights.candleShape +
+      scores.volumeStrength * score.weights.volumeStrength +
+      scores.breakoutMargin * score.weights.breakoutMargin +
+      scores.firstBar * score.weights.firstBar +
+      scores.base * score.weights.base +
+      scores.proximityToHigh * score.weights.proximityToHigh +
+      scores.relativeStrength * score.weights.relativeStrength;
 
     const stock = stockByCode.get(t.code);
     const sharesOutstanding = stock?.sharesOutstanding !== null && stock?.sharesOutstanding !== undefined
@@ -552,8 +588,8 @@ async function main() {
       {
         queriedAt: now.toISOString(),
         elapsedRatio,
-        gates: GATES,
-        weights: WEIGHTS,
+        gates: gate,
+        weights: score.weights,
         stats: { totalQueried: codes.length, failedCount, triggered: triggered.length, passedGates: passed.length },
         results,
       },
@@ -566,12 +602,8 @@ async function main() {
 
 const isMain = process.argv[1] && import.meta.url === new URL(process.argv[1], "file://").href;
 if (isMain) {
-  main()
-    .catch((err) => {
-      console.error("盤中快照篩選失敗:", err);
-      process.exit(1);
-    })
-    .finally(async () => {
-      await prisma.$disconnect();
-    });
+  checkIntradayBreakout().catch((err) => {
+    console.error("盤中快照篩選失敗:", err);
+    process.exit(1);
+  });
 }

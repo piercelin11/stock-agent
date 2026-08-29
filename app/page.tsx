@@ -1,5 +1,4 @@
 import { ChartSmoke } from "../components/ChartSmoke";
-import { PocRunner } from "../components/PocRunner";
 import { Card, Stat } from "../components/ui/Card";
 import { getDbHealth } from "../lib/actions/health";
 
@@ -23,10 +22,6 @@ export default async function Page() {
 
       <Card title="Recharts smoke（寫死資料）">
         <ChartSmoke />
-      </Card>
-
-      <Card title="背景任務 PoC（子進程 + 進度輪詢）">
-        <PocRunner />
       </Card>
     </div>
   );

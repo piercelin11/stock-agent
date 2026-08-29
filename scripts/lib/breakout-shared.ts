@@ -1,4 +1,5 @@
-import { PrismaClient } from "../../generated/prisma/client.js";
+import { PrismaClient } from "../../generated/prisma/client";
+import type { DeepPartial } from "./types";
 
 // ---- 資格門檻（可調整，calculate-breakout-strength.ts 與 check-intraday-breakout.ts 共用）----
 export const GATES = {
@@ -23,6 +24,140 @@ export const BASE_MAX_WINDOW_DAYS = 240;
 export const PROXIMITY_SHORT_WINDOW = 60;
 export const PROXIMITY_LONG_WINDOW = 240;
 export const RS_WINDOW_DAYS = 60;
+export const FIRST_BAR_LOOKBACK_DAYS = 30; // 原本寫死在 calculate-breakout-strength.ts / check-intraday-breakout.ts 內
+export const NA_SCORE = 50; // rankScore 缺值補分（原多處字面量 50）
+
+// ---- 曲線轉折點（§4 決定抽出的校準對象；其餘見各函式上方 TODO 註解）----
+export const VOLUME_STRENGTH_CURVE = {
+  lowRatio: 2, // 量比 2 倍
+  lowScore: 40, // → 40 分
+  highRatio: 6, // 量比 6 倍（以上）
+  highScore: 100, // → 100 分
+};
+export const BREAKOUT_MARGIN_CURVE = {
+  kneePct: 3, // 乖離 3% 為轉折點
+  penaltyPerPct: 5, // 轉折後每多 1% 扣 5 分
+  floor: 60, // 下限 60 分
+};
+export const BASE_CURVE = {
+  depthWeight: 0.6, // depthScore 權重
+  durationWeight: 0.4, // durationScore 權重
+  durationCapDays: 40, // durationDays / 40 封頂
+};
+
+// ---- config 型別（回測用：門檻類走 Layer 1，加權/曲線/視窗類走 Layer 2）----
+
+/** 門檻類：決定誰進候選池。回測時調這些要重篩池 → rankScore 要重跑。 */
+export interface BreakoutGateConfig {
+  minMarketCap: number; // 3_000_000_000
+  minVolumeShares: number; // 1_000_000
+  triggerVolumeRatio: number; // 2.0
+}
+
+/** 加權 / 曲線 / 視窗類：決定分數怎麼組。調這些不動候選池成員。 */
+export interface BreakoutScoreConfig {
+  weights: {
+    candleShape: number;
+    volumeStrength: number;
+    breakoutMargin: number;
+    firstBar: number;
+    base: number;
+    proximityToHigh: number;
+    relativeStrength: number;
+  };
+  baseMinHistoryDays: number; // 40（degraded 門檻，見 §3：不剔除股票只降級分項 → 歸 score）
+  baseMaxWindowDays: number; // 240 // 回測調大此值需確認 Layer 0 序列夠長
+  proximityShortWindow: number; // 60 // 回測調大此值需確認 Layer 0 序列夠長
+  proximityLongWindow: number; // 240 // 回測調大此值需確認 Layer 0 序列夠長
+  rsWindowDays: number; // 60 // 回測調大此值需確認 Layer 0 序列夠長
+  firstBarLookbackDays: number; // 30
+  naScore: number; // 50（rankScore 缺值補分）
+  curves: {
+    volumeStrength: { lowRatio: number; lowScore: number; highRatio: number; highScore: number };
+    breakoutMargin: { kneePct: number; penaltyPerPct: number; floor: number };
+    base: { depthWeight: number; durationWeight: number; durationCapDays: number };
+  };
+}
+
+export interface BreakoutConfig {
+  gate: BreakoutGateConfig;
+  score: BreakoutScoreConfig;
+}
+
+/** 現行預設。從既有 export const 組出來，數值不變。 */
+export const DEFAULT_BREAKOUT_CONFIG: BreakoutConfig = {
+  gate: {
+    minMarketCap: GATES.minMarketCap,
+    minVolumeShares: GATES.minVolumeShares,
+    triggerVolumeRatio: TRIGGER_VOLUME_RATIO,
+  },
+  score: {
+    weights: { ...WEIGHTS },
+    baseMinHistoryDays: BASE_MIN_HISTORY_DAYS,
+    baseMaxWindowDays: BASE_MAX_WINDOW_DAYS,
+    proximityShortWindow: PROXIMITY_SHORT_WINDOW,
+    proximityLongWindow: PROXIMITY_LONG_WINDOW,
+    rsWindowDays: RS_WINDOW_DAYS,
+    firstBarLookbackDays: FIRST_BAR_LOOKBACK_DAYS,
+    naScore: NA_SCORE,
+    curves: {
+      volumeStrength: { ...VOLUME_STRENGTH_CURVE },
+      breakoutMargin: { ...BREAKOUT_MARGIN_CURVE },
+      base: { ...BASE_CURVE },
+    },
+  },
+};
+
+/** 深層合併：呼叫端只給想改的欄位。config 結構固定且淺 → 手寫展開，不用泛型遞迴 merge。 */
+export function resolveBreakoutConfig(override?: DeepPartial<BreakoutConfig>): BreakoutConfig {
+  const d = DEFAULT_BREAKOUT_CONFIG;
+  const g = override?.gate;
+  const s = override?.score;
+  return {
+    gate: {
+      minMarketCap: g?.minMarketCap ?? d.gate.minMarketCap,
+      minVolumeShares: g?.minVolumeShares ?? d.gate.minVolumeShares,
+      triggerVolumeRatio: g?.triggerVolumeRatio ?? d.gate.triggerVolumeRatio,
+    },
+    score: {
+      weights: {
+        candleShape: s?.weights?.candleShape ?? d.score.weights.candleShape,
+        volumeStrength: s?.weights?.volumeStrength ?? d.score.weights.volumeStrength,
+        breakoutMargin: s?.weights?.breakoutMargin ?? d.score.weights.breakoutMargin,
+        firstBar: s?.weights?.firstBar ?? d.score.weights.firstBar,
+        base: s?.weights?.base ?? d.score.weights.base,
+        proximityToHigh: s?.weights?.proximityToHigh ?? d.score.weights.proximityToHigh,
+        relativeStrength: s?.weights?.relativeStrength ?? d.score.weights.relativeStrength,
+      },
+      baseMinHistoryDays: s?.baseMinHistoryDays ?? d.score.baseMinHistoryDays,
+      baseMaxWindowDays: s?.baseMaxWindowDays ?? d.score.baseMaxWindowDays,
+      proximityShortWindow: s?.proximityShortWindow ?? d.score.proximityShortWindow,
+      proximityLongWindow: s?.proximityLongWindow ?? d.score.proximityLongWindow,
+      rsWindowDays: s?.rsWindowDays ?? d.score.rsWindowDays,
+      firstBarLookbackDays: s?.firstBarLookbackDays ?? d.score.firstBarLookbackDays,
+      naScore: s?.naScore ?? d.score.naScore,
+      curves: {
+        volumeStrength: {
+          lowRatio: s?.curves?.volumeStrength?.lowRatio ?? d.score.curves.volumeStrength.lowRatio,
+          lowScore: s?.curves?.volumeStrength?.lowScore ?? d.score.curves.volumeStrength.lowScore,
+          highRatio: s?.curves?.volumeStrength?.highRatio ?? d.score.curves.volumeStrength.highRatio,
+          highScore: s?.curves?.volumeStrength?.highScore ?? d.score.curves.volumeStrength.highScore,
+        },
+        breakoutMargin: {
+          kneePct: s?.curves?.breakoutMargin?.kneePct ?? d.score.curves.breakoutMargin.kneePct,
+          penaltyPerPct:
+            s?.curves?.breakoutMargin?.penaltyPerPct ?? d.score.curves.breakoutMargin.penaltyPerPct,
+          floor: s?.curves?.breakoutMargin?.floor ?? d.score.curves.breakoutMargin.floor,
+        },
+        base: {
+          depthWeight: s?.curves?.base?.depthWeight ?? d.score.curves.base.depthWeight,
+          durationWeight: s?.curves?.base?.durationWeight ?? d.score.curves.base.durationWeight,
+          durationCapDays: s?.curves?.base?.durationCapDays ?? d.score.curves.base.durationCapDays,
+        },
+      },
+    },
+  };
+}
 
 // 對應 calculate-screen-score.ts 的 rankScore：cross-sectional percentile rank，0~100
 export function rankScore(values: (number | null)[], lowerIsBetter: boolean, naScore: number): number[] {
@@ -120,20 +255,29 @@ export async function fetchHistoryWindow(
 }
 
 // ---- 3a. volumeStrength ----
-export function computeVolumeStrength(ratio: number): number {
-  // 2倍=40分，6倍以上=100分，線性 clip
-  const score = 40 + ((ratio - 2) / (6 - 2)) * (100 - 40);
-  return clip(score, 40, 100);
+export function computeVolumeStrength(
+  ratio: number,
+  curve: BreakoutScoreConfig["curves"]["volumeStrength"],
+): number {
+  // lowRatio 倍 = lowScore 分，highRatio 倍以上 = highScore 分，線性 clip
+  const score =
+    curve.lowScore +
+    ((ratio - curve.lowRatio) / (curve.highRatio - curve.lowRatio)) * (curve.highScore - curve.lowScore);
+  return clip(score, curve.lowScore, curve.highScore);
 }
 
 // ---- 3b. breakoutMargin ----
-export function computeBreakoutMargin(close: number, bollingerUpper: number): number {
+export function computeBreakoutMargin(
+  close: number,
+  bollingerUpper: number,
+  curve: BreakoutScoreConfig["curves"]["breakoutMargin"],
+): number {
   const marginPct = ((close - bollingerUpper) / bollingerUpper) * 100;
-  if (marginPct <= 3) {
-    return clip(40 + (marginPct / 3) * 60, 40, 100);
+  if (marginPct <= curve.kneePct) {
+    return clip(40 + (marginPct / curve.kneePct) * 60, 40, 100);
   }
-  // 超過3%乖離後，每多1%扣5分，下限60分（避免跟乖離不足的股票混在同一分數帶）
-  return clip(100 - (marginPct - 3) * 5, 60, 100);
+  // 超過 kneePct% 乖離後，每多 1% 扣 penaltyPerPct 分，下限 floor 分（避免跟乖離不足的股票混在同一分數帶）
+  return clip(100 - (marginPct - curve.kneePct) * curve.penaltyPerPct, curve.floor, 100);
 }
 
 // ---- 3g. candleShape ----
@@ -144,6 +288,7 @@ export interface CandleInput {
   close: number;
 }
 
+// TODO(backtest): 若要校準此曲線（上影線 40%、收黑封頂 50、0.5/0.5 合成），抽進 config.score.curves
 export function computeCandleShape(candle: CandleInput): { score: number; degraded: boolean } {
   const { open, high, low, close } = candle;
 
@@ -177,6 +322,7 @@ export function computeCandleShape(candle: CandleInput): { score: number; degrad
 
 // ---- 3c. firstBar ----
 // series[0] 是 T-1（或盤中版的「今天即時價 vs T-1 上軌」由呼叫端組出對應序列），依日期新到舊排序
+// TODO(backtest): 連續天數 ≤2→50 / >2→20 是離散規則不是曲線，且使用者明確要求保留此緩衝（PROGRESS 2026-08-27），不抽
 export function computeFirstBar(
   seriesByStock: Map<string, { close: number; bollingerUpper: number | null }[]>,
   code: string,
@@ -215,10 +361,12 @@ export function computeFirstBar(
 export function computeBase(
   latestBandwidth: number | null,
   bandwidthHistory: (number | null)[], // 往前最多 240 筆（不含當前這筆），新到舊排序
+  minHistoryDays: number,
+  curve: BreakoutScoreConfig["curves"]["base"],
 ): { score: number; degraded: boolean; historyDays: number } {
   const validHistory = bandwidthHistory.filter((v): v is number => v !== null && !Number.isNaN(v));
 
-  if (latestBandwidth === null || validHistory.length < BASE_MIN_HISTORY_DAYS) {
+  if (latestBandwidth === null || validHistory.length < minHistoryDays) {
     return { score: 50, degraded: true, historyDays: validHistory.length };
   }
 
@@ -227,6 +375,7 @@ export function computeBase(
   const p = ((rankIndex === -1 ? sorted.length - 1 : rankIndex) / (sorted.length - 1 || 1)) * 100;
   const depthScore = 100 - p;
 
+  // p25 門檻（0.25）：「低帶寬持續天數」的定義本身，改了語意就變了 → 不抽（§4）
   const p25Index = Math.floor(sorted.length * 0.25);
   const p25Threshold = sorted[Math.min(p25Index, sorted.length - 1)]!;
 
@@ -238,13 +387,14 @@ export function computeBase(
       break;
     }
   }
-  const durationScore = Math.min(durationDays / 40, 1) * 100;
+  const durationScore = Math.min(durationDays / curve.durationCapDays, 1) * 100;
 
-  const score = depthScore * 0.6 + durationScore * 0.4;
+  const score = depthScore * curve.depthWeight + durationScore * curve.durationWeight;
   return { score, degraded: false, historyDays: validHistory.length };
 }
 
 // ---- 3e. proximityToHigh ----
+// TODO(backtest): 若要校準此曲線（0.7 下界、short/long 0.5/0.5 合成），抽進 config.score.curves
 export function computeProximityScale(referenceClose: number, closesInWindow: number[]): number {
   if (closesInWindow.length === 0) return 50;
   const highInWindow = Math.max(...closesInWindow, referenceClose);
@@ -256,16 +406,18 @@ export function computeProximityScale(referenceClose: number, closesInWindow: nu
 export function computeProximityToHigh(
   referenceClose: number,
   closeHistory: (number | null)[], // 往前最多 240 筆，新到舊排序，不含 referenceClose 本身
+  shortWindowDays: number,
+  longWindowDays: number,
 ): { score: number; degraded: boolean } {
   const validCloses = closeHistory.filter((v): v is number => v !== null && !Number.isNaN(v));
 
-  if (validCloses.length < PROXIMITY_SHORT_WINDOW) {
+  if (validCloses.length < shortWindowDays) {
     return { score: 50, degraded: true };
   }
 
-  const shortWindow = validCloses.slice(0, PROXIMITY_SHORT_WINDOW);
-  const longWindow = validCloses.slice(0, PROXIMITY_LONG_WINDOW);
-  const degraded = validCloses.length < PROXIMITY_LONG_WINDOW;
+  const shortWindow = validCloses.slice(0, shortWindowDays);
+  const longWindow = validCloses.slice(0, longWindowDays);
+  const degraded = validCloses.length < longWindowDays;
 
   const shortScore = computeProximityScale(referenceClose, shortWindow);
   const longScore = computeProximityScale(referenceClose, longWindow);
@@ -277,6 +429,7 @@ export function computeProximityToHigh(
 export function computeMarketWideReturns(
   codes: string[],
   historyByStock: Map<string, { date: Date; close: number }[]>,
+  rsWindowDays: number,
 ): { returns: (number | null)[]; historyDays: Map<string, number> } {
   const returns: (number | null)[] = [];
   const historyDays = new Map<string, number>();
@@ -291,7 +444,7 @@ export function computeMarketWideReturns(
     }
 
     const latestClose = history[0]!.close;
-    const windowLen = Math.min(history.length, RS_WINDOW_DAYS + 1);
+    const windowLen = Math.min(history.length, rsWindowDays + 1);
     const oldest = history[windowLen - 1]!;
 
     if (oldest.close <= 0) {

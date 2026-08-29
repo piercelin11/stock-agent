@@ -3,18 +3,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../../generated/prisma/client.js";
-import { computeBase } from "../lib/breakout-shared.js";
+import { PrismaClient } from "../../generated/prisma/client";
+import type { DeepPartial } from "../lib/types";
+import { computeBase, DEFAULT_BREAKOUT_CONFIG } from "../lib/breakout-shared";
 import {
-  INSTITUTIONAL_WINDOW_DAYS,
-  SQUEEZE_VOLUME_WINDOW_DAYS,
-  BANDWIDTH_HISTORY_MAX_DAYS,
-  MIN_AVG_VOLUME_SHARES,
-  READINESS_FLOOR,
-  NEUTRAL_SCORE,
-  CHIP_WEIGHTS,
-  TRUST_SUB_WEIGHTS,
-  TECH_WEIGHTS,
   rankScore,
   computeTrustRawMetrics,
   computeOtherInstitutionRatio,
@@ -23,12 +15,19 @@ import {
   combineTrustScore,
   computeReadinessCoefficient,
   combineFinalScore,
-} from "../lib/accumulation-shared.js";
+  resolveAccumulationConfig,
+  type AccumulationConfig,
+} from "../lib/accumulation-shared";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma = new PrismaClient({ adapter });
+// computeBase 的曲線參數：accumulation 沿用 breakout 的預設（壓縮度口徑一致，見 accumulation-shared.ts 檔頭）
+const BASE_CURVE = DEFAULT_BREAKOUT_CONFIG.score.curves.base;
+
+function makePrisma(): PrismaClient {
+  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+  return new PrismaClient({ adapter });
+}
 
 function toIsoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
@@ -45,7 +44,11 @@ interface Snapshot {
   volumeMa20: number | null;
 }
 
-async function buildCandidatePool(date: Date): Promise<{
+async function buildCandidatePool(
+  prisma: PrismaClient,
+  date: Date,
+  minAvgVolumeShares: number,
+): Promise<{
   snapshots: Snapshot[];
   totalStocks: number;
   excludedAboveBand: number;
@@ -89,7 +92,7 @@ async function buildCandidatePool(date: Date): Promise<{
     }
 
     // 2/3. 近 20 日均量下限 / volumeMa20 缺值 → 剔除（無法算窒息量，且冷門股量比不穩會霸榜）
-    if (volumeMa20 === null || volumeMa20 <= 0 || volumeMa20 < MIN_AVG_VOLUME_SHARES) {
+    if (volumeMa20 === null || volumeMa20 <= 0 || volumeMa20 < minAvgVolumeShares) {
       excludedIlliquid += 1;
       continue;
     }
@@ -117,7 +120,12 @@ interface FactorInputs {
   bandwidthHistoryNewestFirst: (number | null)[]; // 不含當日，往前最多 BANDWIDTH_HISTORY_MAX_DAYS 天
 }
 
-async function buildFactorInputs(date: Date, snapshots: Snapshot[]): Promise<Map<string, FactorInputs>> {
+async function buildFactorInputs(
+  prisma: PrismaClient,
+  date: Date,
+  snapshots: Snapshot[],
+  score: AccumulationConfig["score"],
+): Promise<Map<string, FactorInputs>> {
   const codes = snapshots.map((s) => s.code);
   const volumeMa20ByCode = new Map(snapshots.map((s) => [s.code, s.volumeMa20!]));
 
@@ -182,13 +190,13 @@ async function buildFactorInputs(date: Date, snapshots: Snapshot[]): Promise<Map
       list = [];
       bandwidthByCode.set(r.stockCode, list);
     }
-    if (list.length < BANDWIDTH_HISTORY_MAX_DAYS) list.push(r.bollingerBandwidth);
+    if (list.length < score.bandwidthHistoryMaxDays) list.push(r.bollingerBandwidth);
   }
 
   const result = new Map<string, FactorInputs>();
 
   for (const code of codes) {
-    const instList = (instByCode.get(code) ?? []).slice(0, INSTITUTIONAL_WINDOW_DAYS);
+    const instList = (instByCode.get(code) ?? []).slice(0, score.institutionalWindowDays);
     const volMap = volumeByCodeDate.get(code);
 
     const trustNetBuyNewestFirst = instList.map((r) => Number(r.investmentTrustNetBuy ?? 0n));
@@ -200,7 +208,7 @@ async function buildFactorInputs(date: Date, snapshots: Snapshot[]): Promise<Map
 
     // 窒息量：近 SQUEEZE_VOLUME_WINDOW_DAYS 個交易日的 volume / volumeMa20
     const ma20 = volumeMa20ByCode.get(code)!;
-    const recentDates = (quoteDatesByCode.get(code) ?? []).slice(0, SQUEEZE_VOLUME_WINDOW_DAYS);
+    const recentDates = (quoteDatesByCode.get(code) ?? []).slice(0, score.squeezeVolumeWindowDays);
     const quietVolumeRatioNewestFirst = recentDates
       .map((d) => volMap?.get(d.getTime()) ?? null)
       .filter((v): v is number => v !== null)
@@ -244,14 +252,46 @@ interface AccumulationResult {
   degraded: string[];
 }
 
-export async function calculateAccumulationScore(date: Date): Promise<{
+export interface CalculateAccumulationOptions {
+  prisma?: PrismaClient;
+  config?: DeepPartial<AccumulationConfig>;
+}
+
+export async function calculateAccumulationScore(
+  date: Date,
+  options: CalculateAccumulationOptions = {},
+): Promise<{
   date: string;
   isNonTradingDay: boolean;
   poolStats: { totalStocks: number; excludedAboveBand: number; excludedIlliquid: number; scored: number };
 }> {
+  const prisma = options.prisma ?? makePrisma();
+  const ownsPrisma = options.prisma === undefined;
+  const config = resolveAccumulationConfig(options.config);
+  try {
+    return await runCalculation(prisma, date, config);
+  } finally {
+    if (ownsPrisma) await prisma.$disconnect();
+  }
+}
+
+async function runCalculation(
+  prisma: PrismaClient,
+  date: Date,
+  config: AccumulationConfig,
+): Promise<{
+  date: string;
+  isNonTradingDay: boolean;
+  poolStats: { totalStocks: number; excludedAboveBand: number; excludedIlliquid: number; scored: number };
+}> {
+  const { gate, score } = config;
   const dateStr = toIsoDate(date);
 
-  const { snapshots, totalStocks, excludedAboveBand, excludedIlliquid } = await buildCandidatePool(date);
+  const { snapshots, totalStocks, excludedAboveBand, excludedIlliquid } = await buildCandidatePool(
+    prisma,
+    date,
+    gate.minAvgVolumeShares,
+  );
 
   if (totalStocks === 0) {
     console.log(`${dateStr} 無任何 DailyQuote 資料（非交易日？），跳過`);
@@ -266,7 +306,7 @@ export async function calculateAccumulationScore(date: Date): Promise<{
     console.log(
       `${dateStr}：候選池為空（共 ${totalStocks} 檔，剔除站上上軌 ${excludedAboveBand}、低流動性 ${excludedIlliquid}）`,
     );
-    writeOutput(dateStr, { totalStocks, excludedAboveBand, excludedIlliquid, scored: 0 }, []);
+    writeOutput(dateStr, config, { totalStocks, excludedAboveBand, excludedIlliquid, scored: 0 }, []);
     return {
       date: dateStr,
       isNonTradingDay: false,
@@ -274,45 +314,59 @@ export async function calculateAccumulationScore(date: Date): Promise<{
     };
   }
 
-  const factorInputs = await buildFactorInputs(date, snapshots);
+  const factorInputs = await buildFactorInputs(prisma, date, snapshots, score);
 
   // ---- 逐股票算原始指標 ----
   const trustRaw = snapshots.map((s) =>
-    computeTrustRawMetrics(factorInputs.get(s.code)!.trustNetBuyNewestFirst, s.sharesOutstanding),
+    computeTrustRawMetrics(
+      factorInputs.get(s.code)!.trustNetBuyNewestFirst,
+      s.sharesOutstanding,
+      score.institutionalWindowDays,
+      score.minInstitutionalDaysRatio,
+    ),
   );
   const otherInstRaw = snapshots.map((s) => {
     const fi = factorInputs.get(s.code)!;
-    return computeOtherInstitutionRatio(fi.foreignPlusDealerNewestFirst, fi.instVolumeNewestFirst);
+    return computeOtherInstitutionRatio(
+      fi.foreignPlusDealerNewestFirst,
+      fi.instVolumeNewestFirst,
+      score.institutionalWindowDays,
+      score.minInstitutionalDaysRatio,
+    );
   });
   const quietRaw = snapshots.map((s) =>
-    computeQuietVolumeRatio(factorInputs.get(s.code)!.quietVolumeRatioNewestFirst),
+    computeQuietVolumeRatio(
+      factorInputs.get(s.code)!.quietVolumeRatioNewestFirst,
+      score.squeezeVolumeWindowDays,
+      score.minSqueezeVolumeDays,
+    ),
   );
   const baseRaw = snapshots.map((s) => {
     const history = factorInputs.get(s.code)!.bandwidthHistoryNewestFirst;
-    return computeBase(s.bollingerBandwidth, history);
+    return computeBase(s.bollingerBandwidth, history, score.baseMinHistoryDays, BASE_CURVE);
   });
 
   // ---- 跨市場 rankScore ----
   const trustFreqScores = rankScore(
     trustRaw.map((t) => t.buyFrequency),
     false,
-    NEUTRAL_SCORE,
+    score.neutralScore,
   );
   const trustNetRatioScores = rankScore(
     trustRaw.map((t) => t.netRatio),
     false,
-    NEUTRAL_SCORE,
+    score.neutralScore,
   );
   const otherInstScores = rankScore(
     otherInstRaw.map((o) => o.ratio),
     false,
-    NEUTRAL_SCORE,
+    score.neutralScore,
   );
   // 窒息量：量比越低分數越高
   const quietVolumeScores = rankScore(
     quietRaw.map((q) => q.avgRatio),
     true,
-    NEUTRAL_SCORE,
+    score.neutralScore,
   );
 
   // ---- 合成 ----
@@ -331,14 +385,23 @@ export async function calculateAccumulationScore(date: Date): Promise<{
     if (b.degraded) degraded.push("squeeze");
 
     const trustScore = t.degraded
-      ? NEUTRAL_SCORE
-      : combineTrustScore(trustFreqScores[i]!, t.netRatio === null ? null : trustNetRatioScores[i]!);
+      ? score.neutralScore
+      : combineTrustScore(
+          trustFreqScores[i]!,
+          t.netRatio === null ? null : trustNetRatioScores[i]!,
+          score.trustSubWeights,
+        );
     const otherInstScore = otherInstScores[i]!;
-    const chipScore = combineChipScore(trustScore, otherInstScore);
+    const chipScore = combineChipScore(trustScore, otherInstScore, score.chipWeights);
 
     const squeezeScore = b.score;
     const quietVolumeScore = quietVolumeScores[i]!;
-    const readinessCoef = computeReadinessCoefficient(squeezeScore, quietVolumeScore);
+    const readinessCoef = computeReadinessCoefficient(
+      squeezeScore,
+      quietVolumeScore,
+      score.techWeights,
+      score.readinessFloor,
+    );
 
     const finalScore = combineFinalScore(chipScore, readinessCoef);
 
@@ -397,7 +460,12 @@ export async function calculateAccumulationScore(date: Date): Promise<{
     );
   }
 
-  writeOutput(dateStr, { totalStocks, excludedAboveBand, excludedIlliquid, scored: results.length }, results);
+  writeOutput(
+    dateStr,
+    config,
+    { totalStocks, excludedAboveBand, excludedIlliquid, scored: results.length },
+    results,
+  );
 
   return {
     date: dateStr,
@@ -408,6 +476,7 @@ export async function calculateAccumulationScore(date: Date): Promise<{
 
 function writeOutput(
   dateStr: string,
+  config: AccumulationConfig,
   poolStats: { totalStocks: number; excludedAboveBand: number; excludedIlliquid: number; scored: number },
   results: AccumulationResult[],
 ): void {
@@ -419,14 +488,11 @@ function writeOutput(
     JSON.stringify(
       {
         date: dateStr,
-        windowDays: INSTITUTIONAL_WINDOW_DAYS,
+        windowDays: config.score.institutionalWindowDays,
+        // 實際生效的 config（不傳 options.config 時即為 DEFAULT_ACCUMULATION_CONFIG）
         params: {
-          chipWeights: CHIP_WEIGHTS,
-          trustSubWeights: TRUST_SUB_WEIGHTS,
-          techWeights: TECH_WEIGHTS,
-          readinessFloor: READINESS_FLOOR,
-          squeezeVolumeWindowDays: SQUEEZE_VOLUME_WINDOW_DAYS,
-          minAvgVolumeShares: MIN_AVG_VOLUME_SHARES,
+          gate: config.gate,
+          score: config.score,
         },
         poolStats,
         results,
@@ -454,15 +520,21 @@ async function main() {
 
   let targetDate = argDate;
   if (!targetDate) {
-    const latest = await prisma.dailyQuote.findFirst({
-      orderBy: { date: "desc" },
-      select: { date: true },
-    });
-    if (!latest) {
-      console.log("資料庫裡沒有任何 DailyQuote 資料。");
-      return;
+    // 找最新交易日需要一個 client；用一次性 client 查完即關，正式計算的 client 由 calculateAccumulationScore 內部自建
+    const bootstrapPrisma = makePrisma();
+    try {
+      const latest = await bootstrapPrisma.dailyQuote.findFirst({
+        orderBy: { date: "desc" },
+        select: { date: true },
+      });
+      if (!latest) {
+        console.log("資料庫裡沒有任何 DailyQuote 資料。");
+        return;
+      }
+      targetDate = latest.date;
+    } finally {
+      await bootstrapPrisma.$disconnect();
     }
-    targetDate = latest.date;
   }
 
   await calculateAccumulationScore(targetDate);
@@ -470,12 +542,8 @@ async function main() {
 
 const isMain = process.argv[1] && import.meta.url === new URL(process.argv[1], "file://").href;
 if (isMain) {
-  main()
-    .catch((err) => {
-      console.error("accumulationScore 計算失敗:", err);
-      process.exit(1);
-    })
-    .finally(async () => {
-      await prisma.$disconnect();
-    });
+  main().catch((err) => {
+    console.error("accumulationScore 計算失敗:", err);
+    process.exit(1);
+  });
 }
