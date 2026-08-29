@@ -6,7 +6,7 @@
 
 ### 資料層（`scripts/`）
 
-`scripts/` 依用途分子資料夾：`pipeline/`（每日自動）、`screening/`（選股，手動）、`backfill/`（歷史回補，偶爾手動）、`lib/`（純函式庫）、`archive/`（已停用，不維護）。
+`scripts/` 依用途分子資料夾：`pipeline/`（每日自動）、`screening/`（選股，手動）、`backtest/`（回測 Layer 0 引擎 + 資料完整性檢查）、`backfill/`（歷史回補，偶爾手動）、`lib/`（純函式庫 + 撈 DB helper）、`archive/`（已停用，不維護）。
 
 ### `scripts/pipeline/`
 
@@ -22,7 +22,12 @@
 - `calculate-breakout-strength.ts`：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（觸發 → 資格門檻 → 七項強度評分，含 K 棒型態）。核心常數與評分函式抽在 `scripts/lib/breakout-shared.ts`，與 `check-intraday-breakout.ts` 共用。匯出 `calculateBreakoutStrength(date, { prisma?, config? })`（回測用；未傳 `prisma` 則自建並自行關閉）。
 - `calculate-accumulation-score.ts`：盤後選股 v2「投信吃貨訊號」——找還沒突破、但籌碼/技術面在醞釀的股票，與 `calculate-breakout-strength.ts` 互補。乘法計分：`籌碼分數（投信動能×0.7 + 排除投信的外資/自營商集中度×0.3）× 技術就緒係數（布林壓縮度/窒息量合成，下限 0.5）`。候選池先排除「已站上布林上軌」與「近 20 日均量 < 500 張」。待校準參數集中在 `scripts/lib/accumulation-shared.ts`。匯出 `calculateAccumulationScore(date, { prisma?, config? })`。不接進 `daily-pipeline.ts`。
 - `check-intraday-breakout.ts`：盤中一次性快照篩選，把 `calculate-breakout-strength.ts` 的邏輯提前套用在 `mis.twse.com.tw` 即時報價上，手動執行看收盤前該注意哪些股票。匯出 `checkIntradayBreakout({ prisma?, config?, now? })`。不排程、不接進 `daily-pipeline.ts`。
-- `scripts/lib/`：純函式庫（無 Prisma/CLI）。`http.ts`（retry/timeout fetch）、`breakout-shared.ts` / `accumulation-shared.ts`（各含常數 + `XxxConfig` 型別 + `DEFAULT_XXX_CONFIG` + `resolveXxxConfig` + 評分純函式）、`types.ts`（`DeepPartial`）。
+- `scripts/lib/`：純函式庫。`http.ts`（retry/timeout fetch）、`breakout-shared.ts` / `accumulation-shared.ts`（各含常數 + `XxxConfig` 型別 + `DEFAULT_XXX_CONFIG` + `resolveXxxConfig` + 評分純函式 + `fetchXxxRawInputs` 撈 DB helper，供 Layer 0 與正式跑共用）、`types.ts`（`DeepPartial`）。
+
+### `scripts/backtest/`
+
+- `check-data-completeness.ts`：給定回測區間，掃 `DailyQuote` / `TechnicalIndicator` / `InstitutionalTrading` 三表覆蓋率，抓「整段缺日期」與「單股缺漏」（`thinStocks`：實際筆數 / 應有筆數 < 0.9；區間中途上市的新股不誤報）。回報但不自動修，有 hard failure（覆蓋率 < 95% 等）時 exit 1。獨立可跑，也被 `run-layer0.ts` 開跑前呼叫。
+- `run-layer0.ts`：Layer 0 批次歷史模擬引擎。對區間每個交易日，用選股純函式撈全市場每檔的「門檻裸值 + rankScore 前的原始聚合值」寫入 `data/backtest-runs/{run-id}/raw-factors/{date}.jsonl`（一行一檔，不套門檻/不算分數/不寫 DB）。同時寫 `config.json`（range / strategy / git hash / `sharedLibHash` / `windowConfig`）與 `progress.json`（背景任務進度，原子寫）。`--resume=<run-id>` 從斷點續跑。搭配前端 `/backtest` 頁的按鈕觸發（`lib/actions/backtest.ts` spawn detached 子進程）。`data/backtest-runs/` 已進 `.gitignore`，需手動清。
 
 ### `scripts/backfill/`
 
@@ -35,7 +40,7 @@
 
 Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4 + Recharts。目前只有骨架：
 
-- `app/`：`layout.tsx`（側邊欄殼）、`page.tsx`（dashboard，顯示 DB 連通性卡片 + Recharts smoke 圖）。
+- `app/`：`layout.tsx`（側邊欄殼）、`page.tsx`（dashboard，顯示 DB 連通性卡片 + Recharts smoke 圖）、`backtest/page.tsx`（Layer 0 基準跑：策略/日期輸入 + 觸發鈕 + 進度條 + run 清單）。
 - `lib/prisma.ts`：`PrismaClient` 單例（`globalThis` 快取，dev hot reload 不爆連線池），檔頭 `import "server-only"`。**只能在 Server Component / Server Action import。**
 - `lib/actions/`：Server Actions（不建 REST/GraphQL API），檔頭 `"use server"`。
 - `components/`：`ui/`（手刻基礎元件）、`ChartSmoke.tsx`。
@@ -108,6 +113,18 @@ pnpm tsx scripts/screening/calculate-accumulation-score.ts --date=2026-08-26
 
 # 盤中一次性快照篩選（無參數，本質是「現在」的快照）
 pnpm tsx scripts/screening/check-intraday-breakout.ts
+
+# --- 回測 ---
+
+# 資料完整性檢查（Layer 0 開跑前確認三表覆蓋率；有 hard failure exit 1）
+pnpm tsx scripts/backtest/check-data-completeness.ts --start=2024-01-02 --end=2026-05-30
+
+# Layer 0 基準跑（全市場原始因子落地 JSONL，一次一個策略）
+pnpm tsx scripts/backtest/run-layer0.ts --strategy=breakout --start=2024-01-02 --end=2026-05-30
+pnpm tsx scripts/backtest/run-layer0.ts --strategy=accumulation --start=2024-01-02 --end=2026-05-30
+# 斷點續跑
+pnpm tsx scripts/backtest/run-layer0.ts --resume=breakout-20260830-143012
+# 或從前端 /backtest 頁按鈕觸發（背景子進程 + 進度條輪詢）
 
 # --- 歷史回補（偶爾手動）---
 

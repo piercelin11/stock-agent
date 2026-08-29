@@ -116,9 +116,9 @@ data/backtest-cache/
 
 ### 3.3 Layer 0 基準跑（批次歷史模擬引擎）
 
-- [ ] 對回測區間內每個交易日，用選股純函式撈 DB 算出**全市場每檔**的門檻裸值 + rankScore 前原始聚合值，寫入 `raw-factors/{date}.jsonl`。**不套任何門檻、不算成品分數、不寫 DB**
-- [ ] 背景任務執行（可能跑幾百個交易日）：Server Action 觸發 → 背景 worker 逐日跑 → 寫進度檔（或記憶體進度），UI 輪詢
-- [ ] **資料完整性檢查（這步仍查 DB）**：Layer 0 開跑前確認回測區間的 `DailyQuote` / `TechnicalIndicator` / `InstitutionalTrading` 覆蓋率。**已釐清**：
+- [x] 對回測區間內每個交易日，用選股純函式撈 DB 算出**全市場每檔**的門檻裸值 + rankScore 前原始聚合值，寫入 `raw-factors/{date}.jsonl`。**不套任何門檻、不算成品分數、不寫 DB**。實作：`scripts/backtest/run-layer0.ts`（`runLayer0()` + CLI + `isMain` guard + `--resume`）。撈資料邏輯抽成 `scripts/lib/{breakout,accumulation}-shared.ts` 的 `fetchXxxRawInputs` helper，Layer 0 與正式跑共用（黃金檔驗證逐位元不變）。視窗多抓緩衝（`history` 260 / `rsCloseSeries` 76 / `institutional` 30 等），記進 `config.json.windowConfig`
+- [x] 背景任務執行（可能跑幾百個交易日）：Server Action 觸發 → 背景 worker 逐日跑 → 寫進度檔（原子寫）→ UI 輪詢。實作：`lib/actions/backtest.ts`（`startLayer0Run` / `getLayer0Progress` / `listBacktestRuns`，spawn `process.execPath` + `node_modules/tsx/dist/cli.mjs` 絕對路徑 detached 子進程）+ `app/backtest/page.tsx` + `components/BacktestRunner.tsx`（進度條 setInterval 2s 輪詢）
+- [x] **資料完整性檢查（這步仍查 DB）**：Layer 0 開跑前確認回測區間的 `DailyQuote` / `TechnicalIndicator` / `InstitutionalTrading` 覆蓋率。實作：`scripts/backtest/check-data-completeness.ts`（`checkDataCompleteness()` + CLI，有 hard failure 時 exit 1，也被 `run-layer0.ts` 開跑前呼叫）。抓「整段缺日期」與「單股缺漏」（`thinStocks`，實際/應有 < 0.9；`expectedDays` 用該股第一筆 DailyQuote 之後的交易日數，區間中途上市的新股不誤報）。**已釐清**：
   - `InstitutionalTrading` 實際資料範圍（2026-08-28 查 DB 確認）：**2020-01-02 → 2026-08-28、約 1476 個交易日、266 萬筆**，與 `DailyQuote` / `TechnicalIndicator` 同起點。舊紀錄「2025-05-02 起 324 個交易日」是 2026-08-27 6 年回補前的狀態，已過時。**accumulation 回測區間可拉滿 6 年**，唯一注意早期年份每日檔數略少（2020 每日約 1808 檔 vs 2025 約 1983 檔），屬正常（當時上市家數較少）。
   - Layer 0 正確性前提是 `TechnicalIndicator` 已完整回填**整個回測區間**（`bollingerUpper` / `bollingerBandwidth` / `volumeMa20` 是逐日重算寫入的，查歷史某天安全），否則早期日期候選池會因指標缺值而大量 degraded / 被剔除，污染回測結果。已知 2026-08-27 6 年回補時 4104 曾只寫 326 筆報價再事後補回 1616 筆（技術指標亦已用單股參數補算），完整性檢查腳本要能抓出這類單股缺漏
 

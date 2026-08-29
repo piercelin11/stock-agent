@@ -7,7 +7,7 @@ import { PrismaClient } from "../../generated/prisma/client";
 import type { DeepPartial } from "../lib/types";
 import {
   rankScore,
-  fetchHistoryWindow,
+  fetchBreakoutRawInputs,
   computeVolumeStrength,
   computeBreakoutMargin,
   computeFirstBar,
@@ -29,64 +29,6 @@ function makePrisma(): PrismaClient {
 
 function toIsoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
-}
-
-interface QuoteRow {
-  stockCode: string;
-  name: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  change: number;
-  volume: number;
-  sharesOutstanding: number | null;
-}
-
-interface IndicatorRow {
-  bollingerUpper: number | null;
-  bollingerBandwidth: number | null;
-  volumeMa20: number | null;
-}
-
-async function fetchTodayQuotes(prisma: PrismaClient, date: Date): Promise<QuoteRow[]> {
-  const quotes = await prisma.dailyQuote.findMany({
-    where: { date, stock: { securityType: "stock" } },
-    select: {
-      stockCode: true,
-      open: true,
-      high: true,
-      low: true,
-      close: true,
-      change: true,
-      volume: true,
-      stock: { select: { name: true, sharesOutstanding: true } },
-    },
-  });
-
-  return quotes.map((q) => ({
-    stockCode: q.stockCode,
-    name: q.stock.name,
-    open: q.open,
-    high: q.high,
-    low: q.low,
-    close: q.close,
-    change: q.change,
-    volume: Number(q.volume),
-    sharesOutstanding: q.stock.sharesOutstanding !== null ? Number(q.stock.sharesOutstanding) : null,
-  }));
-}
-
-async function fetchIndicatorsForDate(
-  prisma: PrismaClient,
-  date: Date,
-  codes: string[],
-): Promise<Map<string, IndicatorRow>> {
-  const rows = await prisma.technicalIndicator.findMany({
-    where: { date, stockCode: { in: codes } },
-    select: { stockCode: true, bollingerUpper: true, bollingerBandwidth: true, volumeMa20: true },
-  });
-  return new Map(rows.map((r) => [r.stockCode, r]));
 }
 
 interface BreakoutResult {
@@ -144,17 +86,24 @@ async function runCalculation(
 }> {
   const { gate, score } = config;
   const dateStr = toIsoDate(date);
-  const quotes = await fetchTodayQuotes(prisma, date);
 
-  if (quotes.length === 0) {
+  // 撈當天全市場的原始輸入（撈 DB + 組視窗序列）。與 Layer 0 批次引擎共用同一份 helper。
+  const rawInputs = await fetchBreakoutRawInputs(prisma, date, {
+    firstBarLookbackDays: score.firstBarLookbackDays,
+    baseMaxWindowDays: score.baseMaxWindowDays,
+    rsWindowDays: score.rsWindowDays,
+  });
+
+  if (rawInputs.size === 0) {
     console.log(`${dateStr} 無任何 DailyQuote 資料（非交易日？），跳過`);
     return { date: dateStr, isNonTradingDay: true, stats: { totalStocks: 0, triggered: 0, passedGates: 0 } };
   }
 
+  const quotes = [...rawInputs.values()].map((r) => r.quote);
   const totalStocks = quotes.length;
   const codes = quotes.map((q) => q.stockCode);
 
-  const todayIndicators = await fetchIndicatorsForDate(prisma, date, codes);
+  const todayIndicators = new Map([...rawInputs].map(([c, r]) => [c, r.indicator]));
 
   // 第一層：觸發條件
   const triggeredQuotes = quotes.filter((q) => {
@@ -210,98 +159,22 @@ async function runCalculation(
 
   const passedCodes = passedQuotes.map((q) => q.stockCode);
 
-  // T-1 日期：抓比 date 早的最近一個交易日
-  const prevDayRow = await prisma.dailyQuote.findFirst({
-    where: { date: { lt: date }, stockCode: { in: passedCodes } },
-    orderBy: { date: "desc" },
-    select: { date: true },
-  });
-  const prevDate = prevDayRow?.date ?? null;
-
-  // firstBar 用：逐日 close+bollingerUpper 序列（近期，往回抓多一點確保能數到連續天數斷點）
-  const firstBarLookbackDays = score.firstBarLookbackDays;
-  const [firstBarQuotes, firstBarIndicators] = prevDate
-    ? await Promise.all([
-        prisma.dailyQuote.findMany({
-          where: { stockCode: { in: passedCodes }, date: { lte: prevDate } },
-          orderBy: { date: "desc" },
-          take: firstBarLookbackDays * passedCodes.length,
-          select: { stockCode: true, date: true, close: true },
-        }),
-        prisma.technicalIndicator.findMany({
-          where: { stockCode: { in: passedCodes }, date: { lte: prevDate } },
-          orderBy: { date: "desc" },
-          take: firstBarLookbackDays * passedCodes.length,
-          select: { stockCode: true, date: true, bollingerUpper: true },
-        }),
-      ])
-    : [[], []];
-
+  // firstBar / base / proximity 用的視窗序列都已由 fetchBreakoutRawInputs 撈好（全市場），
+  // 這裡按需取用：firstBar / base / proximity 只需要 passedCodes，relativeStrength 需要全市場。
   const firstBarSeriesByStock = new Map<string, { close: number; bollingerUpper: number | null }[]>();
-  {
-    const closeByStockDate = new Map<string, Map<number, number>>();
-    for (const row of firstBarQuotes) {
-      let m = closeByStockDate.get(row.stockCode);
-      if (!m) {
-        m = new Map();
-        closeByStockDate.set(row.stockCode, m);
-      }
-      m.set(row.date.getTime(), row.close);
-    }
-    const bollUpperByStockDate = new Map<string, Map<number, number | null>>();
-    for (const row of firstBarIndicators) {
-      let m = bollUpperByStockDate.get(row.stockCode);
-      if (!m) {
-        m = new Map();
-        bollUpperByStockDate.set(row.stockCode, m);
-      }
-      m.set(row.date.getTime(), row.bollingerUpper);
-    }
-    const datesByStock = new Map<string, Date[]>();
-    for (const row of firstBarQuotes) {
-      let list = datesByStock.get(row.stockCode);
-      if (!list) {
-        list = [];
-        datesByStock.set(row.stockCode, list);
-      }
-      if (list.length < firstBarLookbackDays) list.push(row.date);
-    }
-    for (const code of passedCodes) {
-      const dates = datesByStock.get(code) ?? [];
-      const closeMap = closeByStockDate.get(code);
-      const upperMap = bollUpperByStockDate.get(code);
-      firstBarSeriesByStock.set(
-        code,
-        dates.map((d) => ({
-          close: closeMap?.get(d.getTime()) ?? Number.NaN,
-          bollingerUpper: upperMap?.get(d.getTime()) ?? null,
-        })),
-      );
-    }
+  const baseHistoryByStock = new Map<string, HistoryPoint[]>();
+  for (const code of passedCodes) {
+    const raw = rawInputs.get(code)!;
+    firstBarSeriesByStock.set(code, raw.firstBarSeries);
+    baseHistoryByStock.set(code, raw.history);
   }
+  // proximityToHigh 用：同一組 T-1 起算的視窗資料可重用
+  const proximityHistoryByStock = baseHistoryByStock;
 
-  // base 用：T-1 往前最多 240 筆 bandwidth（不含今天）
-  const baseHistoryByStock: Map<string, HistoryPoint[]> = prevDate
-    ? await fetchHistoryWindow(prisma, prevDate, passedCodes, score.baseMaxWindowDays)
-    : new Map();
-
-  // proximityToHigh 用：T-1 往前最多 240 筆 close（不含今天）
-  const proximityHistoryByStock = baseHistoryByStock; // 同一組資料可重用（皆為 T-1 起算的 240 筆窗）
-
-  // relativeStrength 用：全市場（totalStocks 全部）近 61 筆 close，含今天
-  const marketHistoryRows = await prisma.dailyQuote.findMany({
-    where: { stockCode: { in: codes }, date: { lte: date } },
-    orderBy: { date: "desc" },
-    select: { stockCode: true, date: true, close: true },
-  });
+  // relativeStrength 用：全市場近 61 筆 close，含今天
   const marketHistoryByStock = new Map<string, { date: Date; close: number }[]>();
-  for (const row of marketHistoryRows) {
-    let list = marketHistoryByStock.get(row.stockCode);
-    if (!list) {
-      list = [];
-      marketHistoryByStock.set(row.stockCode, list);
-    }
-    if (list.length < score.rsWindowDays + 1) list.push(row);
+  for (const code of codes) {
+    marketHistoryByStock.set(code, rawInputs.get(code)!.rsCloseSeries);
   }
 
   const { returns: marketReturns, historyDays: rsHistoryDays } = computeMarketWideReturns(
@@ -313,9 +186,9 @@ async function runCalculation(
   const rsScoreByCode = new Map(codes.map((c, i) => [c, { score: rsScoresAllMarket[i]!, historyDays: rsHistoryDays.get(c) ?? 0 }]));
 
   const results: BreakoutResult[] = passedQuotes.map((q) => {
-    const ind = todayIndicators.get(q.stockCode)!;
-    const bollingerUpper = ind.bollingerUpper!;
-    const volumeMa20 = ind.volumeMa20!;
+    const ind = todayIndicators.get(q.stockCode)!; // passedQuotes 已過觸發條件，必有非 null indicator
+    const bollingerUpper = ind!.bollingerUpper!;
+    const volumeMa20 = ind!.volumeMa20!;
     const volumeRatio = q.volume / volumeMa20;
 
     const prevClose = q.close - q.change;

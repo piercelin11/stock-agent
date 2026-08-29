@@ -8,6 +8,7 @@ import type { DeepPartial } from "../lib/types";
 import { computeBase, DEFAULT_BREAKOUT_CONFIG } from "../lib/breakout-shared";
 import {
   rankScore,
+  fetchAccumulationRawInputs,
   computeTrustRawMetrics,
   computeOtherInstitutionRatio,
   computeQuietVolumeRatio,
@@ -111,121 +112,6 @@ async function buildCandidatePool(
   return { snapshots, totalStocks, excludedAboveBand, excludedIlliquid };
 }
 
-// ---- 各股票的原始因子輸入（新到舊排序的視窗序列，由 DB 一次撈完再組）----
-interface FactorInputs {
-  trustNetBuyNewestFirst: number[]; // investmentTrustNetBuy（近 INSTITUTIONAL_WINDOW_DAYS 天）
-  foreignPlusDealerNewestFirst: number[]; // foreignNetBuy + dealerNetBuy（同窗）
-  instVolumeNewestFirst: number[]; // 同窗對應的 DailyQuote.volume（其他法人集中度分母）
-  quietVolumeRatioNewestFirst: number[]; // 近 SQUEEZE_VOLUME_WINDOW_DAYS 天 volume / volumeMa20
-  bandwidthHistoryNewestFirst: (number | null)[]; // 不含當日，往前最多 BANDWIDTH_HISTORY_MAX_DAYS 天
-}
-
-async function buildFactorInputs(
-  prisma: PrismaClient,
-  date: Date,
-  snapshots: Snapshot[],
-  score: AccumulationConfig["score"],
-): Promise<Map<string, FactorInputs>> {
-  const codes = snapshots.map((s) => s.code);
-  const volumeMa20ByCode = new Map(snapshots.map((s) => [s.code, s.volumeMa20!]));
-
-  // 一次撈三張表的歷史（都 lte date，新到舊），再逐股票截視窗
-  const [instRows, quoteRows, indicatorRows] = await Promise.all([
-    prisma.institutionalTrading.findMany({
-      where: { stockCode: { in: codes }, date: { lte: date } },
-      orderBy: { date: "desc" },
-      select: {
-        stockCode: true,
-        date: true,
-        foreignNetBuy: true,
-        investmentTrustNetBuy: true,
-        dealerNetBuy: true,
-      },
-    }),
-    prisma.dailyQuote.findMany({
-      where: { stockCode: { in: codes }, date: { lte: date } },
-      orderBy: { date: "desc" },
-      select: { stockCode: true, date: true, volume: true },
-    }),
-    prisma.technicalIndicator.findMany({
-      where: { stockCode: { in: codes }, date: { lt: date } }, // 不含當日
-      orderBy: { date: "desc" },
-      select: { stockCode: true, date: true, bollingerBandwidth: true },
-    }),
-  ]);
-
-  // volume 依 stockCode + date 建索引（供其他法人集中度的分母對齊三大法人日期）
-  const volumeByCodeDate = new Map<string, Map<number, number>>();
-  const quoteDatesByCode = new Map<string, Date[]>();
-  for (const r of quoteRows) {
-    let m = volumeByCodeDate.get(r.stockCode);
-    if (!m) {
-      m = new Map();
-      volumeByCodeDate.set(r.stockCode, m);
-    }
-    m.set(r.date.getTime(), Number(r.volume));
-
-    let list = quoteDatesByCode.get(r.stockCode);
-    if (!list) {
-      list = [];
-      quoteDatesByCode.set(r.stockCode, list);
-    }
-    list.push(r.date);
-  }
-
-  const instByCode = new Map<string, typeof instRows>();
-  for (const r of instRows) {
-    let list = instByCode.get(r.stockCode);
-    if (!list) {
-      list = [];
-      instByCode.set(r.stockCode, list);
-    }
-    list.push(r);
-  }
-
-  const bandwidthByCode = new Map<string, (number | null)[]>();
-  for (const r of indicatorRows) {
-    let list = bandwidthByCode.get(r.stockCode);
-    if (!list) {
-      list = [];
-      bandwidthByCode.set(r.stockCode, list);
-    }
-    if (list.length < score.bandwidthHistoryMaxDays) list.push(r.bollingerBandwidth);
-  }
-
-  const result = new Map<string, FactorInputs>();
-
-  for (const code of codes) {
-    const instList = (instByCode.get(code) ?? []).slice(0, score.institutionalWindowDays);
-    const volMap = volumeByCodeDate.get(code);
-
-    const trustNetBuyNewestFirst = instList.map((r) => Number(r.investmentTrustNetBuy ?? 0n));
-    const foreignPlusDealerNewestFirst = instList.map(
-      (r) => Number(r.foreignNetBuy ?? 0n) + Number(r.dealerNetBuy ?? 0n),
-    );
-    // 其他法人集中度的分母：與三大法人同一批日期的成交量
-    const instVolumeNewestFirst = instList.map((r) => volMap?.get(r.date.getTime()) ?? 0);
-
-    // 窒息量：近 SQUEEZE_VOLUME_WINDOW_DAYS 個交易日的 volume / volumeMa20
-    const ma20 = volumeMa20ByCode.get(code)!;
-    const recentDates = (quoteDatesByCode.get(code) ?? []).slice(0, score.squeezeVolumeWindowDays);
-    const quietVolumeRatioNewestFirst = recentDates
-      .map((d) => volMap?.get(d.getTime()) ?? null)
-      .filter((v): v is number => v !== null)
-      .map((v) => v / ma20);
-
-    result.set(code, {
-      trustNetBuyNewestFirst,
-      foreignPlusDealerNewestFirst,
-      instVolumeNewestFirst,
-      quietVolumeRatioNewestFirst,
-      bandwidthHistoryNewestFirst: bandwidthByCode.get(code) ?? [],
-    });
-  }
-
-  return result;
-}
-
 interface AccumulationResult {
   code: string;
   name: string;
@@ -314,7 +200,20 @@ async function runCalculation(
     };
   }
 
-  const factorInputs = await buildFactorInputs(prisma, date, snapshots, score);
+  const volumeMa20ByCode = new Map<string, number | null>(
+    snapshots.map((s) => [s.code, s.volumeMa20]),
+  );
+  const factorInputs = await fetchAccumulationRawInputs(
+    prisma,
+    date,
+    snapshots.map((s) => s.code),
+    volumeMa20ByCode,
+    {
+      institutionalWindowDays: score.institutionalWindowDays,
+      squeezeVolumeWindowDays: score.squeezeVolumeWindowDays,
+      bandwidthHistoryMaxDays: score.bandwidthHistoryMaxDays,
+    },
+  );
 
   // ---- 逐股票算原始指標 ----
   const trustRaw = snapshots.map((s) =>

@@ -43,6 +43,10 @@ tsconfig.tsbuildinfo
 /data/intraday-breakout-snapshots/
 /data/accumulation-score-results/
 
+# Backtest experiment data (Layer 0 raw-factors / caches; not versioned, not in DB)
+/data/backtest-runs/
+/data/backtest-cache/
+
 # Auto-installed skill caches (local tool state, not project source)
 .agents/
 .claude/

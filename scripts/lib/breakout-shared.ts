@@ -189,6 +189,210 @@ export interface HistoryPoint {
   bollingerBandwidth: number | null;
 }
 
+// ---- 撈 DB + 組視窗序列（calculate-breakout-strength.ts 與 Layer 0 批次引擎共用）----
+// 從 calculate-breakout-strength.ts 抽出，確保正式跑與回測 Layer 0 撈的資料逐位元一致。
+
+export interface BreakoutQuoteRow {
+  stockCode: string;
+  name: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  change: number;
+  volume: number;
+  sharesOutstanding: number | null;
+}
+
+export interface BreakoutIndicatorRow {
+  bollingerUpper: number | null;
+  bollingerBandwidth: number | null;
+  volumeMa20: number | null;
+}
+
+// 當天全市場 securityType="stock" 的 DailyQuote + Stock.name / sharesOutstanding
+export async function fetchTodayQuotes(prisma: PrismaClient, date: Date): Promise<BreakoutQuoteRow[]> {
+  const quotes = await prisma.dailyQuote.findMany({
+    where: { date, stock: { securityType: "stock" } },
+    select: {
+      stockCode: true,
+      open: true,
+      high: true,
+      low: true,
+      close: true,
+      change: true,
+      volume: true,
+      stock: { select: { name: true, sharesOutstanding: true } },
+    },
+  });
+
+  return quotes.map((q) => ({
+    stockCode: q.stockCode,
+    name: q.stock.name,
+    open: q.open,
+    high: q.high,
+    low: q.low,
+    close: q.close,
+    change: q.change,
+    volume: Number(q.volume),
+    sharesOutstanding: q.stock.sharesOutstanding !== null ? Number(q.stock.sharesOutstanding) : null,
+  }));
+}
+
+// 指定日期、指定股票的 TechnicalIndicator（bollingerUpper / bollingerBandwidth / volumeMa20）
+export async function fetchIndicatorsForDate(
+  prisma: PrismaClient,
+  date: Date,
+  codes: string[],
+): Promise<Map<string, BreakoutIndicatorRow>> {
+  const rows = await prisma.technicalIndicator.findMany({
+    where: { date, stockCode: { in: codes } },
+    select: { stockCode: true, bollingerUpper: true, bollingerBandwidth: true, volumeMa20: true },
+  });
+  return new Map(rows.map((r) => [r.stockCode, r]));
+}
+
+/** fetchBreakoutRawInputs 的視窗長度。正式跑傳 DEFAULT_BREAKOUT_CONFIG.score 對應值；Layer 0 傳加緩衝的值。 */
+export interface BreakoutFetchWindows {
+  firstBarLookbackDays: number;
+  baseMaxWindowDays: number;
+  rsWindowDays: number;
+}
+
+/** 一支股票的 breakout 原始輸入（撈 DB + 組序列的結果，尚未套門檻、未評分）。 */
+export interface BreakoutRawInputs {
+  quote: BreakoutQuoteRow;
+  indicator: BreakoutIndicatorRow | null;
+  prevTradingDate: Date | null;
+  // T-1 起往回 firstBarLookbackDays 筆（新到舊），close + bollingerUpper 對齊
+  firstBarSeries: { close: number; bollingerUpper: number | null }[];
+  // base + proximityToHigh 共用：T-1 起往回 baseMaxWindowDays 筆（新到舊）
+  history: HistoryPoint[];
+  // relativeStrength：這一檔近 rsWindowDays+1 筆 close（含當天，新到舊）
+  rsCloseSeries: { date: Date; close: number }[];
+}
+
+// 撈「當天全市場」的 breakout 原始輸入。codes 省略時 = 當天全市場一般股票（Layer 0 用）；
+// 傳 codes 時只撈那幾支（正式跑篩完門檻後用）。回傳 Map 以 stockCode 為鍵。
+export async function fetchBreakoutRawInputs(
+  prisma: PrismaClient,
+  date: Date,
+  windows: BreakoutFetchWindows,
+  codes?: string[],
+): Promise<Map<string, BreakoutRawInputs>> {
+  const quotes = await fetchTodayQuotes(prisma, date);
+  const filteredQuotes = codes ? quotes.filter((q) => codes.includes(q.stockCode)) : quotes;
+  const targetCodes = filteredQuotes.map((q) => q.stockCode);
+
+  const result = new Map<string, BreakoutRawInputs>();
+  if (targetCodes.length === 0) return result;
+
+  const todayIndicators = await fetchIndicatorsForDate(prisma, date, targetCodes);
+
+  // T-1 交易日：比 date 早的最近一個交易日（用目標股票集合去查，行為對齊原腳本）
+  const prevDayRow = await prisma.dailyQuote.findFirst({
+    where: { date: { lt: date }, stockCode: { in: targetCodes } },
+    orderBy: { date: "desc" },
+    select: { date: true },
+  });
+  const prevDate = prevDayRow?.date ?? null;
+
+  // firstBar：T-1 起往回 firstBarLookbackDays 筆 close + bollingerUpper
+  const [firstBarQuotes, firstBarIndicators] = prevDate
+    ? await Promise.all([
+        prisma.dailyQuote.findMany({
+          where: { stockCode: { in: targetCodes }, date: { lte: prevDate } },
+          orderBy: { date: "desc" },
+          take: windows.firstBarLookbackDays * targetCodes.length,
+          select: { stockCode: true, date: true, close: true },
+        }),
+        prisma.technicalIndicator.findMany({
+          where: { stockCode: { in: targetCodes }, date: { lte: prevDate } },
+          orderBy: { date: "desc" },
+          take: windows.firstBarLookbackDays * targetCodes.length,
+          select: { stockCode: true, date: true, bollingerUpper: true },
+        }),
+      ])
+    : [[], []];
+
+  const firstBarSeriesByStock = new Map<string, { close: number; bollingerUpper: number | null }[]>();
+  {
+    const closeByStockDate = new Map<string, Map<number, number>>();
+    for (const row of firstBarQuotes) {
+      let m = closeByStockDate.get(row.stockCode);
+      if (!m) {
+        m = new Map();
+        closeByStockDate.set(row.stockCode, m);
+      }
+      m.set(row.date.getTime(), row.close);
+    }
+    const bollUpperByStockDate = new Map<string, Map<number, number | null>>();
+    for (const row of firstBarIndicators) {
+      let m = bollUpperByStockDate.get(row.stockCode);
+      if (!m) {
+        m = new Map();
+        bollUpperByStockDate.set(row.stockCode, m);
+      }
+      m.set(row.date.getTime(), row.bollingerUpper);
+    }
+    const datesByStock = new Map<string, Date[]>();
+    for (const row of firstBarQuotes) {
+      let list = datesByStock.get(row.stockCode);
+      if (!list) {
+        list = [];
+        datesByStock.set(row.stockCode, list);
+      }
+      if (list.length < windows.firstBarLookbackDays) list.push(row.date);
+    }
+    for (const code of targetCodes) {
+      const dates = datesByStock.get(code) ?? [];
+      const closeMap = closeByStockDate.get(code);
+      const upperMap = bollUpperByStockDate.get(code);
+      firstBarSeriesByStock.set(
+        code,
+        dates.map((d) => ({
+          close: closeMap?.get(d.getTime()) ?? Number.NaN,
+          bollingerUpper: upperMap?.get(d.getTime()) ?? null,
+        })),
+      );
+    }
+  }
+
+  // base + proximity：T-1 往回最多 baseMaxWindowDays 筆 { date, close, bollingerBandwidth }
+  const historyByStock: Map<string, HistoryPoint[]> = prevDate
+    ? await fetchHistoryWindow(prisma, prevDate, targetCodes, windows.baseMaxWindowDays)
+    : new Map();
+
+  // relativeStrength：目標股票集合近 rsWindowDays+1 筆 close（含今天，新到舊）
+  const marketHistoryRows = await prisma.dailyQuote.findMany({
+    where: { stockCode: { in: targetCodes }, date: { lte: date } },
+    orderBy: { date: "desc" },
+    select: { stockCode: true, date: true, close: true },
+  });
+  const rsCloseByStock = new Map<string, { date: Date; close: number }[]>();
+  for (const row of marketHistoryRows) {
+    let list = rsCloseByStock.get(row.stockCode);
+    if (!list) {
+      list = [];
+      rsCloseByStock.set(row.stockCode, list);
+    }
+    if (list.length < windows.rsWindowDays + 1) list.push({ date: row.date, close: row.close });
+  }
+
+  for (const q of filteredQuotes) {
+    result.set(q.stockCode, {
+      quote: q,
+      indicator: todayIndicators.get(q.stockCode) ?? null,
+      prevTradingDate: prevDate,
+      firstBarSeries: firstBarSeriesByStock.get(q.stockCode) ?? [],
+      history: historyByStock.get(q.stockCode) ?? [],
+      rsCloseSeries: rsCloseByStock.get(q.stockCode) ?? [],
+    });
+  }
+
+  return result;
+}
+
 // 抓每支股票近 N 個交易日（含 asOfDate）的 close + bollingerBandwidth，依日期新到舊排序
 export async function fetchHistoryWindow(
   prisma: PrismaClient,

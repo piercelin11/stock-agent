@@ -7,7 +7,12 @@
 //
 // 壓縮度分數直接重用 breakout-shared.ts 的 computeBase（帶寬歷史百分位 + 低帶寬持續天數），
 // 與 calculate-breakout-strength.ts 口徑一致，未來兩系統結果可比對。
+//
+// 註：本檔原為「無 Prisma / CLI」的純函式庫。2026-08-29（回測 Layer 0）起追加
+// fetchAccumulationRawInputs——它 import PrismaClient「型別」並會查 DB，比照 breakout-shared.ts
+// 的 fetchHistoryWindow / fetchBreakoutRawInputs。純評分函式仍不碰 Prisma。
 
+import type { PrismaClient } from "../../generated/prisma/client";
 import type { DeepPartial } from "./types";
 
 // ---- 視窗與資格門檻常數（比照 breakout-shared.ts 的 RS_WINDOW_DAYS 寫法，寫死不留活動範圍）----
@@ -265,4 +270,158 @@ export function computeReadinessCoefficient(
 // 最終分數 = 籌碼分數 × 就緒係數
 export function combineFinalScore(chipScore: number, readinessCoef: number): number {
   return chipScore * readinessCoef;
+}
+
+// ---- 撈 DB + 組視窗序列（calculate-accumulation-score.ts 與 Layer 0 批次引擎共用）----
+// 從 calculate-accumulation-score.ts 的 buildFactorInputs 抽出（去掉 buildCandidatePool 的門檻篩選）。
+// 呼叫端負責決定 codes（正式跑傳候選池、Layer 0 傳全市場一般股票）與對應的 volumeMa20。
+
+/** fetchAccumulationRawInputs 的視窗長度。正式跑傳 DEFAULT_ACCUMULATION_CONFIG.score 對應值；Layer 0 傳加緩衝的值。 */
+export interface AccumulationFetchWindows {
+  institutionalWindowDays: number;
+  squeezeVolumeWindowDays: number;
+  bandwidthHistoryMaxDays: number;
+}
+
+/** 一支股票的 accumulation 原始因子輸入（新到舊排序的視窗序列）。 */
+export interface AccumulationRawInputs {
+  trustNetBuyNewestFirst: number[]; // investmentTrustNetBuy（近 institutionalWindowDays 天）
+  foreignPlusDealerNewestFirst: number[]; // foreignNetBuy + dealerNetBuy（同窗）
+  instVolumeNewestFirst: number[]; // 同窗對應的 DailyQuote.volume（其他法人集中度分母，對齊三大法人日期）
+  recentVolumesNewestFirst: number[]; // 近 squeezeVolumeWindowDays 天的原始 volume（Layer 0 存這個，不鎖 volumeMa20）
+  quietVolumeRatioNewestFirst: number[]; // 近 squeezeVolumeWindowDays 天 volume / volumeMa20（正式跑用）
+  bandwidthHistoryNewestFirst: (number | null)[]; // 不含當日，往前最多 bandwidthHistoryMaxDays 天
+}
+
+// 一次撈三張表的歷史（都 lte / lt date，新到舊），再逐股票截視窗。
+// volumeMa20ByCode：每支股票當天的 volumeMa20（窒息量分母）；缺值的股票不會有 quietVolumeRatio。
+//
+// 【記憶體】三張表的查詢都是「stockCode in codes + date <= date」無 take——正式跑 codes 是候選池
+// （幾百檔）沒問題，但 Layer 0 傳全市場（~1976 檔 × 6 年歷史）會一次拉數百萬列爆 heap。
+// 因此對 codes 分批（CODE_BATCH_SIZE），每批各自查、各自截視窗，結果併回同一個 Map。
+const CODE_BATCH_SIZE = 250;
+
+export async function fetchAccumulationRawInputs(
+  prisma: PrismaClient,
+  date: Date,
+  codes: string[],
+  volumeMa20ByCode: Map<string, number | null>,
+  windows: AccumulationFetchWindows,
+): Promise<Map<string, AccumulationRawInputs>> {
+  const result = new Map<string, AccumulationRawInputs>();
+  if (codes.length === 0) return result;
+
+  for (let i = 0; i < codes.length; i += CODE_BATCH_SIZE) {
+    const batch = codes.slice(i, i + CODE_BATCH_SIZE);
+    await fetchBatch(prisma, date, batch, volumeMa20ByCode, windows, result);
+  }
+  return result;
+}
+
+async function fetchBatch(
+  prisma: PrismaClient,
+  date: Date,
+  codes: string[],
+  volumeMa20ByCode: Map<string, number | null>,
+  windows: AccumulationFetchWindows,
+  result: Map<string, AccumulationRawInputs>,
+): Promise<void> {
+  // 記憶體：這三個查詢無 take、無日期下界（撈全歷史再逐股票截視窗）。正式跑 codes 是候選池
+  // （幾百檔）沒事；Layer 0 傳全市場（~1976 檔 × 6 年）一次撈會 OOM（2026-08-29 實測），
+  // 所以 fetchAccumulationRawInputs 對 codes 分批（CODE_BATCH_SIZE=250），每批各自撈。
+  // 查詢本身維持原樣——「最近 N 筆 per stock」用 take 在多股查詢上做不到（會變成前幾檔拿滿、
+  // 後面的被截），只能靠分批把單次撈的量壓下來。
+  const [instRows, quoteRows, indicatorRows] = await Promise.all([
+    prisma.institutionalTrading.findMany({
+      where: { stockCode: { in: codes }, date: { lte: date } },
+      orderBy: { date: "desc" },
+      select: {
+        stockCode: true,
+        date: true,
+        foreignNetBuy: true,
+        investmentTrustNetBuy: true,
+        dealerNetBuy: true,
+      },
+    }),
+    prisma.dailyQuote.findMany({
+      where: { stockCode: { in: codes }, date: { lte: date } },
+      orderBy: { date: "desc" },
+      select: { stockCode: true, date: true, volume: true },
+    }),
+    prisma.technicalIndicator.findMany({
+      where: { stockCode: { in: codes }, date: { lt: date } }, // 不含當日
+      orderBy: { date: "desc" },
+      select: { stockCode: true, date: true, bollingerBandwidth: true },
+    }),
+  ]);
+
+  // volume 依 stockCode + date 建索引（供其他法人集中度的分母對齊三大法人日期）。
+  // volumeByCodeDate 保留全部（要涵蓋 instList 的日期，三大法人可能缺漏、日期往回跨）。
+  // quoteDatesByCode 只需窒息量視窗最近幾筆 → 截到 squeezeKeep（等價於原本的 .slice，順帶省記憶體）。
+  const squeezeKeep = windows.squeezeVolumeWindowDays + 5;
+  const volumeByCodeDate = new Map<string, Map<number, number>>();
+  const quoteDatesByCode = new Map<string, Date[]>();
+  for (const r of quoteRows) {
+    let m = volumeByCodeDate.get(r.stockCode);
+    if (!m) {
+      m = new Map();
+      volumeByCodeDate.set(r.stockCode, m);
+    }
+    m.set(r.date.getTime(), Number(r.volume));
+
+    let list = quoteDatesByCode.get(r.stockCode);
+    if (!list) {
+      list = [];
+      quoteDatesByCode.set(r.stockCode, list);
+    }
+    if (list.length < squeezeKeep) list.push(r.date);
+  }
+
+  const instByCode = new Map<string, typeof instRows>();
+  for (const r of instRows) {
+    let list = instByCode.get(r.stockCode);
+    if (!list) {
+      list = [];
+      instByCode.set(r.stockCode, list);
+    }
+    if (list.length < windows.institutionalWindowDays) list.push(r);
+  }
+
+  const bandwidthByCode = new Map<string, (number | null)[]>();
+  for (const r of indicatorRows) {
+    let list = bandwidthByCode.get(r.stockCode);
+    if (!list) {
+      list = [];
+      bandwidthByCode.set(r.stockCode, list);
+    }
+    if (list.length < windows.bandwidthHistoryMaxDays) list.push(r.bollingerBandwidth);
+  }
+
+  for (const code of codes) {
+    const instList = (instByCode.get(code) ?? []).slice(0, windows.institutionalWindowDays);
+    const volMap = volumeByCodeDate.get(code);
+
+    const trustNetBuyNewestFirst = instList.map((r) => Number(r.investmentTrustNetBuy ?? 0n));
+    const foreignPlusDealerNewestFirst = instList.map(
+      (r) => Number(r.foreignNetBuy ?? 0n) + Number(r.dealerNetBuy ?? 0n),
+    );
+    const instVolumeNewestFirst = instList.map((r) => volMap?.get(r.date.getTime()) ?? 0);
+
+    const ma20 = volumeMa20ByCode.get(code) ?? null;
+    const recentDates = (quoteDatesByCode.get(code) ?? []).slice(0, windows.squeezeVolumeWindowDays);
+    const recentVolumesNewestFirst = recentDates
+      .map((d) => volMap?.get(d.getTime()) ?? null)
+      .filter((v): v is number => v !== null);
+    const quietVolumeRatioNewestFirst =
+      ma20 !== null && ma20 > 0 ? recentVolumesNewestFirst.map((v) => v / ma20) : [];
+
+    result.set(code, {
+      trustNetBuyNewestFirst,
+      foreignPlusDealerNewestFirst,
+      instVolumeNewestFirst,
+      recentVolumesNewestFirst,
+      quietVolumeRatioNewestFirst,
+      bandwidthHistoryNewestFirst: bandwidthByCode.get(code) ?? [],
+    });
+  }
 }
