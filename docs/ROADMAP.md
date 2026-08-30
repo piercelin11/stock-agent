@@ -11,21 +11,17 @@
 前端 scaffolding（Next.js + Prisma Server Actions）
       │
       ▼
-歷史回測系統  ◄── 優先
-  ├─ 腳本參數化（前置）
-  ├─ Layer 0 基準跑（全市場原始因子落地 JSONL）
-  ├─ 記憶體重算（套門檻 → rankScore → 加權 → 統計）+ 訓練/驗證期切分
-  └─ 回測儀表板（版本比較、個股檢視）
+歷史回測系統  ⏸ 已擱置（程式碼在 feat/backtest-ui-3.6-3.7 分支，OOM 待修）
       │
       ▼
-選股 → 挑股 → 觀察清單流程（日常操作殼）
+選股 → 挑股 → 觀察清單流程（日常操作殼）  ◄── 現在做這個
       │
       ▼
 盤中提醒
   └─ 依賴：觀察清單存在 + 資料庫可從外部連線
 ```
 
-實作順序：**scaffolding → 回測系統 → 日常選股/觀察清單流程 → 盤中提醒**。回測優先——「調參數、驗證訊號有沒有預測力」是現在最需要的（第 1 階段的參數校準就卡在沒有回測框架）。scaffolding 得先做（回測 UI 也要用），但日常用的「選股→挑股→觀察清單」流程排在回測之後。盤中提醒放最後，依賴觀察清單有內容、也依賴資料庫能被 GitHub Actions 連到。
+原實作順序是 **scaffolding → 回測系統 → 日常選股/觀察清單流程 → 盤中提醒**。回測系統做到「訓練/驗證切分 + 完整 UI」後因效能問題（進儀表板 OOM）擱置（見第 3 節），**改先做第 4 節「選股→挑股→觀察清單」流程**。回測待日後把 Layer 0 讀取改成逐日串流再撿回。盤中提醒放最後，依賴觀察清單有內容、也依賴資料庫能被 GitHub Actions 連到。
 
 ---
 
@@ -34,7 +30,7 @@
 找「還沒出現第一根突破，但籌碼/技術面有醞釀跡象」的股票，跟 `calculate-breakout-strength.ts`（找已發生的突破事件）互補。
 
 - [x] 四因子 + 乘法計分結構：`最終分數 = 籌碼分數(投信動能 ×0.7 + 排除投信的外資/自營商集中度 ×0.3) × 技術就緒係數(布林壓縮度/窒息量合成，下限 0.5)`。實作於 `scripts/calculate-accumulation-score.ts` + `scripts/accumulation-shared.ts`，輸出 `data/accumulation-score-results/{date}.json`。設計細節見 `docs/PROGRESS.md`（2026-08-27 段落）。
-- [ ] **參數校準**：首版前 30 名偏大型股（「其他法人集中度」子項對權值股外資穩定流入給高分所致）。需肉眼看實際排名，調整 `accumulation-shared.ts` 的 `CHIP_WEIGHTS` / `READINESS_FLOOR` / `MIN_AVG_VOLUME_SHARES` 等常數。**併入第 3 階段（回測）一起做**——用訓練/驗證期框架校準，比單看一天的前 30 名更有說服力。
+- [ ] **參數校準**：首版前 30 名偏大型股（「其他法人集中度」子項對權值股外資穩定流入給高分所致）。需肉眼看實際排名，調整 `accumulation-shared.ts` 的 `CHIP_WEIGHTS` / `READINESS_FLOOR` / `MIN_AVG_VOLUME_SHARES` 等常數。原打算「併入第 3 階段回測一起做」，但回測系統擱置——暫時只能肉眼看單日排名調，或等回測撿回。
 
 ## 2. 前端 scaffolding（Next.js + Prisma）
 
@@ -46,7 +42,13 @@
 - [x] 圖表庫定案 **Recharts**（`components/ChartSmoke.tsx` smoke 圖）、版面/導覽 = Tailwind CSS v4 + 手刻 `components/ui/` + `app/layout.tsx` 側邊欄
 - [x] 背景任務機制定案：**獨立 Node 子進程（`spawn` tsx cli.mjs 絕對路徑）+ 進度寫檔 + Server Action 輪詢**。PoC（`scripts/_poc/` + `lib/actions/poc.ts` + `components/PocRunner.tsx`）已於回測系列第一份 PLAN（3.1 腳本參數化）開始時刪除；模式記錄在 CLAUDE.md「背景任務」段，真的 Layer 0 runner 待 3.3
 
-## 3. 歷史回測系統 ◄── 優先
+## 3. 歷史回測系統 — ⏸ 已擱置（2026-08-30）
+
+> **狀態**：3.0～3.5 曾在 `main` 上完成、3.6/3.7 在 `feat/backtest-ui-3.6-3.7` 分支上完成，但**整個回測系統已從 `main` 移除**（程式碼保留在該分支）。
+>
+> **擱置原因**：詳細頁 `runBacktestSummary` 把整個 run 的 `raw-factors/*.jsonl` 一次 `JSON.parse` 進記憶體，即使「一年 breakout」也讓 Next dev server heap OOM（8 GB）。要修得先把 Layer 0 讀取改成「逐日串流 replay、只累積候選 picks」。決定先擱置、專心做第 4 節。
+>
+> **撿回方式**：`git checkout feat/backtest-ui-3.6-3.7`，先做「Layer 0 讀取改逐日串流」再接 UI。下方各小節的打勾是「當時做過」的紀錄，不代表 `main` 現況。
 
 驗證選股訊號有沒有預測力，並提供「調參數 → 看訓練期表現 → 用驗證期確認」的閉環。優先回測兩個策略：**冷水區選股（accumulation）** 與 **第一根突破（breakout-strength / intraday-breakout）**。交易策略測試（停損停利、進出場規則）不列進 ROADMAP，僅在 3.4 備註為未來可能擴充。
 
@@ -137,26 +139,13 @@ data/backtest-cache/
 - [x] 訓練期與驗證期分開統計、用同一組參數跑（`options.split` → `bySplit.train` / `bySplit.valid`；不做鎖定行為，留 3.6）
 - [x] 純函式好處：不依賴 DB、好單測；`scripts/lib/backtest-stats.test.ts`（專案首個單測檔，`node:test` + tsx，7 組手算案例）
 
-### 3.6 訓練/驗證期切分
+### 3.6 訓練/驗證期切分 — 曾在 `feat/backtest-ui-3.6-3.7` 完成，隨系統擱置
 
-- [ ] 一開始固定一段時間範圍，切訓練期（in-sample，較長，例如扣掉最近 2–3 個月）與驗證期（out-of-sample，較短，最近 2–3 個月）。**範圍固定，不隨參數調整而更換**
-- [ ] 訓練期反覆調參：改 Layer 1/2 參數 → 重跑 Layer 1/2/3（記憶體，即時）→ 比較命中率變化
-- [ ] `config.json` 記錄「這組參數是在哪段訓練期調出來的」
-- [ ] 驗證期需要**顯式「解鎖」動作** + 紅色警示；驗證期跑完的結果**自動落地存檔**（避免使用者「看一眼就回去調參」當沒看過）
-- [ ] UI 視覺警示：不要用驗證期資料回頭調參數（那樣驗證期就失去意義）
-- [ ] rolling window / walk-forward optimization 明列為之後再做，初期先固定一組切分
+（切分綁 `config.json.split`、UI 預設只顯示訓練期、驗證期需手打 `unlock validation` 解鎖、解鎖後看過的參數自動落地 `validation-unlock.json`、紅色警示、rolling window 明列之後再做——都做過，程式碼在分支上。）
 
-### 3.7 回測 UI
+### 3.7 回測 UI — 曾在 `feat/backtest-ui-3.6-3.7` 完成，隨系統擱置
 
-分兩種操作，成本差很多：
-
-- [ ] **執行基準跑（慢）**：選策略 + 時間範圍（訓練/驗證分開選）→ 觸發 Layer 0 + Layer 0.5 cache miss 的部分 → 進度條 / 背景執行。預期數十秒到數分鐘，視區間長度。跑完顯示全市場原始因子已就緒
-- [ ] **調整參數（快）**：滑桿 / 輸入框改門檻（Layer 1）或加權 / 曲線轉折（Layer 2）→ Layer 1/2/3 記憶體重算 → **目標 <2 秒**更新儀表板。這是整個設計的賣點，UI 做成滑桿即時回饋
-- [ ] **設定頁**：參數輸入面板（門檻類 / 加權類分區）、日期範圍（訓練/驗證分開選、視覺警示）、版本命名與存檔
-- [ ] **結果儀表板頁**：命中率 / 平均報酬 / 勝率 / 賺賠比等指標卡片 + 圖表（報酬分布直方圖、命中率隨時間折線圖、訓練 vs 驗證並排）
-- [ ] **個股檢視頁**：單一候選股當天完整評分明細 + 後續實際走勢圖 + 是否命中，方便肉眼校準時對照
-- [ ] **版本比較頁**：至少兩組參數版本並排顯示各項統計。比較對象是「不同參數的重新計算結果」，不一定都已落地存檔（記憶體 / 前端 state 暫存即可，主動保留才寫 `versions/{name}.json`）
-- [ ] 用回測框架回頭完成第 1 階段的「參數校準」待辦
+（`/backtest/{runId}` 詳細頁：參數面板滑桿即時重算、指標卡片、Recharts 圖表（報酬分布 / 命中率季度線 / byTopN / 訓練 vs 驗證）、個股檢視 modal、版本比較——都做過，程式碼在分支上。**未解決**：`runBacktestSummary` 一次讀整個 run 的 raw-factors 導致 OOM，「調參數 <2 秒」的賣點未在真實 6 年 run 上驗證。「用回測框架回頭做 accumulation 參數校準」也一併擱置。）
 
 ## 4. 選股 → 挑股 → 觀察清單流程（日常操作殼）
 
