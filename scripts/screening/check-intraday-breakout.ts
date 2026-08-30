@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaPg } from "@prisma/adapter-pg";
@@ -21,6 +21,15 @@ import {
 } from "../lib/breakout-shared";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const SNAPSHOT_DIR = join(__dirname, "..", "..", "data", "intraday-breakout-snapshots");
+const PROGRESS_PATH = join(SNAPSHOT_DIR, "progress.json");
+
+/** 原子寫：先寫 .tmp 再 rename，避免輪詢讀到寫一半的檔（比照 backtest 的 atomicWrite）。 */
+function atomicWrite(path: string, obj: unknown): void {
+  writeFileSync(`${path}.tmp`, JSON.stringify(obj, null, 2));
+  renameSync(`${path}.tmp`, path);
+}
 
 function makePrisma(): PrismaClient {
   const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
@@ -148,6 +157,7 @@ async function fetchMisBatch(codes: { code: string; market: Market }[]): Promise
 
 async function fetchAllMisQuotes(
   stocks: { code: string; market: Market }[],
+  onBatch?: (done: number, total: number, failedSoFar: number) => void,
 ): Promise<{ quotes: Map<string, MisQuote>; failedCount: number }> {
   const quotes = new Map<string, MisQuote>();
   let failedCount = 0;
@@ -162,6 +172,7 @@ async function fetchAllMisQuotes(
         quotes.set(q.code, q);
       }
     }
+    onBatch?.(Math.min(i + BATCH_SIZE, stocks.length), stocks.length, failedCount);
     if (i + BATCH_SIZE < stocks.length) {
       await sleep(BATCH_DELAY_MS);
     }
@@ -180,7 +191,7 @@ function computeElapsedRatio(now: Date): { raw: number; clipped: number } {
 }
 
 // ---- 主流程 ----
-interface CandidateResult {
+export interface CandidateResult {
   code: string;
   name: string;
   price: number;
@@ -202,30 +213,70 @@ interface CandidateResult {
   degraded: string[];
 }
 
+export interface IntradaySnapshotOutput {
+  queriedAt: string;
+  elapsedRatio: number;
+  stats: { totalQueried: number; failedCount: number; triggered: number; passedGates: number };
+  warnings: string[];
+  results: CandidateResult[];
+}
+
 export interface CheckIntradayBreakoutOptions {
   prisma?: PrismaClient;
   config?: DeepPartial<BreakoutConfig>;
   now?: Date;
 }
 
-export async function checkIntradayBreakout(options: CheckIntradayBreakoutOptions = {}): Promise<void> {
+export async function checkIntradayBreakout(
+  options: CheckIntradayBreakoutOptions = {},
+): Promise<IntradaySnapshotOutput> {
   const prisma = options.prisma ?? makePrisma();
   const ownsPrisma = options.prisma === undefined;
   const config = resolveBreakoutConfig(options.config);
   const now = options.now ?? new Date();
   try {
-    await runSnapshot(prisma, config, now);
+    return await runSnapshot(prisma, config, now);
   } finally {
     if (ownsPrisma) await prisma.$disconnect();
   }
 }
 
-async function runSnapshot(prisma: PrismaClient, config: BreakoutConfig, now: Date): Promise<void> {
+async function runSnapshot(
+  prisma: PrismaClient,
+  config: BreakoutConfig,
+  now: Date,
+): Promise<IntradaySnapshotOutput> {
   const { gate, score } = config;
   const { raw: elapsedRatioRaw, clipped: elapsedRatio } = computeElapsedRatio(now);
+  const startedAt = now.toISOString();
+  const warnings: string[] = [];
+
+  mkdirSync(SNAPSHOT_DIR, { recursive: true });
+
+  function writeProgress(fields: {
+    phase: "fetching-quotes" | "scoring";
+    fetchedBatches: number;
+    totalBatches: number;
+    failedCount: number;
+  }): void {
+    atomicWrite(PROGRESS_PATH, {
+      status: "running",
+      phase: fields.phase,
+      queriedAt: startedAt,
+      fetchedBatches: fields.fetchedBatches,
+      totalBatches: fields.totalBatches,
+      failedCount: fields.failedCount,
+      startedAt,
+      updatedAt: new Date().toISOString(),
+      warnings,
+      error: null,
+    });
+  }
 
   if (elapsedRatioRaw < 0.05) {
-    console.warn("⚠ 目前為開盤前，預估量能可能不準確");
+    const msg = "目前為開盤前，預估量能可能不準確";
+    console.warn(`⚠ ${msg}`);
+    warnings.push(msg);
   }
 
   const stocks = await prisma.stock.findMany({
@@ -234,9 +285,22 @@ async function runSnapshot(prisma: PrismaClient, config: BreakoutConfig, now: Da
   });
   const stockByCode = new Map(stocks.map((s) => [s.code, s]));
 
+  const totalBatches = Math.ceil(stocks.length / BATCH_SIZE);
+  writeProgress({ phase: "fetching-quotes", fetchedBatches: 0, totalBatches, failedCount: 0 });
+
   const { quotes: misQuotes, failedCount } = await fetchAllMisQuotes(
     stocks.map((s) => ({ code: s.code, market: s.market })),
+    (done, total, failedSoFar) => {
+      writeProgress({
+        phase: "fetching-quotes",
+        fetchedBatches: Math.ceil(done / BATCH_SIZE),
+        totalBatches: Math.ceil(total / BATCH_SIZE),
+        failedCount: failedSoFar,
+      });
+    },
   );
+
+  writeProgress({ phase: "scoring", fetchedBatches: totalBatches, totalBatches, failedCount });
 
   // MIS 日期 vs 資料庫最新 DailyQuote 日期錯位偵測
   const latestDbQuote = await prisma.dailyQuote.findFirst({
@@ -247,9 +311,9 @@ async function runSnapshot(prisma: PrismaClient, config: BreakoutConfig, now: Da
   const misDateSample = [...misQuotes.values()].find((q) => q.date !== null)?.date ?? null;
 
   if (misDateSample && latestDbDateStr && misDateSample === latestDbDateStr) {
-    console.warn(
-      `⚠ MIS 回傳資料日期（${misDateSample}）與資料庫最新 DailyQuote 日期相同，可能是開盤前或 pipeline 尚未執行，本次快照可能是重複查詢舊資料`,
-    );
+    const msg = `MIS 回傳資料日期（${misDateSample}）與資料庫最新 DailyQuote 日期相同，可能是開盤前或 pipeline 尚未執行，本次快照可能是重複查詢舊資料`;
+    console.warn(`⚠ ${msg}`);
+    warnings.push(msg);
   }
 
   const codes = [...misQuotes.keys()];
@@ -332,10 +396,11 @@ async function runSnapshot(prisma: PrismaClient, config: BreakoutConfig, now: Da
     console.log(`觸發帶價+帶量: ${triggered.length} 檔`);
     console.log(`通過資格門檻: 0 檔`);
 
-    const outputDir = join(__dirname, "..", "..", "data", "intraday-breakout-snapshots");
+    const outputDir = SNAPSHOT_DIR;
     mkdirSync(outputDir, { recursive: true });
     const timestamp = now.toISOString().slice(0, 19).replaceAll(":", "-");
     const outputPath = join(outputDir, `${timestamp}.json`);
+    const stats = { totalQueried: codes.length, failedCount, triggered: triggered.length, passedGates: 0 };
     writeFileSync(
       outputPath,
       JSON.stringify(
@@ -344,7 +409,8 @@ async function runSnapshot(prisma: PrismaClient, config: BreakoutConfig, now: Da
           elapsedRatio,
           gates: gate,
           weights: score.weights,
-          stats: { totalQueried: codes.length, failedCount, triggered: triggered.length, passedGates: 0 },
+          stats,
+          warnings,
           results: [],
         },
         null,
@@ -352,7 +418,7 @@ async function runSnapshot(prisma: PrismaClient, config: BreakoutConfig, now: Da
       ),
     );
     console.log(`\n結果已寫入 ${outputPath}`);
-    return;
+    return { queriedAt: now.toISOString(), elapsedRatio, stats, warnings, results: [] };
   }
 
   // firstBar：即時價 vs T-1 上軌，往回接 T-2 以前的連續天數
@@ -578,10 +644,16 @@ async function runSnapshot(prisma: PrismaClient, config: BreakoutConfig, now: Da
   console.log(`觸發帶價+帶量: ${triggered.length} 檔`);
   console.log(`通過資格門檻: ${passed.length} 檔`);
 
-  const outputDir = join(__dirname, "..", "..", "data", "intraday-breakout-snapshots");
+  const outputDir = SNAPSHOT_DIR;
   mkdirSync(outputDir, { recursive: true });
   const timestamp = now.toISOString().slice(0, 19).replaceAll(":", "-");
   const outputPath = join(outputDir, `${timestamp}.json`);
+  const stats = {
+    totalQueried: codes.length,
+    failedCount,
+    triggered: triggered.length,
+    passedGates: passed.length,
+  };
   writeFileSync(
     outputPath,
     JSON.stringify(
@@ -590,7 +662,8 @@ async function runSnapshot(prisma: PrismaClient, config: BreakoutConfig, now: Da
         elapsedRatio,
         gates: gate,
         weights: score.weights,
-        stats: { totalQueried: codes.length, failedCount, triggered: triggered.length, passedGates: passed.length },
+        stats,
+        warnings,
         results,
       },
       null,
@@ -598,6 +671,7 @@ async function runSnapshot(prisma: PrismaClient, config: BreakoutConfig, now: Da
     ),
   );
   console.log(`\n結果已寫入 ${outputPath}`);
+  return { queriedAt: now.toISOString(), elapsedRatio, stats, warnings, results };
 }
 
 const isMain = process.argv[1] && import.meta.url === new URL(process.argv[1], "file://").href;

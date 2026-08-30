@@ -166,6 +166,8 @@ data/backtest-cache/
 
 > Note：「尾盤 LLM 分析（依買入狀態判斷該買/該賣）」暫不排進 ROADMAP，等 UI 與回測穩定後再評估要不要做、怎麼做。
 
+> Note：盤中即時掃描的**手動觸發 UI**（背景任務模式：`ScreeningPanel` 第三個 tab → `startIntradayScan` spawn `_run-intraday-scan.ts` → 輪詢 `progress.json`）已於 2026-08-30 併入 `/screening`。這是 ROADMAP 沒明列的加項；第 5 節的「排程 + 通知管道」仍未做。
+
 ## 5. 盤中提醒
 
 定期檢查觀察股，依「是否已買入」決定提醒時機，出現大跌大漲或不確定訊號時推播。細節等第 4 階段做完、實際盯盤有手感後再細訂。
