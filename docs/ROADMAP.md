@@ -153,16 +153,16 @@ data/backtest-cache/
 
 ### 4.1 選股 → 挑股
 
-- [ ] 選股頁：按鈕觸發（Server Action 同步在 Next.js 進程內直接 import 呼叫 `calculateAccumulationScore(date)` / `calculateBreakoutStrength(date)`，跑最新交易日）→ 表格呈現候選股（可依因子分數/欄位排序）→ 點單檔看完整評分明細
-- [ ] 兩種策略分頁：「第一根突破」（breakout-strength）與「冷水區醞釀」（accumulation）
-- [ ] 從候選股表格勾選 → 一鍵加入觀察清單
+- [x] 選股頁：按鈕觸發（Server Action 同步在 Next.js 進程內直接 import 呼叫 `calculateAccumulationScore(date)` / `calculateBreakoutStrength(date)`，跑最新交易日）→ 表格呈現候選股（可依因子分數/欄位排序）→ 點單檔看完整評分明細
+- [x] 兩種策略分頁：「第一根突破」（breakout-strength）與「冷水區醞釀」（accumulation）
+- [x] 從候選股表格勾選 → 一鍵加入觀察清單
 
 ### 4.2 觀察清單升級
 
-- [ ] `WatchlistItem` schema 加欄位：`isPurchased Boolean @default(false)`、`buyPrice Decimal?`、`buyDate DateTime?`、`targetPrice Decimal?`、`stopLossPrice Decimal?`（欄位名待實作時定；直接加在 `WatchlistItem` 即可，不另建 model——一支股票最多一筆的語意不變）
-- [ ] migration + 既有資料相容（現有 `WatchlistItem` 只有 `stockCode`/`addedAt`/`notes`）
-- [ ] 觀察清單頁：列出清單、可切換買入狀態、填買入價、加備註、移除
-- [ ] 每檔顯示當日報價 + 關鍵技術/籌碼欄位（讀 `DailyQuote` / `TechnicalIndicator` / `InstitutionalTrading` 最新一筆）
+- [x] `WatchlistItem` schema 加欄位：`isPurchased Boolean @default(false)`、`buyPrice Decimal?`、`buyDate DateTime?`、`targetPrice Decimal?`、`stopLossPrice Decimal?`（+ 額外加 `source String?` 記錄從哪個策略加入；直接加在 `WatchlistItem`，不另建 model）
+- [x] migration + 既有資料相容（`20260830085717_add_watchlist_purchase_fields`，SQL 只有 `ADD COLUMN`，全 nullable / `@default`）
+- [x] 觀察清單頁：列出清單、可切換買入狀態、填買入價 / 買入日 / 目標價 / 停損價、加備註、移除
+- [x] 每檔顯示當日報價 + 關鍵技術/籌碼欄位（讀 `DailyQuote` / `TechnicalIndicator` / `InstitutionalTrading` 最新一筆）
 
 > Note：「尾盤 LLM 分析（依買入狀態判斷該買/該賣）」暫不排進 ROADMAP，等 UI 與回測穩定後再評估要不要做、怎麼做。
 

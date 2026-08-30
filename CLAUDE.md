@@ -13,7 +13,7 @@
 - **DailyQuote**：每日報價快取（開高低收、量、漲跌），依 `stockCode + date` 唯一。
 - **NewsArticle**：新聞文章（標題、連結、來源、發布時間、情緒分析結果）。
 - **NewsStock**：NewsArticle 與 Stock 的多對多關聯表。
-- **WatchlistItem**：手動維護的正式觀察名單，一支股票最多一筆。
+- **WatchlistItem**：手動維護的正式觀察名單，一支股票最多一筆。除 `stockCode`/`addedAt`/`notes` 外，另有買入狀態欄位：`isPurchased`（Boolean，預設 false）、`buyPrice`/`targetPrice`/`stopLossPrice`（`Decimal(10,2)`，nullable）、`buyDate`（`@db.Date`，nullable）、`source`（`"breakout"`/`"accumulation"`/`"manual"`/null，記錄從哪個策略加入）。
 - **AnalysisResult**：AI 產出的分析結果歷史紀錄（screener / watchlist_summary / sector_ranking 等）。
 - **StockValuation**：個股每日估值（本益比/股價淨值比/殖利率/收盤價），依 `stockCode + date` 唯一。TPEx 來源沒有收盤價（`closePrice` 為 null）；虧損公司 `peRatio` 為 null。
 - **IndustryHeatSnapshot**：產業熱度每日快照（等權平均漲跌幅、漲跌家數、當日排名），依 `sectorId + date` 唯一。**不存 heatScore**——熱度分數要用時從原始欄位現算，避免公式調整後需要重刷歷史。
@@ -62,13 +62,15 @@
 
 ## 前端（Next.js + Prisma）
 
-2026-08-28 建立的前端骨架（ROADMAP 第 2 節）。這階段只搭殼，業務頁面留給後續 PLAN。
+2026-08-28 建立的前端骨架（ROADMAP 第 2 節）。2026-08-30 加上首批業務頁面（ROADMAP 第 4 節：選股 → 挑股 → 觀察清單）。
 
 - **技術棧**：Next.js 16.3.3（App Router，Turbopack）+ React 19 + Tailwind CSS v4 + Recharts 3。TS 7 / Prisma 7 / ESM 這組合實測直接可跑，沒有降版或改 webpack。
 - **目錄**：前端在 repo 根目錄 `app/`（**不開 `web/` 子目錄、不做 monorepo**）——前端要 import 的 `generated/prisma`、`scripts/screening/*`、`scripts/lib/*` 都在根目錄，開子目錄只會讓 import path 變複雜。
 - **`lib/`（根目錄，新）vs `scripts/lib/`（既有）**：`lib/` 放 **Next/React 世界**的共用碼（Prisma 單例、Server Actions、格式化 helper）；`scripts/lib/` 維持是**純 Node 函式庫**（`http.ts` / `breakout-shared.ts` / `accumulation-shared.ts` / `types.ts`），不 import React。兩個名字相近但職責分明。
 - **Prisma 單例**：`lib/prisma.ts` 把 `PrismaClient` 掛 `globalThis` 快取（dev hot reload 不會爆連線池），保留 `PrismaPg` driver adapter 寫法。**檔頭 `import "server-only"`**——`scripts/lib/` 與 `lib/` 名字太像，這是唯一能在 build 時擋下「client component 誤 import `lib/prisma.ts`」的機制。只能在 Server Component / Server Action import。
-- **Server Actions**（不建 REST/GraphQL）：檔案放 `lib/actions/*.ts`，檔頭 `"use server"`。action 只做「呼叫 Prisma / 純函式 → 回傳可序列化 plain object」。回傳 `Date` 要先轉字串、`Decimal` 要 `.toNumber()` / `.toString()`，在 action 邊界轉掉（`Decimal` 直接丟 client component 會壞）。
+- **Server Actions**（不建 REST/GraphQL）：檔案放 `lib/actions/*.ts`，檔頭 `"use server"`。action 只做「呼叫 Prisma / 純函式 → 回傳可序列化 plain object」。回傳 `Date` 要先轉字串、`Decimal` 要 `.toNumber()` / `.toString()`、`BigInt`（`volume` / `*NetBuy`）要 `Number(...)`，在 action 邊界轉掉（`Decimal` 直接丟 client component 會壞）。現有：`health.ts`（`getDbHealth`）、`screening.ts`（`runScreening`）、`watchlist.ts`（`listWatchlist` / `addToWatchlist` / `removeFromWatchlist` / `updateWatchlistItem`，mutation 後 `revalidatePath("/watchlist")`）。
+- **`/screening` 頁**：兩個策略分頁（「第一根突破」= `calculateBreakoutStrength`、「冷水區醞釀」= `calculateAccumulationScore`）。按鈕 → `runScreening` **同步在 Next.js 進程內 import 呼叫純函式跑「最新交易日」**（`DailyQuote` 裡 `securityType="stock"` 的 `max(date)`），不 spawn 子進程（單日約 1900 檔、秒級；背景任務模式是給幾百日回測用的）。傳前端 Prisma 單例給純函式（`{ prisma }`），純函式偵測 `options.prisma !== undefined` 時不 `$disconnect`。結果**不進 DB**（沿用純函式既有 `data/*-results/{date}.json` 落地）。表格可排序、點列展開評分明細、勾選 → `addToWatchlist({ codes, source: strategy })`。
+- **`/watchlist` 頁**：`listWatchlist` 讀 `WatchlistItem` + 對每檔三表（`DailyQuote` / `TechnicalIndicator` / `InstitutionalTrading`）各 `findFirst` 最新一筆（3N 查詢，清單 < 50 檔可接受；三表日期不對齊，各標各自資料日期）。可切換 `isPurchased`、填買入價 / 買入日 / 目標價 / 停損價 / 備註（`onBlur` 存）、移除。漲跌色台股慣例（漲紅跌綠）。
 - **`app/page.tsx` 等會查 DB 的頁面檔頭加 `export const dynamic = "force-dynamic";`**——否則 `next build` 會試圖靜態預渲染、在 build time 連本機 Postgres（CI / 沒開 DB 時直接失敗）。
 - **`*.css` import**：tsconfig 有 `noUncheckedSideEffectImports: true`，會擋 `import "./globals.css"`。對策是 `app/globals.css.d.ts` 內容 `declare module "*.css";`。**不要為此關掉該旗標**（`scripts/` 也吃這個旗標）。
 - **`next.config.ts` 的 `serverExternalPackages`**：列 `@prisma/client` / `@prisma/adapter-pg` / `pg`，讓 Prisma 相關套件走 Node 原生 require 不進 bundler（generated client 用 `import.meta.url` 定位 engine，被打包會找不到路徑）。
@@ -95,8 +97,8 @@
 
 ### `scripts/screening/` — 選股（手動）
 
-- **`calculate-breakout-strength.ts`**：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（三層：觸發→資格門檻→強度評分，評分公式皆單調遞增，不用鐘型曲線）。共用邏輯在 `lib/breakout-shared.ts`。結果不寫資料庫，輸出至 `data/breakout-strength-results/{date}.json`。匯出 `calculateBreakoutStrength(date, { prisma?, config? })`——未傳 `prisma` 則自建並自行 `$disconnect`；`config` 為 `DeepPartial<BreakoutConfig>`，只覆蓋想改的欄位（見 `scripts/lib/` 段）。`pnpm tsx scripts/screening/calculate-breakout-strength.ts --date=YYYY-MM-DD`。
-- **`calculate-accumulation-score.ts`**：盤後選股 v2「投信吃貨訊號」——找還沒出現第一根突破、但籌碼/技術面在醞釀的股票，與 `calculate-breakout-strength.ts`（找已發生的突破）互補。計分為**乘法結構**：`最終分數 = 籌碼分數 × 技術就緒係數`。籌碼分數（主排序依據）= 投信分數 × 0.7 + 其他法人分數 × 0.3；技術就緒係數 = 壓縮度/窒息量合成後線性映射到 `READINESS_FLOOR`~1.0（下限 0.5）。候選池先剔除「今日已站上布林上軌」（與突破清單互斥）與「近 20 日均量 < `MIN_AVG_VOLUME_SHARES`(=500 張)」（低流動性死股）。結果不寫資料庫，輸出至 `data/accumulation-score-results/{date}.json`（`code`+`date` 欄位格式對齊突破腳本，方便日後回測命中率；`params` 區塊輸出實際生效的 resolved config）。匯出 `calculateAccumulationScore(date, { prisma?, config? })`——未傳 `prisma` 則自建並自行 `$disconnect`；`config` 為 `DeepPartial<AccumulationConfig>`。`pnpm tsx scripts/screening/calculate-accumulation-score.ts --date=YYYY-MM-DD`。**獨立手動執行，不進 daily-pipeline**。待校準參數集中在 `lib/accumulation-shared.ts`，首版未校準（前段偏大型股）。
+- **`calculate-breakout-strength.ts`**：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（三層：觸發→資格門檻→強度評分，評分公式皆單調遞增，不用鐘型曲線）。共用邏輯在 `lib/breakout-shared.ts`。結果不寫資料庫，輸出至 `data/breakout-strength-results/{date}.json`。匯出 `calculateBreakoutStrength(date, { prisma?, config? })`——未傳 `prisma` 則自建並自行 `$disconnect`；`config` 為 `DeepPartial<BreakoutConfig>`，只覆蓋想改的欄位（見 `scripts/lib/` 段）。**回傳含 `results: BreakoutResult[]` 陣列**（與落地 JSON 的 `results` 同形狀，供前端 `runScreening` action 直接取用；落地/CLI 輸出不變）。`pnpm tsx scripts/screening/calculate-breakout-strength.ts --date=YYYY-MM-DD`。
+- **`calculate-accumulation-score.ts`**：盤後選股 v2「投信吃貨訊號」——找還沒出現第一根突破、但籌碼/技術面在醞釀的股票，與 `calculate-breakout-strength.ts`（找已發生的突破）互補。計分為**乘法結構**：`最終分數 = 籌碼分數 × 技術就緒係數`。籌碼分數（主排序依據）= 投信分數 × 0.7 + 其他法人分數 × 0.3；技術就緒係數 = 壓縮度/窒息量合成後線性映射到 `READINESS_FLOOR`~1.0（下限 0.5）。候選池先剔除「今日已站上布林上軌」（與突破清單互斥）與「近 20 日均量 < `MIN_AVG_VOLUME_SHARES`(=500 張)」（低流動性死股）。結果不寫資料庫，輸出至 `data/accumulation-score-results/{date}.json`（`code`+`date` 欄位格式對齊突破腳本，方便日後回測命中率；`params` 區塊輸出實際生效的 resolved config）。匯出 `calculateAccumulationScore(date, { prisma?, config? })`——未傳 `prisma` 則自建並自行 `$disconnect`；`config` 為 `DeepPartial<AccumulationConfig>`。**回傳含 `results: AccumulationResult[]` 陣列**（比照 breakout，供前端 action 直接取用；落地/CLI 輸出不變）。`pnpm tsx scripts/screening/calculate-accumulation-score.ts --date=YYYY-MM-DD`。**獨立手動執行，不進 daily-pipeline**。待校準參數集中在 `lib/accumulation-shared.ts`，首版未校準（前段偏大型股）。
 - **`check-intraday-breakout.ts`**：盤中一次性快照篩選，把 `calculate-breakout-strength.ts` 的三層邏輯套用在 `mis.twse.com.tw` 即時報價上（社群逆向工程端點，非官方文件）。**一次性手動執行，不排程、不接進 daily-pipeline**，不支援 `--date`。批次查詢（120 檔/批，1.5 秒節流），`elapsedRatio` 現算預估全天量。與 `calculate-breakout-strength.ts` 評分邏輯 100% 共用，但當日 close/volume/OHLC/布林上軌全是即時或估計值（vs 盤後版的定案值），比較基準日也差一天（即時價 vs T-1 上軌）。結果輸出至 `data/intraday-breakout-snapshots/{timestamp}.json`。匯出 `checkIntradayBreakout({ prisma?, config?, now? })`（`main()` 為薄殼；`now` 供回測注入時間，預設 `new Date()`），MIS 抓取常數（`BATCH_SIZE` 等）不進 config。`pnpm tsx scripts/screening/check-intraday-breakout.ts`。
 
 ### 回測系統 — 已擱置（2026-08-30）

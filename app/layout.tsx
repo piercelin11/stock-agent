@@ -10,6 +10,7 @@ export const metadata: Metadata = {
 const navLinks = [
   { href: "/", label: "Dashboard" },
   { href: "/screening", label: "Screening" },
+  { href: "/watchlist", label: "Watchlist" },
 ];
 
 export default function RootLayout({

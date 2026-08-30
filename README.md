@@ -21,8 +21,8 @@
 
 ### `scripts/screening/`
 
-- `calculate-breakout-strength.ts`：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（觸發 → 資格門檻 → 七項強度評分，含 K 棒型態）。核心常數與評分函式抽在 `scripts/lib/breakout-shared.ts`，與 `check-intraday-breakout.ts` 共用。匯出 `calculateBreakoutStrength(date, { prisma?, config? })`（未傳 `prisma` 則自建並自行關閉）。
-- `calculate-accumulation-score.ts`：盤後選股 v2「投信吃貨訊號」——找還沒突破、但籌碼/技術面在醞釀的股票，與 `calculate-breakout-strength.ts` 互補。乘法計分：`籌碼分數（投信動能×0.7 + 排除投信的外資/自營商集中度×0.3）× 技術就緒係數（布林壓縮度/窒息量合成，下限 0.5）`。候選池先排除「已站上布林上軌」與「近 20 日均量 < 500 張」。待校準參數集中在 `scripts/lib/accumulation-shared.ts`。匯出 `calculateAccumulationScore(date, { prisma?, config? })`。不接進 `daily-pipeline.ts`。
+- `calculate-breakout-strength.ts`：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（觸發 → 資格門檻 → 七項強度評分，含 K 棒型態）。核心常數與評分函式抽在 `scripts/lib/breakout-shared.ts`，與 `check-intraday-breakout.ts` 共用。匯出 `calculateBreakoutStrength(date, { prisma?, config? })`（未傳 `prisma` 則自建並自行關閉；回傳含 `results` 候選名單陣列，供前端選股頁直接取用）。
+- `calculate-accumulation-score.ts`：盤後選股 v2「投信吃貨訊號」——找還沒突破、但籌碼/技術面在醞釀的股票，與 `calculate-breakout-strength.ts` 互補。乘法計分：`籌碼分數（投信動能×0.7 + 排除投信的外資/自營商集中度×0.3）× 技術就緒係數（布林壓縮度/窒息量合成，下限 0.5）`。候選池先排除「已站上布林上軌」與「近 20 日均量 < 500 張」。待校準參數集中在 `scripts/lib/accumulation-shared.ts`。匯出 `calculateAccumulationScore(date, { prisma?, config? })`（回傳含 `results` 候選名單陣列）。不接進 `daily-pipeline.ts`。
 - `check-intraday-breakout.ts`：盤中一次性快照篩選，把 `calculate-breakout-strength.ts` 的邏輯提前套用在 `mis.twse.com.tw` 即時報價上，手動執行看收盤前該注意哪些股票。匯出 `checkIntradayBreakout({ prisma?, config?, now? })`。不排程、不接進 `daily-pipeline.ts`。
 - `scripts/lib/`：純函式庫。`http.ts`（retry/timeout fetch）、`breakout-shared.ts` / `accumulation-shared.ts`（各含常數 + `XxxConfig` 型別 + `DEFAULT_XXX_CONFIG` + `resolveXxxConfig` + 評分純函式 + `fetchXxxRawInputs` 撈 DB helper）、`types.ts`（`DeepPartial`）。
 
@@ -35,14 +35,18 @@
 
 ### 前端（`app/` + `lib/` + `components/`）
 
-Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4 + Recharts。目前只有骨架：
+Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4 + Recharts。
 
-- `app/`：`layout.tsx`（側邊欄殼）、`page.tsx`（dashboard，顯示 DB 連通性卡片 + Recharts smoke 圖）。
+- `app/`：`layout.tsx`（側邊欄）、`page.tsx`（dashboard，DB 連通性卡片 + Recharts smoke 圖）、`screening/`（選股頁）、`watchlist/`（觀察清單頁）。
 - `lib/prisma.ts`：`PrismaClient` 單例（`globalThis` 快取，dev hot reload 不爆連線池），檔頭 `import "server-only"`。**只能在 Server Component / Server Action import。**
-- `lib/actions/`：Server Actions（不建 REST/GraphQL API），檔頭 `"use server"`。
-- `components/`：`ui/`（手刻基礎元件）、`ChartSmoke.tsx`。
+- `lib/actions/`：Server Actions（不建 REST/GraphQL API），檔頭 `"use server"`——`health.ts` / `screening.ts` / `watchlist.ts`。
+- `components/`：`ui/`（手刻基礎元件）、`screening/`、`watchlist/`、`ChartSmoke.tsx`。
 
-選股 / 觀察清單頁尚未實作（ROADMAP 第 4 節）。回測 UI 已擱置（見開頭說明）。
+**選股頁 `/screening`**：兩個策略分頁（「第一根突破」/「冷水區醞釀」），按鈕觸發 Server Action 同步跑最新交易日的盤後選股 → 可排序表格 → 點列看評分明細 → 勾選一鍵加入觀察清單。結果不寫資料庫。
+
+**觀察清單頁 `/watchlist`**：列出清單、切換買入狀態、填買入價 / 買入日 / 目標價 / 停損價 / 備註、移除；每檔顯示當日報價 + 技術指標（MA / 布林 / RSI / MACD）+ 三大法人淨買超（讀三表最新一筆）。
+
+回測 UI 已擱置（見開頭說明）。
 
 ## 環境需求
 
@@ -73,6 +77,8 @@ pnpm install
 pnpm dev      # 開發伺服器（http://localhost:3000）
 pnpm build    # 正式打包
 pnpm start    # 跑打包後的正式伺服器
+#   /screening：選股頁（兩策略分頁，按鈕跑最新交易日、勾選加入觀察清單）
+#   /watchlist：觀察清單頁（買入狀態編輯、當日三表快照）
 
 # --- 資料層 ---
 

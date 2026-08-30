@@ -31,7 +31,7 @@ function toIsoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
-interface BreakoutResult {
+export interface BreakoutResult {
   code: string;
   name: string;
   close: number;
@@ -57,14 +57,17 @@ export interface CalculateBreakoutOptions {
   config?: DeepPartial<BreakoutConfig>;
 }
 
-export async function calculateBreakoutStrength(
-  date: Date,
-  options: CalculateBreakoutOptions = {},
-): Promise<{
+export interface BreakoutCalculationOutput {
   date: string;
   isNonTradingDay: boolean;
   stats: { totalStocks: number; triggered: number; passedGates: number };
-}> {
+  results: BreakoutResult[];
+}
+
+export async function calculateBreakoutStrength(
+  date: Date,
+  options: CalculateBreakoutOptions = {},
+): Promise<BreakoutCalculationOutput> {
   const prisma = options.prisma ?? makePrisma();
   const ownsPrisma = options.prisma === undefined;
   const config = resolveBreakoutConfig(options.config);
@@ -79,11 +82,7 @@ async function runCalculation(
   prisma: PrismaClient,
   date: Date,
   config: BreakoutConfig,
-): Promise<{
-  date: string;
-  isNonTradingDay: boolean;
-  stats: { totalStocks: number; triggered: number; passedGates: number };
-}> {
+): Promise<BreakoutCalculationOutput> {
   const { gate, score } = config;
   const dateStr = toIsoDate(date);
 
@@ -96,7 +95,12 @@ async function runCalculation(
 
   if (rawInputs.size === 0) {
     console.log(`${dateStr} 無任何 DailyQuote 資料（非交易日？），跳過`);
-    return { date: dateStr, isNonTradingDay: true, stats: { totalStocks: 0, triggered: 0, passedGates: 0 } };
+    return {
+      date: dateStr,
+      isNonTradingDay: true,
+      stats: { totalStocks: 0, triggered: 0, passedGates: 0 },
+      results: [],
+    };
   }
 
   const quotes = [...rawInputs.values()].map((r) => r.quote);
@@ -154,7 +158,12 @@ async function runCalculation(
         2,
       ),
     );
-    return { date: dateStr, isNonTradingDay: false, stats: { totalStocks, triggered, passedGates } };
+    return {
+      date: dateStr,
+      isNonTradingDay: false,
+      stats: { totalStocks, triggered, passedGates },
+      results: [],
+    };
   }
 
   const passedCodes = passedQuotes.map((q) => q.stockCode);
@@ -320,7 +329,12 @@ async function runCalculation(
   );
   console.log(`\n結果已寫入 ${outputPath}`);
 
-  return { date: dateStr, isNonTradingDay: false, stats: { totalStocks, triggered, passedGates } };
+  return {
+    date: dateStr,
+    isNonTradingDay: false,
+    stats: { totalStocks, triggered, passedGates },
+    results,
+  };
 }
 
 function parseArgs(): { date: Date | null } {

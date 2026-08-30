@@ -164,6 +164,14 @@ model WatchlistItem {
   addedAt   DateTime @default(now())
   notes     String?
 
+  isPurchased   Boolean   @default(false) // 是否已進場
+  buyPrice      Decimal?  @db.Decimal(10, 2) // 買入均價
+  buyDate       DateTime? @db.Date // 買入日
+  targetPrice   Decimal?  @db.Decimal(10, 2) // 目標價（停利參考）
+  stopLossPrice Decimal?  @db.Decimal(10, 2) // 停損價
+
+  source String? // 來源策略："breakout" | "accumulation" | "manual" | null（既有資料）
+
   stock Stock @relation(fields: [stockCode], references: [code])
 }
 

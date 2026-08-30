@@ -112,7 +112,7 @@ async function buildCandidatePool(
   return { snapshots, totalStocks, excludedAboveBand, excludedIlliquid };
 }
 
-interface AccumulationResult {
+export interface AccumulationResult {
   code: string;
   name: string;
   date: string;
@@ -143,14 +143,17 @@ export interface CalculateAccumulationOptions {
   config?: DeepPartial<AccumulationConfig>;
 }
 
-export async function calculateAccumulationScore(
-  date: Date,
-  options: CalculateAccumulationOptions = {},
-): Promise<{
+export interface AccumulationCalculationOutput {
   date: string;
   isNonTradingDay: boolean;
   poolStats: { totalStocks: number; excludedAboveBand: number; excludedIlliquid: number; scored: number };
-}> {
+  results: AccumulationResult[];
+}
+
+export async function calculateAccumulationScore(
+  date: Date,
+  options: CalculateAccumulationOptions = {},
+): Promise<AccumulationCalculationOutput> {
   const prisma = options.prisma ?? makePrisma();
   const ownsPrisma = options.prisma === undefined;
   const config = resolveAccumulationConfig(options.config);
@@ -165,11 +168,7 @@ async function runCalculation(
   prisma: PrismaClient,
   date: Date,
   config: AccumulationConfig,
-): Promise<{
-  date: string;
-  isNonTradingDay: boolean;
-  poolStats: { totalStocks: number; excludedAboveBand: number; excludedIlliquid: number; scored: number };
-}> {
+): Promise<AccumulationCalculationOutput> {
   const { gate, score } = config;
   const dateStr = toIsoDate(date);
 
@@ -185,6 +184,7 @@ async function runCalculation(
       date: dateStr,
       isNonTradingDay: true,
       poolStats: { totalStocks: 0, excludedAboveBand: 0, excludedIlliquid: 0, scored: 0 },
+      results: [],
     };
   }
 
@@ -197,6 +197,7 @@ async function runCalculation(
       date: dateStr,
       isNonTradingDay: false,
       poolStats: { totalStocks, excludedAboveBand, excludedIlliquid, scored: 0 },
+      results: [],
     };
   }
 
@@ -370,6 +371,7 @@ async function runCalculation(
     date: dateStr,
     isNonTradingDay: false,
     poolStats: { totalStocks, excludedAboveBand, excludedIlliquid, scored: results.length },
+    results,
   };
 }
 
