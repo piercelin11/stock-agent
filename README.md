@@ -16,18 +16,17 @@
 - `fill-daily-quotes.ts`：補齊全市場報價——TWSE 用證交所 `MI_INDEX` 報表 API，支援指定任意單一天（可補歷史缺漏）；TPEx 用櫃買中心 OpenAPI，不支援指定日期，只能補「目前最新一天」。皆會自動新增資料庫沒有的股票記錄。
 - `fill-institutional-trading.ts`：抓取指定日期的 TWSE（`T86`）+ TPEx（`tpex_3insti_daily_trading`）三大法人買賣超寫入 `InstitutionalTrading`。TWSE 支援任意歷史日期，TPEx 不支援日期參數、永遠回傳「目前最新一天」。
 - `fill-gap-valuation.ts`：抓取指定日期的個股估值（本益比/股價淨值比/殖利率）寫入 `StockValuation`，TWSE 與 TPEx 皆支援任意歷史日期。
-- `fill-margin-trading.ts`：抓取指定日期的個股信用交易餘額（融資、融券）寫入 `MarginTrading`，來源 TWSE `MI_MARGN` + TPEx `margin/balance`，兩邊皆支援任意歷史日期。單位一律存「股」（原始為張，入庫 ×1000）。`--date=YYYY-MM-DD`（不帶抓今天）/ `--backfill=N`（往回抓、跳非交易日，實得約 N 個交易日）。`daily-pipeline.ts` 第 3.5 步（非關鍵路徑）。評分整合尚未做。
+- `fill-margin-trading.ts`：抓取指定日期的個股信用交易餘額（融資、融券）寫入 `MarginTrading`，來源 TWSE `MI_MARGN` + TPEx `margin/balance`，兩邊皆支援任意歷史日期。單位一律存「股」（原始為張，入庫 ×1000）。`--date=YYYY-MM-DD`（不帶抓今天）/ `--backfill=N`（往回抓、跳非交易日，實得約 N 個交易日）。`daily-pipeline.ts` 第 3.5 步（非關鍵路徑）。下游：`run-signal-scan.ts` 的 `margin-chasing` 警示（突破當日法人淨賣超 + 這檔融資近期暴增 → 標記，不動分數）。
 - `calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線、波動度、最大回撤、ATR、RSI、MACD 狀態等技術指標（全市場一般股票 + TAIEX；傳代號陣列只重算指定幾支）。`mode: "full"`（預設 / CLI）= 全歷史重算；`mode: "latest"`（`daily-pipeline.ts` 用）= 每支只算並寫入最新一天，秒級。
 - `calculate-market-regime.ts`：大盤濾網（市場狀態燈號）——三維度（市場寬度、TAIEX 指數位置、TAIEX MA60 斜率）各投 ±1 合成 `bullish` / `neutral` / `bearish` 三段標籤，寫 `data/market-regime/{date}.json`（不進 DB）。TAIEX 指標未備妥時自動降級為「只用市場寬度」單維度。`daily-pipeline.ts` 第 5 步（非關鍵路徑）。
 - `calculate-industry-heat.ts`：依每日報價計算各產業等權熱度（平均漲跌幅、漲跌家數、排名）寫入 `IndustryHeatSnapshot`，支援回補多個交易日。
 
 ### `scripts/screening/`
 
-- `calculate-breakout-strength.ts`：篩出帶量帶價第一根突破布林的股票並依訊號強度排名（觸發 → 資格門檻 → 七項強度評分，含 K 棒型態）。核心常數與評分函式抽在 `scripts/lib/breakout-shared.ts`，與 `check-intraday-breakout.ts` 共用。匯出 `calculateBreakoutStrength(date, { prisma?, config? })`（未傳 `prisma` 則自建並自行關閉；回傳含 `results` 候選名單陣列，供前端選股頁直接取用）。
-- `calculate-accumulation-score.ts`：盤後選股 v2「投信吃貨訊號」——找還沒突破、但籌碼/技術面在醞釀的股票，與 `calculate-breakout-strength.ts` 互補。乘法計分：`籌碼分數（投信動能×0.7 + 排除投信的外資/自營商集中度×0.3）× 技術就緒係數（布林壓縮度/窒息量合成，下限 0.5）`。候選池先排除「已站上布林上軌」與「近 20 日均量 < 500 張」。待校準參數集中在 `scripts/lib/accumulation-shared.ts`。匯出 `calculateAccumulationScore(date, { prisma?, config? })`（回傳含 `results` 候選名單陣列）。不接進 `daily-pipeline.ts`。
-- `check-intraday-breakout.ts`：盤中一次性快照篩選，把 `calculate-breakout-strength.ts` 的邏輯提前套用在 `mis.twse.com.tw` 即時報價上，手動執行看收盤前該注意哪些股票。匯出 `checkIntradayBreakout({ prisma?, config?, now? })`（回傳 `IntradaySnapshotOutput`；執行時逐批寫 `data/intraday-breakout-snapshots/progress.json`）。不排程、不接進 `daily-pipeline.ts`。也是選股頁「盤中即時掃描」tab 的後端（背景任務模式）。
-- `_run-intraday-scan.ts`：被選股頁 `startIntradayScan()` spawn 的內部 runner（非手動執行入口），最外層覆寫 `progress.json` 的 `done` / `error`。
-- `scripts/lib/`：純函式庫。`http.ts`（retry/timeout fetch）、`breakout-shared.ts` / `accumulation-shared.ts`（各含常數 + `XxxConfig` 型別 + `DEFAULT_XXX_CONFIG` + `resolveXxxConfig` + 評分純函式 + `fetchXxxRawInputs` 撈 DB helper）、`types.ts`（`DeepPartial`）。
+- `run-signal-scan.ts`：**統一選股引擎**（三路線收斂）。跑全市場一般股票 → 單一 gate（30 億市值 + 當日量 1000 張 + 近 20 日均量 500 張）→ 依「連續站上布林上軌天數」打階段標籤 `pre-breakout`（醞釀中）/ `breakout-day`（今日突破）/ `extended`（已延伸）→ 同一份因子分、階段套不同合併方式（醞釀 = 乘法「籌碼分 × 就緒係數」；突破 = 8 分項加權和）→ 各階段各自排名 → 落地 `data/signal-scan-results/`。**資料源自動切換**：今天有 `DailyQuote` → 讀 DB（盤後定案）；沒有 → 打 `mis.twse.com.tw` 即時報價（缺成交價用當日最高價代入、標 `estimated`）。匯出 `runSignalScan(date, { prisma?, config?, source?, now? })`。CLI：不帶參數自動判斷 / `--date=YYYY-MM-DD`（強制盤後補算）/ `--source=realtime|eod`。不接進 `daily-pipeline.ts`。
+- `_run-signal-scan.ts`：被選股頁 `startSignalScan()` spawn 的內部 runner（非手動執行入口），只跑 realtime，最外層覆寫 `progress.json` 終態。
+- `calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts`：**舊三支，已由 `run-signal-scan.ts` 統一**。保留可跑（各自 CLI / 匯出純函式），退役待下一批。`check-intraday-breakout.ts` 改用 `scripts/lib/mis-quotes.ts`。`_run-intraday-scan.ts`（舊 intraday runner）因對應 Server Action 已刪成孤兒，仍可 CLI 跑。
+- `scripts/lib/`：純函式庫。`http.ts`（retry/timeout fetch）、`signal-factors.ts`（統一因子庫：re-export 舊評分函式 + `computeInstitutionalFlow` / `computeBreakoutMarginMonotone` / `consecutiveAboveBand` + `SignalScanConfig`；單測 `signal-factors.test.ts`）、`mis-quotes.ts`（MIS 即時報價抓取）、`breakout-shared.ts` / `accumulation-shared.ts`（各含常數 + `XxxConfig` 型別 + `DEFAULT_XXX_CONFIG` + `resolveXxxConfig` + 評分純函式 + `fetchXxxRawInputs` 撈 DB helper）、`market-regime.ts`（大盤濾網）、`types.ts`（`DeepPartial`）。
 
 ### `scripts/backfill/`
 
@@ -43,12 +42,12 @@ Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4。**全站固
 
 - `app/`：`layout.tsx`（側邊欄）、`page.tsx`（Dashboard：資料狀態卡 + 觀察類股今日表現表）、`screening/`（選股頁）、`watchlist/`（觀察清單頁）。
 - `lib/prisma.ts`：`PrismaClient` 單例（`globalThis` 快取，dev hot reload 不爆連線池），檔頭 `import "server-only"`。**只能在 Server Component / Server Action import。**
-- `lib/actions/`：Server Actions（不建 REST/GraphQL API），檔頭 `"use server"`——`health.ts` / `screening.ts` / `watchlist.ts` / `intraday.ts`（盤中掃描背景任務）/ `dashboard.ts`（觀察類股今日表現）/ `market-regime.ts`（大盤濾網燈號，純讀 `data/market-regime/` 檔）。
+- `lib/actions/`：Server Actions（不建 REST/GraphQL API），檔頭 `"use server"`——`health.ts` / `signal-scan.ts`（統一選股：`getScanMode` + eod 同步跑 + realtime 背景任務）/ `watchlist.ts` / `dashboard.ts`（觀察類股今日表現）/ `market-regime.ts`（大盤濾網燈號，純讀 `data/market-regime/` 檔）/ `pipeline.ts`（首頁「立即更新資料」）。
 - `components/`：`ui/`（手刻基礎元件）、`screening/`、`watchlist/`、`dashboard/`。
 
 **Dashboard `/`**：頂部一條大盤濾網橫幅（市場狀態燈號：偏多綠 / 中性琥珀 / 偏空紅 + 三段對應的部位建議文字，可展開看維度明細）。下方 ①「資料狀態」卡＝今日行情燈號（DB 最新交易日 vs Asia/Taipei 今日，綠 / 紅）＋ 一般股票檔數 ＋ 當日四表（報價 / 籌碼 / 技術指標 / 融資融券）覆蓋率百分比 ＋「立即更新資料」按鈕（背景跑整個 daily pipeline，可離開頁面、切回接上進度，跑完自動刷新覆蓋率）。②「觀察類股今日表現」＝觀察清單每檔一張卡片（grid 2–4 欄），左側 60 日走勢圖（Y 軸用布林帶寬正規化＝收盤相對布林中軌的偏離比例，所有卡同刻度 → 盤整期線壓中線、噴出頂到邊界，卡跟卡之間絕對起伏可比；線色依當日漲跌紅綠 + 線下漸層），右側代號 / 漲跌% / 突破 pill + K 棒·力道（量能）·位階（打底深度）三分數 + 三大法人 / 投信淨買超。全部用 `breakout-shared.ts` 的評分函式現算，不重跑全市場選股。
 
-**選股頁 `/screening`**：頁頂一條精簡大盤濾網燈號（同 Dashboard 資料源），按「開始選股」前先看到大盤狀態。三個分頁。「第一根突破」/「冷水區醞釀」按鈕觸發 Server Action 同步跑最新交易日的盤後選股。「盤中即時掃描」走背景任務模式（spawn 子進程對 `mis.twse.com.tw` 即時報價跑全市場快照約 20–30 秒 → 進度條輪詢 → 跑完看候選表格；可切走再回來看進度）。三者跑完都是可排序表格 → 點列看評分明細 → 勾選一鍵加入觀察清單。結果不寫資料庫。
+**選股頁 `/screening`**：頁頂一條精簡大盤濾網燈號（同 Dashboard 資料源）。**單一「跑掃描」按鈕**——自動判斷資料源：今天有盤後資料 → 同步跑「盤後掃描」（秒級）；還沒有 → 「盤中掃描」背景任務（spawn 子進程對 `mis.twse.com.tw` 即時報價跑全市場快照約 20–30 秒 → 進度條輪詢；可切走再回來看進度）。跑完一張表格 + 階段 filter（全部 / 醞釀中 / 今日突破 / 已延伸）→ 點列看該階段評分明細 → 勾選一鍵加入觀察清單。盤中缺成交價的檔用最高價代入、列尾標「估」。突破階段若「突破當日法人淨賣超 + 這檔融資餘額近期暴增」列尾標紅「追」（`margin-chasing` 警示，僅提示不影響分數）。結果不寫資料庫（落地 `data/signal-scan-results/`）。
 
 **觀察清單頁 `/watchlist`**：列出清單、切換買入狀態、填買入價 / 買入日 / 目標價 / 停損價 / 備註、移除；每檔顯示當日報價 + 技術指標（MA / 布林 / RSI / MACD）+ 三大法人淨買超（讀三表最新一筆）。
 
@@ -84,7 +83,7 @@ pnpm dev      # 開發伺服器（http://localhost:3000）
 pnpm build    # 正式打包
 pnpm start    # 跑打包後的正式伺服器
 #   /          ：Dashboard（資料狀態卡 + 觀察類股今日表現表）
-#   /screening：選股頁（三分頁：兩盤後策略同步跑 + 盤中即時掃描背景任務，勾選加入觀察清單）
+#   /screening：選股頁（單一掃描按鈕，自動判斷盤後/盤中資料源；階段 filter；勾選加入觀察清單）
 #   /watchlist：觀察清單頁（買入狀態編輯、當日三表快照）
 
 # --- 資料層 ---
@@ -122,13 +121,14 @@ pnpm tsx scripts/pipeline/calculate-industry-heat.ts --backfill 20
 
 # --- 選股（手動）---
 
-# 篩出帶量突破候選股並依強度排名（不帶 --date 則用最新交易日）
+# 統一選股引擎：跑全市場 → 階段標籤（醞釀中 / 今日突破 / 已延伸）→ 各階段各自排名
+pnpm tsx scripts/screening/run-signal-scan.ts                  # 自動判斷盤後 / 盤中
+pnpm tsx scripts/screening/run-signal-scan.ts --date=2026-08-31 # 強制盤後補算指定日
+pnpm tsx scripts/screening/run-signal-scan.ts --source=realtime # 強制打 MIS 即時報價
+
+# 舊三支（已由 run-signal-scan.ts 統一，保留可跑，退役待下一批）
 pnpm tsx scripts/screening/calculate-breakout-strength.ts --date=2026-08-18
-
-# 盤後選股 v2：投信吃貨訊號排名（不帶 --date 則用最新交易日）
 pnpm tsx scripts/screening/calculate-accumulation-score.ts --date=2026-08-26
-
-# 盤中一次性快照篩選（無參數，本質是「現在」的快照）
 pnpm tsx scripts/screening/check-intraday-breakout.ts
 
 # 回測系統已擱置，指令見 feat/backtest-ui-3.6-3.7 分支的 README

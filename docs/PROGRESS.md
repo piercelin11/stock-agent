@@ -242,7 +242,7 @@
 - **進 `daily-pipeline.ts` 第 3.5 步**（估值之後、技術指標之前；「抓外部資料」四步連在一起）：`try/catch` 包成**非關鍵路徑**——TWSE+TPEx 皆 `isNonTradingDay` 印警告 + `warningCount++`，抓取 throw 也只 `console.warn` + `warningCount++`，不 `throw`、不讓 pipeline 非 0 結束。收尾 log 加「今日融資融券寫入筆數」。後續步驟編號沿用 3.5 標籤，未重編 4/5/6。
 - **前端覆蓋率**：`lib/actions/health.ts` 的 `DbHealth.coverage` 加 `margin: { count, pct }`，`getDbHealth` 內 `refDate` 那段 `Promise.all` 加 `prisma.marginTrading.count({ where: { date: refDate } })`。分母沿用 `stockCount`（`securityType="stock"`），`margin` 分子另含約十幾檔特別股 → pct 微幅偏高 <1%，可接受（health.ts 註解標明）。`app/page.tsx` `covRows` 加「融資融券」列，`<FieldLabel>` 文案「當日三表覆蓋率」→「當日四表覆蓋率」，其餘（`coverageClass` 上色、排版）不動。
 - **驗證**：`pnpm exec tsc --noEmit` 乾淨、`pnpm build` 通過（`/` 仍 `ƒ Dynamic`）。
-- **明確不做（留後續）**：歷史回補到 2020（`scripts/backfill/backfill-margin-trading.ts`，FinMind 逐支）、融資融券進選股評分（`computeInstitutionalFlow` 的 `margin-chasing` 修正因子，ROADMAP 4.5.3 路線 B，等資料累積 1~2 個月）、`MarginTrading` 顯示在 `/watchlist` 明細 / Dashboard 卡片。
+- **明確不做（留後續）**：歷史回補到 2020（`scripts/backfill/backfill-margin-trading.ts`，FinMind 逐支）、`MarginTrading` 顯示在 `/watchlist` 明細 / Dashboard 卡片。（融資融券進選股評分 = `margin-chasing` 警示，已於 2026-09-01 完成，見本檔末段。）
 
 **技術指標只算當天 + 首頁「立即更新資料」按鈕（2026-08-31，同批）**：使用者要一顆按鈕從頁面跑整個 daily pipeline，順便發現 pipeline 每天全歷史重算技術指標（~10 分鐘）不合理。
 
@@ -264,6 +264,58 @@
 - **端到端驗證**：直接呼叫 `runDailyPipeline()` → `{ started: true }`；立刻再呼叫 → `{ started: false, reason: "pipeline 執行中" }`（鎖生效）；輪詢 `getDailyPipelineStatus()` 看到 `status: running` + `logTail` 逐輪更新（報價 → 籌碼 → 估值 → 技術指標「已處理 N/2149」→ summary）+ 存活秒數遞增；~40 秒後 `status: done` / `exitCode: 0` / 終態 logTail = pipeline summary。log 檔落 `data/daily-pipeline-runs/2026-08-31T15-00-22-614Z.log`。`curl localhost:3000/` HTML 含「立即更新資料」按鈕。
 - **`pnpm exec tsc --noEmit` 乾淨、`pnpm build` 通過（無 warning）**。
 
-尚未開始/明確不做：估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯（`topic_alignment` 因子固定中性分）、AnalysisResult 產出流程（Phase D）、`screening/` 三支（`calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts`）與 `backfill/` 各支皆為獨立手動執行（不在 `daily-pipeline.ts` 內）、`calculate-accumulation-score.ts` 的參數校準（首版未校準，前段偏大型股，併入回測階段做）、**整個回測系統**（3.0～3.7 已從 `main` 移除、擱置，見上方；程式碼在 `feat/backtest-ui-3.6-3.7` 分支，OOM 待修）。`archive/` 的 `calculate-screen-score.ts` / `run-screener.ts` / `fetch-candidate-details.ts` / `top20-gainers.js` 已停用不維護。
+**選股引擎統一 — 三路線收斂（2026-09-01）**：ROADMAP 4.5.3，依 `docs/PLAN.md`。把 `/screening` 的三分頁（第一根突破盤後 / 冷水區醞釀 / 盤中即時掃描）收斂成單一評分管線 + 單一前端頁 + 階段標籤。
+
+- **`scripts/lib/mis-quotes.ts`（新，純 Node 函式庫）**：從 `check-intraday-breakout.ts` 抽 MIS 即時報價抓取（`fetchMisBatch` / `fetchAllMisQuotes` / `parseMisDate` / `computeElapsedRatio` / `MisQuote` 型別 / `BATCH_SIZE` 等常數）。**行為變更一處**：舊 `fetchMisBatch` 對缺成交價（`z` 為 `-` / 缺）的 row 直接跳過；新版保留該 row、`price: null`，由呼叫端決定代入策略（`run-signal-scan.ts` realtime 用 `h` 代入；`check-intraday-breakout.ts` 沿用「缺價跳過」在自己的觸發迴圈補 `if (quote.price === null) continue`，最終結果不變）。
+- **`scripts/lib/signal-factors.ts`（新，統一因子庫）**：PLAN §2.1 選 A —— 只 re-export `breakout-shared.ts` / `accumulation-shared.ts` 的評分函式 + 新增，**不搬評分邏輯本體**（舊兩檔零改動，舊三支不受影響）。新增：
+  - `computeInstitutionalFlow()`（三大法人流向，全新因子）：近 5 日投信 + 外資淨買超各自 ÷ `volumeMa20` → clip `[0, clipDivisor=0.5]` 線性映射 0~100 → 投信 0.6 / 外資 0.4 加權。突破當日兩者相加 < 0 → `min(score, sellCapScore=40)`；當日法人任一為 null（盤中）→ 不封頂但 `degraded: true`。`volumeMa20` 缺 / 近窗資料不足一半 → 中性 50 + degraded。
+  - `computeBreakoutMarginMonotone()`（§2.5 新，舊 `computeBreakoutMargin` 不動）：0~3% 乖離線性 40→100（不變），**> 3% 維持 100 封頂、不再倒扣**（舊版每 1% 扣 5 分、下限 60）；負乖離 → 40 下限。只讀 `curve.kneePct`。
+  - `consecutiveAboveBand()`（§3.3 階段判定 helper）：回 `{ ok, latestAboveBand, consecutiveDays }`。`computeFirstBar` 內部原本就數這個，但 PLAN 不動 `computeFirstBar` 本體（它有使用者要保留的 ≤2→50 / >2→20 緩衝語意），故獨立成 helper。
+  - `SignalScanConfig` / `DEFAULT_SIGNAL_CONFIG` / `resolveSignalConfig`：從 `DEFAULT_BREAKOUT_CONFIG` + `DEFAULT_ACCUMULATION_CONFIG` 拼出，**三處刻意偏離舊預設**：(1) `baseCurve` 深度/時長 = **0.4 / 0.6**（舊 breakout 0.6 / 0.4，§2.6 對調）；(2) `breakout.curves.breakoutMargin` 新公式單調遞增、`penaltyPerPct` / `floor` 不生效；(3) `breakout.weights` 7 項各 ×0.90、勻出 `institutionalFlow: 0.10`（總和 1）。
+  - 單元測試 `scripts/lib/signal-factors.test.ts`（`node:test` + `tsx`，21 案全綠）：`computeBreakoutMarginMonotone`（0%→40 / 1.5%→70 / 3%→100 / 8%→100 不倒扣 / 負→40 / 掃 0~15% 單調）、`computeInstitutionalFlow`（volumeMa20 缺 / 資料不足 / 滿分 / 淨賣超 clip 0 / 當日翻空封頂 40 / 當日 null 不封頂 degraded）、`consecutiveAboveBand`、`resolveSignalConfig`（權重總和 1 / 部分 override）。
+- **`scripts/screening/run-signal-scan.ts`（新，單一評分管線）**：`runSignalScan(date, { prisma?, config?, source?, now? })`。
+  - **資料源自動切換（§3.2）**：`options.source` 有值用它；否則查「Asia/Taipei 今天的 `DailyQuote`（`securityType="stock"`）存在嗎」→ 有 `eod`、沒有 `realtime`。`--date` 明確指定非今天 → 一律 `eod` 補算。
+  - **eod 路徑**：`fetchBreakoutRawInputs` 撈全市場 → gate（`minMarketCap` 30 億 + 當日 `volume` ≥ 1M 股 + `volumeMa20` ≥ 500k 股）→ `consecutiveAboveBand`（當日 close vs 當日上軌，往回接 T-1 序列）打階段標籤 → pre-breakout 另撈 `fetchAccumulationRawInputs`、breakout 另撈近 5 日 + 當日法人（`fetchInstitutionalFlowInputs`）。
+  - **realtime 路徑（§4 MIS z bug）**：`fetchAllMisQuotes` 逐批寫 `progress.json` → 每檔決定 close：有 `z` → `priceSource: "realtime"`；缺 `z` 用 `h` 代入 → `"estimated"`（`candleShape` 強制 degraded 給 50，其餘依賴 close 的因子照常算——`h` 是保守上界）；`z` / `h` 都缺 → 跳過（`skippedNoPriceCount`）。籌碼因子讀到 T-1、當日法人子項 → null → `institutionalFlow` degraded。
+  - **階段合併（§3.4）**：pre-breakout = 乘法（`combineTrustScore` → `combineChipScore` → `computeReadinessCoefficient` → `combineFinalScore`，就緒係數下限 0.5，`squeezeScore` 用 §2.6 新權重）；breakout-day / extended = 8 分項加權和（`breakoutMargin` 用 monotone 版、`base` 用新權重）。**排名為同階段內名次**（三階段各 1..N）。
+  - 「觸發量比 ≥ 2」下放成 breakout 階段「進榜門檻」（沒過 → 不進 results、`stats.breakoutBelowVolume++`）。
+  - 落地 `data/signal-scan-results/{date}.json`（eod）/ `{timestamp}.json`（realtime）+ `params`（resolved config）。CLI：無參數自動判斷、`--date=YYYY-MM-DD`（強制 eod）、`--source=realtime|eod`。**獨立手動執行，不進 daily-pipeline**。
+- **`scripts/screening/_run-signal-scan.ts`（新，內部 runner）**：被 `startSignalScan()` spawn，只跑 realtime，最外層覆寫 `progress.json` 終態（逐批進度由 `runSignalScan` 內部負責）。比照 `_run-intraday-scan.ts`。
+- **`lib/actions/signal-scan.ts`（新，取代 `screening.ts` + `intraday.ts`，兩檔已刪）**：`getScanMode()`（前端一進頁問，決定按鈕文案）、`runSignalScanEod()`（同步在 Next 進程內跑 DB 最新交易日、傳 prisma 單例）、`startSignalScan()` / `getSignalScanProgress()` / `getSignalScanResult()`（realtime 背景任務，比照舊 intraday）。
+- **`components/screening/ScreeningPanel.tsx`（重寫）**：移除三策略 tab。一顆「跑掃描」按鈕（`getScanMode()` 決定 = `runSignalScanEod()` 或 `startSignalScan()` + 輪詢）+ 階段 filter tab（全部 / 醞釀中 / 今日突破 / 已延伸，純前端 `results.filter`）+ 一張可排序表格（`stage` 是其中一欄）+ 點列展開評分明細（by-stage：pre-breakout 醞釀分項 + 原始指標 / breakout 8 分項）+ 勾選加入。`priceSource === "estimated"` 列尾「估」badge（`text-amber-400`）+ 展開多一行提示。「全部」filter 預設依 `totalScore` 降冪 + UI 標註「不同階段分數不可直接比較」。加入觀察清單按每列自己的 stage 映射 `source`（`pre-breakout` → `accumulation`；`breakout-day` / `extended` → `breakout`，`WatchlistItem.source` enum 不動）。
+- **舊三支腳本（`calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts`）**：這批不刪、留原地可跑。除 `check-intraday-breakout.ts` 改 import `mis-quotes.ts`（行為不變）外未動。退役待下一批 PLAN。`_run-intraday-scan.ts` 因 `intraday.ts` 已刪成孤兒（仍可 CLI 跑），一併留。
+- **驗證（2026-08-31 DB 最新交易日，eod 模式）**：
+  - `pnpm exec tsc --noEmit` 乾淨、`pnpm build` 通過（`/screening` 仍 `ƒ Dynamic`）、`curl localhost:3000/screening` render 正常（初始「判斷掃描模式中…」）。
+  - **breakout 候選集合**：signal-scan breakout-day + extended 共 33 檔，是 `calculate-breakout-strength.ts` 37 檔的**嚴格子集**。少的 4 檔（6491 晶碩 / 6425 易發 / 6499 益安 / 3548 兆利）皆因 `volumeMa20 < 500,000`（499,634 / 334,974 / 421,694 / 327,820）被統一 gate 的 `minAvgVolumeShares`（沿用 accumulation、剔死股）擋下——**設計內差異**（PLAN §2.7 明列此為統一 gate 的一部分）。
+  - **pre-breakout 候選集合**：signal-scan 453 檔，是 `calculate-accumulation-score.ts` 707 檔的**嚴格子集**。少的 254 檔皆因不過統一 gate 的 `minMarketCap`(30 億) 或 `minVolumeShares`(當日 1000 張) —— 舊 accumulation 候選池**沒有**市值下限與當日量下限（抽查 5 檔全部卡當日量 < 1M 股）。**設計內差異**（PLAN §3.3「三階段共用同一道 gate」）：統一後 pre-breakout 明顯變嚴。
+  - **breakoutMargin 單調性**：3406 玉晶光 舊 67.8 → 新 **100.0**（舊公式乖離 > 3% 被倒扣，新公式封頂不扣），總分 55.5 → 62.6 上升；6933 AMAX-KY 60.6 → 100.0；3374 精材 68.5 → 100.0。乖離 ≤ 3% 的股票 `breakoutMargin` 完全不變。
+  - **squeeze 深度/時長權重對調**：共同 pre-breakout 股（1101 台泥 squeezeScore 71.7 → 59.5、1104 環泥 79.0 → 68.5）方向一致（深度分 > 時長分的股票新權重下 squeeze 降低）。`chipScore` 也微幅移位（rankScore 母體從 707 縮到 453，百分位重算）。
+  - **realtime 冒煙測試（盤後 23:57 執行、資料為前一交易日）**：管線跑通，`stats.estimatedCount: 207`（`h` 代入生效、這些檔沒被丟掉）/ `skippedNoPriceCount: 31`（`z`+`h` 皆缺）/ `failedCount: 0`。MIS 日期 = DB 最新日 → 警語正確觸發。真正盤中驗證待開盤。
+- **`.gitignore`**：加 `/data/signal-scan-results/`。
+- **明確不做（留後續）**：舊三支退役（下一批 PLAN，先肉眼比對排名穩定後）、回測 / 參數校準（階段權重、法人因子曲線全首版拍腦袋）、`computeInstitutionalFlow` 歷史百分位正規化、歷史查詢 UI（`runSignalScan` 的 `date` 參數已留、前端不傳）、`daily-pipeline.ts` 加選股步驟（選股維持手動）。（融資融券進評分 = `margin-chasing` 警示，2026-09-01 已完成，見本檔末段。）
+- **`computeBase` 已知限制（PLAN §2.6，未修正）**：「壓縮深度」子項只看突破前一天**單一天**的帶寬對 240 日分布取百分位，**無連續性概念**——「壓一下 → 打開 → 突破前一天剛好又壓下去」會被誤判成深度壓縮。改進提案（本批不做）：深度輸入從「前一天單日帶寬」改成「前一天往回 3~5 天帶寬平均」。「壓縮時長」子項已有連續性、不受影響。本批只做權重對調（深度 0.4 / 時長 0.6）。
+
+---
+
+**融資融券修正因子 — `margin-chasing` 警示（2026-09-01）**：ROADMAP 4.5.3 deferred 項，依 `docs/PLAN.md`。把融資融券接進選股，但**不新增分項、不動任何分數**——只在 `breakout-day` / `extended` 階段掛一個 `margin-chasing` 警示標記。
+
+- **動機**：突破當日三大法人（投信＋外資）淨賣超、同時這檔融資餘額近期暴增 = 「法人在派發、散戶在追價」的典型出貨形態。系統誠實呈現這個組合，要不要進一步排除由人肉眼判斷。
+- **為何只標記不動分數（使用者定調）**：`computeInstitutionalFlow` 已有 `sellCapScore`(40) 封頂機制，上面再疊「法人賣 + 融資又暴增所以再降」= 特例規則互相牽扯，之後除錯 / 調權重難追蹤是哪層在起作用。標記取代動態調整，跟 `degraded`「標記但不隱藏、不過度處理」哲學一致。因此新增 `SignalResult.warnings: string[]`，**與 `degraded` 分開**（`degraded` = 資料不足所以不確定；`warnings` = 資料充足、系統明確發現的風險訊號 —— 混同一陣列前端沒法用顏色區分）。
+- **`computeMarginSurgePercentile()`（新，`scripts/lib/signal-factors.ts`，純函式）**：算「這檔融資餘額近 5 日累積變化率」`(series[0] − series[5]) / series[5]`，對「這檔過去 40 天、每天各自往回 5 日的同種累積變化率」母體取百分位（0~100）。設計理由（同「籌碼因子偏誤修正」的「不跟別的股票比、跟自己比」）：避免大型股 vs 小型股融資規模差異汙染。用「近 5 日累積」不用單日：散戶追高是連續加碼，累積能串起「突破前幾天融資悄悄墊高 + 今天噴發」。
+  - **「嚴格小於」避免平盤誤觸發**（PLAN §2.3 挖出的坑）：百分位用 `population.filter(v => v < today)` 而非 `<=`。平盤時 today changeRate = 0、母體也全 0，`0 < 0` 為 false → 百分位 0，不會因 threshold 80 + `> threshold` 而誤觸發。
+  - 母體有效樣本 < `minHistoryDays`(20) → 回 null（比照 `computeBase` 保守門檻）。`past <= 0`（融資歸零 / 缺值）該筆跳過不炸。
+- **`computeInstitutionalFlow()` 改動**：加 `marginSurgePercentile: number | null` 輸入、加 `marginChasing: boolean` 輸出。`marginChasing = marginSurgePercentile !== null && > surgePercentileThreshold(80) && 突破當日投信+外資淨賣超`。**score / degraded 完全不動**。`InstitutionalFlowConfig` 加 `marginChasing: { lookbackDays: 5, historyWindowDays: 40, minHistoryDays: 20, surgePercentileThreshold: 80 }` 子區塊，`resolveSignalConfig` 手寫展開。
+- **`run-signal-scan.ts` 接線**：`fetchMarginSurgeInputs(prisma, toDate, codes, config)` 撈 breakout 階段候選股的 `MarginTrading.marginBalance` 序列（近 `lookbackDays + historyWindowDays + 2` 筆，`BATCH=250` 分批），算出每檔百分位。eod 路徑 `toDate = 掃描日`（含當日融資餘額）；realtime 路徑 `toDate = null` → 全 null（當日融資餘額晚上才公布，比照法人子項盤中降級）。`computeBreakoutFactors` 回傳新增 `warnings: string[]`，`margin-chasing` 時 push；所有 `SignalResult` 生成點補 `warnings`（pre-breakout 恆 `[]`）。
+- **前端（`ScreeningPanel.tsx`）**：`row.warnings.includes("margin-chasing")` → 收盤欄尾一個**紅** badge「追」（`bg-rose-500/20 text-rose-400`，跟琥珀「估」、灰字 `degraded` 三者顏色分明）+ 展開明細最上方一個紅框提示。排序 / filter / 加入觀察清單邏輯不動。
+- **驗證（2026-08-31 DB 最新交易日，eod）**：
+  - `pnpm exec tsc --noEmit` 乾淨、`pnpm build` 通過、單測 31 案全綠（新增 10 案：`computeMarginSurgePercentile` 5 + `marginChasing` 輸出 5）。
+  - **被標記的股票**：6209 今國光（當日外資 −29,941、投信 0；融資 5 日 +5.08%、百分位 87.2）、6269 台郡（外資 −282,080；融資 +20.47%、百分位 100）、6668 中揚光（外資 −36,221；融資 +5.81%、百分位 92.3）+ 6491... 實際落地 4 檔（含 5439）。逐檔人工核對：當日投信+外資淨買超確實 < 0、融資餘額近 5 日確實明顯高於 5 日前且增速排在該檔 40 天前段。
+  - **分數不變證明**：`config.breakout.institutionalFlow.marginChasing.surgePercentileThreshold` 設 101（永不觸發）跑一次，`results` 每筆 `totalScore` / `scores.institutionalFlow` 與預設跑**完全一致**（0 mismatch），`margin-chasing` 清單從 4 檔變 0 檔。
+  - **realtime 冒煙**：breakout 階段每筆 `warnings` 為 `[]`（`marginSurgePercentile` 全 null），管線不炸。
+- **資料量**：融資融券歷史已回補到約 45 個交易日（`fill-margin-trading.ts --backfill=45`，2026-09-01）。實測多數個股有 45 筆 `MarginTrading` ≥ `lookbackDays + minHistoryDays`(25)，因子對 breakout 候選股大多能算出百分位。
+- **待校準（PLAN §7）**：累積滿 3 個月資料後（約 2026-11），回頭看觸發頻率 + 命中準確度，再決定 `surgePercentileThreshold`(80) / `lookbackDays`(5) / `historyWindowDays`(40)。
+- **明確不做**：動 `computeInstitutionalFlow` 分數 / 封頂 / 權重、pre-breakout 接融資融券（無「當日法人賣」概念）、融券 / 資券互抵進因子、跨股票比較、回測校準、`MarginTrading` 進 daily-pipeline 選股步驟。
+
+尚未開始/明確不做：估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯（`topic_alignment` 因子固定中性分）、AnalysisResult 產出流程（Phase D）、`screening/` 各支（統一入口 `run-signal-scan.ts`；舊三支 `calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts` 保留可跑、退役待下一批）與 `backfill/` 各支皆為獨立手動執行（不在 `daily-pipeline.ts` 內）、`run-signal-scan.ts` 的階段權重 / 法人因子曲線校準（首版全拍腦袋，靠肉眼看單日排名 + 實盤觀察調）、**整個回測系統**（3.0～3.7 已從 `main` 移除、擱置，見上方；程式碼在 `feat/backtest-ui-3.6-3.7` 分支，OOM 待修）。`archive/` 的 `calculate-screen-score.ts` / `run-screener.ts` / `fetch-candidate-details.ts` / `top20-gainers.js` 已停用不維護。
 
 （每次進度更新，麻煩幫我一併更新這個區塊。）
