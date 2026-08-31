@@ -5,6 +5,7 @@ import { fillOneDayTwse, fillTodayTpex } from "./fill-daily-quotes.js";
 import { fillOneDayInstitutional } from "./fill-institutional-trading.js";
 import { fillOneDayValuation } from "./fill-gap-valuation.js";
 import { calculateTechnicalIndicators } from "./calculate-technical-indicators.js";
+import { calculateOneDayRegime } from "./calculate-market-regime.js";
 import { calculateOneDayHeat } from "./calculate-industry-heat.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
@@ -30,6 +31,7 @@ async function main() {
   let institutionalWritten = 0;
   let valuationsWritten = 0;
   let indicatorsProcessed = 0;
+  let regimeLabel = "—";
   let heatSectorCount = 0;
   let warningCount = 0;
 
@@ -87,7 +89,30 @@ async function main() {
     throw new PipelineStepError("計算技術指標", "計算失敗", err);
   }
 
-  // 5. 計算產業熱度（依最新一個有 DailyQuote 資料的日子，而非寫死今天，避免假日執行時查無資料）
+  // 5. 計算大盤濾網（市場狀態燈號）
+  // 依賴第 4 步已更新 TAIEX 的 TechnicalIndicator（1.4 改完後 calculateTechnicalIndicators() 會一起更新）。
+  // 非關鍵路徑：失敗印警告，不 throw、不讓 pipeline 非 0 結束。
+  try {
+    const latestQuote = await prisma.dailyQuote.findFirst({
+      where: { stock: { securityType: "stock" } },
+      orderBy: { date: "desc" },
+      select: { date: true },
+    });
+    if (latestQuote) {
+      const regime = await calculateOneDayRegime(latestQuote.date, prisma);
+      regimeLabel = regime.label;
+      console.log(
+        `大盤濾網：${regime.label}（totalScore ${regime.totalScore}, stage ${regime.stage}）`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[大盤濾網] 計算失敗（不中斷 pipeline）: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    warningCount++;
+  }
+
+  // 6. 計算產業熱度（依最新一個有 DailyQuote 資料的日子，而非寫死今天，避免假日執行時查無資料）
   try {
     const latestQuote = await prisma.dailyQuote.findFirst({
       orderBy: { date: "desc" },
@@ -111,6 +136,7 @@ async function main() {
   console.log(`今日籌碼寫入筆數: ${institutionalWritten}`);
   console.log(`今日估值寫入筆數: ${valuationsWritten}`);
   console.log(`技術指標處理筆數: ${indicatorsProcessed}`);
+  console.log(`大盤濾網: ${regimeLabel}`);
   console.log(`產業熱度計算產業數: ${heatSectorCount}`);
   console.log(`今日警告: ${warningCount} 則`);
 }

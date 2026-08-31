@@ -45,6 +45,7 @@ tsconfig.tsbuildinfo
 /data/breakout-strength-results/
 /data/intraday-breakout-snapshots/
 /data/accumulation-score-results/
+/data/market-regime/
 
 # Backtest experiment data (Layer 0 raw-factors / caches; not versioned, not in DB)
 /data/backtest-runs/

@@ -91,10 +91,10 @@
   - **指數位置**：TAIEX 收盤 vs MA60，加「連續 3 交易日」緩衝過濾單日假跌破 whipsaw
   - **均線斜率**：TAIEX MA60 近 5 日是否上彎（只看價格穿越會被假跌破騙）
   - **市場寬度**：全市場「收盤 > 各自 MA60」的股票佔比（指數會被權值股扭曲，寬度看整體）；>55% 偏多 / 45~55% 中性 / <45% 偏空
-- [ ] **分兩階段實作**（同一份 PLAN）：Step 1 先只做「市場寬度」單維度（零新資料，`DailyQuote` + `TechnicalIndicator` 現成）三段式上線；Step 2 TAIEX 落地後補「指數位置 + 均線斜率」兩維度，變成三票合成
-- [ ] **不落地 DB**：regime 結果寫 `data/market-regime/{date}.json`（盤後 pipeline 算的定案，一天一檔覆蓋）；盤中重複跑寫 `data/market-regime/intraday/{timestamp}.json`（比照 `intraday-breakout-snapshots`，允許一天多筆）。理由：資訊量小（整個市場每天一個標籤）、盤中會多次取、不做回測不需要歷史查詢 → 建表不划算
-- [ ] **進 pipeline**：`daily-pipeline.ts` 新增步驟（算完技術指標後，需要 TAIEX 的 MA60）。非關鍵路徑，失敗印警告不讓 pipeline 非 0 結束
-- [ ] **前端**：首頁 banner 顯示當前 regime + 三段對應的部位建議文字；`/screening` 頁頂燈號
+- [ ] **分兩階段實作**（同一份 PLAN）：Step 1 先只做「市場寬度」單維度（零新資料，`DailyQuote` + `TechnicalIndicator` 現成）三段式上線【✅ 已完成】；Step 2 TAIEX 落地後補「指數位置 + 均線斜率」兩維度，變成三票合成【待做】
+- [x] **不落地 DB**：regime 結果寫 `data/market-regime/{date}.json`（盤後 pipeline 算的定案，一天一檔覆蓋）；盤中重複跑寫 `data/market-regime/intraday/{timestamp}.json`（比照 `intraday-breakout-snapshots`，允許一天多筆）。理由：資訊量小（整個市場每天一個標籤）、盤中會多次取、不做回測不需要歷史查詢 → 建表不划算（Step 1：`{date}.json` 已上線；盤中版留待 4.5.3）
+- [x] **進 pipeline**：`daily-pipeline.ts` 新增步驟（算完技術指標後，需要 TAIEX 的 MA60）。非關鍵路徑，失敗印警告不讓 pipeline 非 0 結束（第 5 步，`calculate-market-regime.ts`）
+- [x] **前端**：首頁 banner 顯示當前 regime + 三段對應的部位建議文字；`/screening` 頁頂燈號（`RegimeBanner`，`variant="banner"` / `"strip"`）
 
 ### 4.5.2 融資融券資料層
 

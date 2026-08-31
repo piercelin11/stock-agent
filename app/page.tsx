@@ -1,6 +1,8 @@
 import { Card, FieldLabel, Stat } from "../components/ui/Card";
 import { WatchlistPerfTable } from "../components/dashboard/WatchlistPerfTable";
+import { RegimeBanner } from "../components/dashboard/RegimeBanner";
 import { getDbHealth } from "../lib/actions/health";
+import { getMarketRegime } from "../lib/actions/market-regime";
 
 // health card queries Postgres on every request; never prerender it at build time.
 export const dynamic = "force-dynamic";
@@ -12,7 +14,10 @@ function coverageClass(pct: number): string {
 }
 
 export default async function Page() {
-  const health = await getDbHealth();
+  const [health, regime] = await Promise.all([
+    getDbHealth(),
+    getMarketRegime(),
+  ]);
   const { coverage } = health;
   const covRows: { label: string; count: number; pct: number }[] = [
     { label: "DailyQuote", ...coverage.quote },
@@ -23,6 +28,8 @@ export default async function Page() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold text-slate-100">Dashboard</h1>
+
+      <RegimeBanner regime={regime} />
 
       <Card title="資料狀態">
         <div className="grid gap-8 sm:grid-cols-3">

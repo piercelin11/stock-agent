@@ -1,9 +1,13 @@
 import { ScreeningPanel } from "../../components/screening/ScreeningPanel";
+import { RegimeBanner } from "../../components/dashboard/RegimeBanner";
+import { getMarketRegime } from "../../lib/actions/market-regime";
 
 // client 元件會呼叫查 DB 的 Server Action；與其他頁一致標 force-dynamic。
 export const dynamic = "force-dynamic";
 
-export default function ScreeningPage() {
+export default async function ScreeningPage() {
+  const regime = await getMarketRegime();
+
   return (
     <div className="space-y-6">
       <div>
@@ -13,6 +17,8 @@ export default function ScreeningPage() {
           勾選候選股可一鍵加入觀察清單。「盤中即時掃描」為背景執行，可切走再回來看進度。
         </p>
       </div>
+      {/* 按「開始選股」前先看到大盤狀態；不擋按鈕、不改 runScreening 行為。 */}
+      <RegimeBanner regime={regime} variant="strip" />
       <ScreeningPanel />
     </div>
   );
