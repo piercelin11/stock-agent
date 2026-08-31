@@ -40,7 +40,7 @@ interface Column<Row> {
 
 function changePercentCell(v: number): React.ReactNode {
   return (
-    <span className={v > 0 ? "text-red-600" : v < 0 ? "text-green-600" : ""}>
+    <span className={v > 0 ? "text-rose-400" : v < 0 ? "text-emerald-400" : ""}>
       {v.toFixed(2)}
     </span>
   );
@@ -371,15 +371,15 @@ export function ScreeningPanel() {
   return (
     <div className="space-y-4">
       {/* 分頁 */}
-      <div className="flex gap-1 border-b border-slate-200">
+      <div className="flex gap-1 border-b border-slate-800">
         {(Object.keys(TAB_LABELS) as Tab[]).map((s) => (
           <button
             key={s}
             onClick={() => switchTab(s)}
             className={`px-4 py-2 text-sm font-medium ${
               tab === s
-                ? "border-b-2 border-slate-900 text-slate-900"
-                : "text-slate-500 hover:text-slate-700"
+                ? "border-b-2 border-blue-500 text-slate-100"
+                : "text-slate-500 hover:text-slate-300"
             }`}
           >
             {TAB_LABELS[s]}
@@ -390,7 +390,7 @@ export function ScreeningPanel() {
       {isIntraday ? (
         <>
           {/* 常駐警語 */}
-          <div className="rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+          <div className="rounded border border-slate-800 bg-slate-800/50 p-3 text-sm text-slate-400">
             盤中即時掃描：對 <code>mis.twse.com.tw</code> 即時報價跑全市場快照，約需
             20–30 秒。收盤價 / 量 / OHLC / 布林上軌為即時或估計值，
             <strong>與盤後結果不可直接比較</strong>。僅盤中 09:00–13:30 有效。可切走再回來看進度。
@@ -401,7 +401,7 @@ export function ScreeningPanel() {
               {scanBusy ? "掃描中…" : "開始掃描"}
             </Button>
             {scanBusy && intradayProgress?.status === "running" ? (
-              <span className="text-sm text-slate-500">
+              <span className="text-sm text-slate-400">
                 {intradayProgress.phase === "scoring"
                   ? "評分中…"
                   : `抓取即時報價中… ${intradayProgress.fetchedBatches}/${
@@ -409,9 +409,9 @@ export function ScreeningPanel() {
                     } 批`}
               </span>
             ) : scanBusy ? (
-              <span className="text-sm text-slate-500">啟動中…</span>
+              <span className="text-sm text-slate-400">啟動中…</span>
             ) : intradayResult ? (
-              <span className="text-sm text-slate-500">
+              <span className="text-sm text-slate-400">
                 查詢時間：{new Date(intradayResult.queriedAt).toLocaleString("zh-TW", { hour12: false })}
                 {" · "}
                 {Object.entries(intradayResult.stats)
@@ -423,9 +423,9 @@ export function ScreeningPanel() {
 
           {/* 進度條 */}
           {scanBusy && intradayProgress?.status === "running" && intradayProgress.totalBatches > 0 ? (
-            <div className="h-2 w-full overflow-hidden rounded bg-slate-200">
+            <div className="h-2 w-full overflow-hidden rounded bg-slate-800">
               <div
-                className="h-full bg-slate-900 transition-all"
+                className="h-full bg-blue-500 transition-all"
                 style={{
                   width: `${Math.min(
                     100,
@@ -439,13 +439,13 @@ export function ScreeningPanel() {
           ) : null}
 
           {intradayError ? (
-            <div className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-700">
+            <div className="rounded border border-rose-800 bg-rose-950/40 p-3 text-sm text-rose-300">
               {intradayError}
             </div>
           ) : null}
 
           {intradayResult && intradayResult.warnings.length > 0 ? (
-            <div className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-700">
+            <div className="rounded border border-rose-800 bg-rose-950/40 p-3 text-sm text-rose-300">
               <ul className="list-disc pl-5">
                 {intradayResult.warnings.map((w, i) => (
                   <li key={i}>{w}</li>
@@ -455,7 +455,7 @@ export function ScreeningPanel() {
           ) : null}
 
           {intradayDone && rows.length === 0 ? (
-            <div className="rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+            <div className="rounded border border-slate-800 bg-slate-800/50 p-3 text-sm text-slate-400">
               本次快照無符合條件的候選股。
             </div>
           ) : null}
@@ -467,7 +467,7 @@ export function ScreeningPanel() {
               {isPending ? "計算中…" : "跑選股"}
             </Button>
             {result?.date ? (
-              <span className="text-sm text-slate-500">
+              <span className="text-sm text-slate-400">
                 交易日：{result.date}
                 {result.stats
                   ? " · " +
@@ -480,17 +480,17 @@ export function ScreeningPanel() {
           </div>
 
           {error ? (
-            <div className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-700">
+            <div className="rounded border border-rose-800 bg-rose-950/40 p-3 text-sm text-rose-300">
               {error}
             </div>
           ) : null}
 
           {result?.isNonTradingDay ? (
-            <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+            <div className="rounded border border-amber-800 bg-amber-950/40 p-3 text-sm text-amber-300">
               最新交易日尚無資料，請先跑 daily-pipeline。
             </div>
           ) : result && rows.length === 0 ? (
-            <div className="rounded border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+            <div className="rounded border border-slate-800 bg-slate-800/50 p-3 text-sm text-slate-400">
               無符合條件的候選股。
             </div>
           ) : null}
@@ -508,13 +508,13 @@ export function ScreeningPanel() {
               加入觀察清單（{selected.size}）
             </Button>
             {addMsg ? (
-              <span className="text-sm text-slate-600">{addMsg}</span>
+              <span className="text-sm text-slate-400">{addMsg}</span>
             ) : null}
           </div>
 
-          <div className="overflow-x-auto rounded-lg border border-slate-200">
+          <div className="overflow-x-auto rounded-lg border border-slate-800">
             <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-slate-500">
+              <thead className="bg-slate-800/50 text-slate-400">
                 <tr>
                   <th className="w-10 px-3 py-2"></th>
                   {columns.map((c) => (
@@ -581,7 +581,9 @@ function RowGroup({
 }) {
   return (
     <>
-      <tr className="border-t border-slate-100 hover:bg-slate-50">
+      <tr className={`border-t border-slate-800 hover:bg-slate-800/50 ${
+        isSelected ? "bg-blue-950/40" : ""
+      }`}>
         <td className="px-3 py-2">
           <input
             type="checkbox"
@@ -603,7 +605,7 @@ function RowGroup({
         ))}
       </tr>
       {isExpanded ? (
-        <tr className="bg-slate-50">
+        <tr className="bg-slate-800/50">
           <td colSpan={columns.length + 1} className="px-6 py-3">
             <Detail row={row} tab={tab} />
           </td>

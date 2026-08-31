@@ -168,6 +168,8 @@ data/backtest-cache/
 
 > Note：盤中即時掃描的**手動觸發 UI**（背景任務模式：`ScreeningPanel` 第三個 tab → `startIntradayScan` spawn `_run-intraday-scan.ts` → 輪詢 `progress.json`）已於 2026-08-30 併入 `/screening`。這是 ROADMAP 沒明列的加項；第 5 節的「排程 + 通知管道」仍未做。
 
+> Note：2026-08-31 整站切成**固定黑暗模式**（無 light/dark toggle），並重寫 `/` Dashboard：DB 連通性卡改成「資料狀態」卡（今日行情燈號＝DB 最新交易日 vs Asia/Taipei 今日 / 一般股票檔數 / 當日三表覆蓋率），移除 Recharts smoke，新增「觀察類股今日表現」表（對 watchlist 每檔用 `breakout-shared.ts` 的 `computeCandleShape`/`computeVolumeStrength`/`computeBase` 現算 K棒/力道/位階 + 當日動能/籌碼）。ROADMAP 沒明列的加項。
+
 ## 5. 盤中提醒
 
 定期檢查觀察股，依「是否已買入」決定提醒時機，出現大跌大漲或不確定訊號時推播。細節等第 4 階段做完、實際盯盤有手感後再細訂。

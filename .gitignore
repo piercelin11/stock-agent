@@ -27,6 +27,9 @@ tsconfig.tsbuildinfo
 # Background-task PoC scratch output (removed with _poc files; kept harmless)
 /data/_poc/
 
+# Personal scratch notes (not project source)
+/strategy.md
+
 # OS
 .DS_Store
 

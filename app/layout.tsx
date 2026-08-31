@@ -22,7 +22,7 @@ export default function RootLayout({
     <html lang="zh-Hant">
       <body>
         <div className="flex min-h-screen">
-          <aside className="w-52 shrink-0 border-r border-slate-200 bg-white px-4 py-6">
+          <aside className="w-52 shrink-0 border-r border-slate-800 bg-slate-900 px-4 py-6">
             <div className="mb-6 text-sm font-semibold tracking-wide text-slate-500">
               STOCK AGENT
             </div>
@@ -31,7 +31,7 @@ export default function RootLayout({
                 <Link
                   key={link.href}
                   href={link.href}
-                  className="rounded px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"
+                  className="rounded px-3 py-2 text-sm text-slate-300 hover:bg-slate-800"
                 >
                   {link.label}
                 </Link>

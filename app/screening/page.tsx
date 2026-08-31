@@ -7,7 +7,7 @@ export default function ScreeningPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold text-slate-900">選股</h1>
+        <h1 className="text-xl font-semibold text-slate-100">選股</h1>
         <p className="mt-1 text-sm text-slate-500">
           跑最新交易日的盤後選股，結果不寫資料庫（沿用純函式的 data/*-results 落地）。
           勾選候選股可一鍵加入觀察清單。「盤中即時掃描」為背景執行，可切走再回來看進度。

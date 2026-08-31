@@ -36,12 +36,14 @@
 
 ### 前端（`app/` + `lib/` + `components/`）
 
-Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4 + Recharts。
+Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4。**全站固定深色**（無 light/dark 切換）。
 
-- `app/`：`layout.tsx`（側邊欄）、`page.tsx`（dashboard，DB 連通性卡片 + Recharts smoke 圖）、`screening/`（選股頁）、`watchlist/`（觀察清單頁）。
+- `app/`：`layout.tsx`（側邊欄）、`page.tsx`（Dashboard：資料狀態卡 + 觀察類股今日表現表）、`screening/`（選股頁）、`watchlist/`（觀察清單頁）。
 - `lib/prisma.ts`：`PrismaClient` 單例（`globalThis` 快取，dev hot reload 不爆連線池），檔頭 `import "server-only"`。**只能在 Server Component / Server Action import。**
-- `lib/actions/`：Server Actions（不建 REST/GraphQL API），檔頭 `"use server"`——`health.ts` / `screening.ts` / `watchlist.ts` / `intraday.ts`（盤中掃描背景任務）。
-- `components/`：`ui/`（手刻基礎元件）、`screening/`、`watchlist/`、`ChartSmoke.tsx`。
+- `lib/actions/`：Server Actions（不建 REST/GraphQL API），檔頭 `"use server"`——`health.ts` / `screening.ts` / `watchlist.ts` / `intraday.ts`（盤中掃描背景任務）/ `dashboard.ts`（觀察類股今日表現）。
+- `components/`：`ui/`（手刻基礎元件）、`screening/`、`watchlist/`、`dashboard/`。
+
+**Dashboard `/`**：①「資料狀態」卡＝今日行情燈號（DB 最新交易日 vs Asia/Taipei 今日，綠 / 紅）＋ 一般股票檔數 ＋ 當日三表（報價 / 籌碼 / 技術指標）覆蓋率百分比。②「觀察類股今日表現」＝觀察清單每檔一張卡片（grid 2–4 欄），左側 60 日走勢圖（Y 軸用布林帶寬正規化＝收盤相對布林中軌的偏離比例，所有卡同刻度 → 盤整期線壓中線、噴出頂到邊界，卡跟卡之間絕對起伏可比；線色依當日漲跌紅綠 + 線下漸層），右側代號 / 漲跌% / 突破 pill + K 棒·力道（量能）·位階（打底深度）三分數 + 三大法人 / 投信淨買超。全部用 `breakout-shared.ts` 的評分函式現算，不重跑全市場選股。
 
 **選股頁 `/screening`**：三個分頁。「第一根突破」/「冷水區醞釀」按鈕觸發 Server Action 同步跑最新交易日的盤後選股。「盤中即時掃描」走背景任務模式（spawn 子進程對 `mis.twse.com.tw` 即時報價跑全市場快照約 20–30 秒 → 進度條輪詢 → 跑完看候選表格；可切走再回來看進度）。三者跑完都是可排序表格 → 點列看評分明細 → 勾選一鍵加入觀察清單。結果不寫資料庫。
 
@@ -78,6 +80,7 @@ pnpm install
 pnpm dev      # 開發伺服器（http://localhost:3000）
 pnpm build    # 正式打包
 pnpm start    # 跑打包後的正式伺服器
+#   /          ：Dashboard（資料狀態卡 + 觀察類股今日表現表）
 #   /screening：選股頁（三分頁：兩盤後策略同步跑 + 盤中即時掃描背景任務，勾選加入觀察清單）
 #   /watchlist：觀察清單頁（買入狀態編輯、當日三表快照）
 

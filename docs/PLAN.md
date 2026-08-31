@@ -1,418 +1,272 @@
-# PLAN：盤中即時掃描 tab（選股頁第三個策略，背景任務模式）
+# PLAN：Dashboard 改版 + 全站黑暗模式
 
-在既有 `/screening` 頁加第三個 tab「盤中即時掃描」，觸發 `check-intraday-breakout.ts` 對 `mis.twse.com.tw` 即時報價跑一次全市場快照。因為要打 ~16 批外部 API（120 檔/批 + 1.5 秒節流 → 20~30 秒），**不能像盤後兩支那樣同步 `await`**，改用 CLAUDE.md 記的「背景任務」模式：Server Action `spawn` detached 子進程 → 子進程逐批覆寫 `progress.json` → 另一個 Server Action 輪詢讀檔 → client `setInterval` poll 進度條，跑完讀結果檔。
+把前端從淺色主題整站切成黑暗模式，並重寫 `/` Dashboard：DB 連通性區塊換掉內容、移除 Recharts smoke、新增「觀察類股今日表現」區塊（以「帶量帶價第一根」的角度呈現）。
 
 這份是單一任務的實作規格書，做完即被下一份 PLAN 取代；穩定知識完成後回寫 `CLAUDE.md`，過程紀錄回寫 `docs/PROGRESS.md`，ROADMAP 對應項目打勾。
 
 前置狀態：
 
-- **選股頁 `/screening` 已完成**（上一份 PLAN，ROADMAP 4.1）：`components/screening/ScreeningPanel.tsx`（兩個 tab：breakout / accumulation，`useTransition` 同步跑）、`lib/actions/screening.ts`（`runScreening`）、可排序表格 + 行內展開明細 + 勾選加入觀察清單、`components/ui/Button.tsx`。
-- **觀察清單頁 `/watchlist` 已完成**（ROADMAP 4.2）：`lib/actions/watchlist.ts` 的 `addToWatchlist({ codes, source })` 已支援任意 `source` 字串。
-- **`checkIntradayBreakout({ prisma?, config?, now? })` 已參數化**（回測 3.1）：`main()` 是薄殼、可注入 `prisma`、`now`。但**回傳 `void`**——結果只 `writeFileSync` 到 `data/intraday-breakout-snapshots/{timestamp}.json`（`timestamp` = `now.toISOString().slice(0,19).replaceAll(":","-")`，例 `2026-08-24T07-44-34`）。
-- **背景任務模式參考碼**：`feat/backtest-ui-3.6-3.7` 分支的 `lib/actions/backtest.ts`（`startLayer0Run` spawn / `getLayer0Progress` 讀檔）+ `components/BacktestRunner.tsx`（`setInterval` 2s 輪詢 + 進度條）。本 PLAN 照抄這套骨架，換成 intraday。
+- **前端骨架已完成**：`app/layout.tsx`（側欄導覽 + `<main>`）、`app/globals.css`（`@import "tailwindcss"` + `body` 用 `bg-slate-50 text-slate-900`）、`components/ui/{Card,Button}.tsx`。Tailwind v4（`@tailwindcss/postcss`），目前全站 **零 `dark:` 用法**、`:root { color-scheme: light }`。
+- **Dashboard 現況**（`app/page.tsx`）：`getDbHealth()` 回 `{ quoteCount, stockCount, latestQuoteDate }` → 一張「DB 連通性」Card（3 個 `Stat`）+ 一張「Recharts smoke」Card（`components/ChartSmoke.tsx` 寫死資料）。
+- **選股純函式可重用**：`scripts/screening/calculate-breakout-strength.ts` 的 `calculateBreakoutStrength(date, { prisma })` 回傳 `{ date, isNonTradingDay, stats, results: BreakoutResult[] }`。`BreakoutResult.scores` 有 7 分項（interface 與落地 JSON 一致）：`candleShape / volumeStrength / breakoutMargin / firstBar / base / proximityToHigh / relativeStrength`。`lib/actions/screening.ts` 的 `runScreening` 已示範「傳前端 Prisma 單例、純函式不 `$disconnect`」的用法。
+- **`InstitutionalTrading` 的 `foreignNetBuy / investmentTrustNetBuy / dealerNetBuy` 單位是「股」**（`BigInt`）——`fill-institutional-trading.ts` 直接存 TWSE T86 原始股數，未除 1000。UI 顯示「張」時自己 `Math.round(Number(x) / 1000)`。（`listWatchlist` 現況是原樣 `Number(...)` 不換算，屬既有行為，本批不動。）
+- **觀察清單資料**：`lib/actions/watchlist.ts` 的 `listWatchlist()` 回 `WatchlistRow[]`（每檔含 `quote / indicator / institutional` 三表各自最新一筆）。`WatchlistItem` 只有 `stockCode`，透過 `stock` relation 拿 `name`。
 
 ---
 
 ## 0. 這一批的邊界
 
-**做四件事：**
+**做三件事：**
 
-1. **`check-intraday-breakout.ts` 加「進度回報」+「回傳結果」**：
-   - 子進程執行時，每掃完一批 MIS 就覆寫 `data/intraday-breakout-snapshots/progress.json`（原子寫）。
-   - `checkIntradayBreakout` 回傳型別從 `void` 改成含 `results` + `stats` + `queriedAt` + `elapsedRatio` 的物件（比照上一份 PLAN 對 breakout / accumulation 做的回傳擴充；不改落地行為、不改 CLI 輸出、不改 `results` 元素形狀）。
-   - `CandidateResult` interface 改 `export`。
-
-2. **`lib/actions/intraday.ts`（新檔）**：`startIntradayScan()`（spawn detached 子進程跑腳本，立刻回傳）、`getIntradayProgress()`（讀 `progress.json`）、`getIntradayResult()`（讀最新 `{timestamp}.json` 結果檔並轉成可序列化 rows）。
-
-3. **`scripts/screening/_run-intraday-scan.ts`（新，薄 runner）**：被 spawn 的進入點——建立 `prisma`、呼叫 `checkIntradayBreakout({ prisma })`、包一層「開始/結束時覆寫 `progress.json` 的 `status`」。子進程的 stdout/stderr 導到檔案方便除錯。
-
-4. **`ScreeningPanel.tsx` 加第三個 tab「盤中即時掃描」**：不同的互動（進度條 + 輪詢，不是 `useTransition`），跑完後**重用現有的表格 / 排序 / 展開明細 / 勾選加入觀察清單**（intraday rows 形狀跟 breakout rows 幾乎一樣，共用同一套 UI）。`source: "intraday"`。
+1. **全站黑暗模式**（不做 light/dark 切換開關，直接整站變深色）。
+2. **Dashboard「DB 連通性」區塊重寫**：移除現有三個 `Stat`，換成三個新欄位（行情燈號 / 股票數量 / 三表當日覆蓋率）。
+3. **Dashboard 移除 Recharts smoke 區塊**，新增「觀察類股今日表現」區塊。
 
 **明確不在範圍**（留給後續）：
 
-- **排程 / 自動化盤中掃描 / 通知管道** → ROADMAP 第 5 節。本批只做「手動按按鈕跑一次」，只是跑的方式是背景任務。
-- **盤後兩支改成背景任務** → 不動。它們秒級、同步跑剛好，硬套背景模式是純負擔（見 CLAUDE.md「背景任務」段的判斷原則）。
-- **非盤中時段的硬性阻擋** → 只在 UI 顯示警語（「盤中 09:00~13:30 才有效」+ 若 `elapsedRatio` 異常或 MIS 日期與 DB 最新相同則標紅字提示），不禁止使用者按。腳本內部已有這些 `console.warn`，本批把關鍵訊息一併寫進 `progress.json` / 結果檔的 `warnings` 陣列給 UI。
-- **多個並行掃描 / 掃描歷史列表** → 同時只允許一個進行中的掃描（`progress.json` 是單檔，不帶 runId）。結果檔仍是 `{timestamp}.json` 一天可多筆，但 UI 只顯示「最近一次」。
-- **`check` 的評分邏輯調整** → 完全不碰，`checkIntradayBreakout` 內部照舊（7 分項與 breakout 100% 共用）。
-- **`data/intraday-breakout-snapshots/` 的 GC** → 不做（`.gitignore` 已含此目錄，手動清）。
+- **light/dark 切換 UI（主題 toggle、記憶偏好）** → 不做。使用者要的是「改成黑暗模式」＝整站固定深色，不是可切換。日後要 toggle 再開 PLAN。
+- **`ChartSmoke.tsx` 檔案刪除以外的 Recharts 用途** → 本批只是不在 Dashboard 用它；`recharts` 套件保留（screening 展開明細等日後可能用）。`components/ChartSmoke.tsx` 直接刪。
+- **`/screening`、`/watchlist` 頁的版面重排** → 只跟著改配色（換 `slate-*` 淺色類名），不動結構與互動。
+- **「觀察類股今日表現」的歷史留存 / 寫 `AnalysisResult`** → 不寫 DB，每次進頁即時算。
+- **非交易日 / 資料不齊的完整處理** → 燈號紅色 + 文字提示即可，不阻擋渲染。
 
 ---
 
-## 1. 前置事實（已查證，實作時直接採用）
+## 1. 全站黑暗模式
 
-### 1.1 `check-intraday-breakout.ts` 現況
+### 1.1 基準色票（Tailwind slate 系）
 
-- `checkIntradayBreakout(options)` → `Promise<void>`。內部 `runSnapshot(prisma, config, now)` 做：抓全市場 `Stock`（`securityType="stock"`）→ `fetchAllMisQuotes`（**`for` 迴圈逐批**，`BATCH_SIZE=120`、`BATCH_DELAY_MS=1500`）→ 三層篩選（觸發 / 資格門檻 / 7 分項評分）→ `results.sort` + 編 `rank` → `console.table` → `writeFileSync`。
-- `fetchAllMisQuotes(stocks)` 在 `scripts/screening/check-intraday-breakout.ts` **檔內私有函式**，`for (let i = 0; i < stocks.length; i += BATCH_SIZE)` 那個迴圈就是進度回報要插 hook 的地方。
-- 落地內容：`{ queriedAt, elapsedRatio, gates, weights, stats: { totalQueried, failedCount, triggered, passedGates }, results }`。空結果分支（`passedCodes.length === 0`）也會落地一份 `results: []`。
-- `CandidateResult`（**檔內未 export 的 interface**，line ~183）：`code` / `name` / `price` / `changePercent` / `volumeRatio` / `estimatedFullDayVolume` / `marketCap` / `scores{7 項}` / `totalScore` / `rank` / `degraded`。
-- MIS 抓取常數（`MIS_URL` / `BATCH_SIZE` / `BATCH_DELAY_MS`）**不進 config**（CLAUDE.md 已載明），本批也不動。
-- 檔頭 `import "dotenv/config"` + `import { mkdirSync, writeFileSync } from "node:fs"`——**這次要多 import `renameSync`**（原子寫 `progress.json`）。
+| 用途 | 淺色（現在） | 深色（改後） |
+| --- | --- | --- |
+| body 底 | `bg-slate-50` | `bg-slate-950` |
+| body 文字 | `text-slate-900` | `text-slate-100` |
+| 卡片 / 側欄底 | `bg-white` | `bg-slate-900` |
+| 邊框 | `border-slate-200` / `slate-300` | `border-slate-800` / `slate-700` |
+| 次級文字 | `text-slate-500` / `slate-400` | `text-slate-400` / `slate-500` |
+| hover 底 | `hover:bg-slate-100` | `hover:bg-slate-800` |
+| 主按鈕 | `bg-slate-900 text-white` | `bg-slate-100 text-slate-900`（反白）或 `bg-blue-600 text-white` |
 
-### 1.2 背景任務模式（CLAUDE.md「背景任務」段 + `feat/backtest-ui-3.6-3.7` 參考碼）
+台股漲跌色維持慣例（漲紅 `text-rose-500` / 跌綠 `text-emerald-500`），在深色底下把亮度調高一階即可（`rose-400` / `emerald-400`），本批一併順手改。
 
-- **spawn**：`spawn(process.execPath, [tsxCli, script, ...args], { detached: true, stdio: "ignore" | fd, cwd: REPO_ROOT })` + `child.unref()`。`tsxCli = join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs")`（`.npmrc` `node-linker=hoisted` → 扁平路徑解析得到）。**不要用 `pnpm tsx` / `npx tsx`**（detached 子進程解析 launcher 慢、PATH 依賴）。
-- **子進程與 Next.js 連線池無關**：子進程是獨立 Node process，自己 `makePrisma()`。
-- **原子寫 `progress.json`**：先寫 `.tmp` 再 `renameSync`（避免輪詢讀到寫一半）。
-- **輪詢 action**：`existsSync` → `readFileSync` → `JSON.parse`，`catch` 回 `null`（可能剛好讀到 atomic write 之間空檔）。
-- **client**：`useEffect` + `setInterval(async () => { const p = await getProgress(); if (p) setProgress(p); }, 2000)`，`status` 為 `done` / `error` 時 `clearInterval`。
-- **REPO_ROOT**：`process.cwd()`（Next.js server 進程的工作目錄 = repo 根）。
+### 1.2 `app/globals.css`
 
-### 1.3 選股頁現況（`ScreeningPanel.tsx`）
+```css
+@import "tailwindcss";
 
-- `strategy: "breakout" | "accumulation"` 的 `useState`，`STRATEGY_LABELS` 對照表。
-- `results: Partial<Record<ScreeningStrategy, ScreeningResult>>`——**各策略獨立保留結果**。
-- `run()` 用 `startTransition(async () => setResults(...))`。
-- 表格：`columns` 陣列（`breakoutColumns` / `accumulationColumns`），`Column<Row>` 型別（`key` / `label` / `get` / `render?` / `numeric?`）。可排序（`sortKey` / `sortDir` + `useMemo` sort）。行內展開（`expandedCode` state + `<Detail>` 子元件）。勾選（`selected: Set<string>` + `addToWatchlist({ codes, source: strategy })`）。
-- `switchStrategy(next)` 會重置 `sortKey` / `sortDir` / `expandedCode` / `selected` / `addMsg` / `error`。
+:root {
+  color-scheme: dark;
+}
 
-### 1.4 `addToWatchlist` 的 `source`
-
-- `lib/actions/watchlist.ts` 的 `addToWatchlist({ codes, source?: string })`——`source` 是自由字串，直接傳 `"intraday"` 即可，schema `WatchlistItem.source` 是 `String?`（上一份 PLAN 加的）。
-
-### 1.5 「盤中 rows」對「breakout rows」的差異（決定 UI 能共用到什麼程度）
-
-| 欄位 | breakout row | intraday row | UI 處理 |
-| --- | --- | --- | --- |
-| 價格 | `close`（定案） | `price`（即時） | 欄位標題盤中版寫「即時價」 |
-| 漲跌% | `changePercent` | `changePercent`（vs MIS 昨收） | 同 |
-| 量比 | `volumeRatio`（定案量 / MA20） | `volumeRatio`（**估計全天量** / MA20） | 欄位加註「估」 |
-| 分數 | `totalScore` + `scores{7}` | `totalScore` + `scores{7}`（**同一套評分函式**） | 展開明細完全共用 |
-| `rank` / `degraded` | 有 | 有 | 同 |
-| 額外 | — | `estimatedFullDayVolume` / `marketCap` | 可選顯示，非必要 |
-
-→ **表格 columns 另開一份 `intradayColumns`**（標題文案不同），但 `Column` 型別、排序邏輯、`<Detail>` 展開（吃 `scores`）、勾選加入**全部共用**。
-
----
-
-## 2. `check-intraday-breakout.ts` 改動（`scripts/screening/`）
-
-### 2.1 進度回報 hook
-
-`fetchAllMisQuotes` 加一個可選 callback 參數：
-
-```ts
-async function fetchAllMisQuotes(
-  stocks: { code: string; market: Market }[],
-  onBatch?: (done: number, total: number, failedSoFar: number) => void,
-): Promise<{ quotes: Map<string, MisQuote>; failedCount: number }> {
-  // ... for 迴圈內，每批結束後：
-  onBatch?.(Math.min(i + BATCH_SIZE, stocks.length), stocks.length, failedCount);
+body {
+  @apply bg-slate-950 text-slate-100 antialiased;
 }
 ```
 
-- `runSnapshot` 呼叫 `fetchAllMisQuotes` 時把 callback 傳進去，callback 內原子寫 `progress.json`：
-  ```jsonc
-  {
-    "status": "running",
-    "phase": "fetching-quotes",   // "fetching-quotes" | "scoring" | "done" | "error"
-    "queriedAt": "<now.toISOString()>",
-    "fetchedBatches": 3, "totalBatches": 16,   // 或用 done/total 檔數
-    "failedCount": 0,
-    "startedAt": "<...>", "updatedAt": "<...>",
-    "warnings": [],
-    "error": null
-  }
-  ```
-- `phase` 從 `fetching-quotes` → 抓完進 `scoring`（評分那段其實很快，可只覆寫一次）→ 結尾 runner 覆寫 `done`（見 §4）。
-- **`progress.json` 路徑**：`join(__dirname, "..", "..", "data", "intraday-breakout-snapshots", "progress.json")`。`mkdirSync(dir, { recursive: true })` 沿用現有。
-- 原子寫 helper（複製 backtest 的 `atomicWrite`）：`writeFileSync(path + ".tmp", content); renameSync(path + ".tmp", path);`——檔頭 import 加 `renameSync`。
-- **`warnings`**：把 `runSnapshot` 內現有的關鍵 `console.warn`（開盤前 `elapsedRatioRaw < 0.05`、MIS 日期與 DB 最新相同）**同時 push 進一個 `warnings` 陣列**，寫進 `progress.json` 和結果檔。console.warn 保留。
+### 1.3 逐檔改類名（把淺色寫死類名換深色）
 
-### 2.2 回傳擴充
+- `app/layout.tsx`：`<aside>` 的 `border-slate-200 bg-white` → `border-slate-800 bg-slate-900`；nav `Link` 的 `text-slate-700 hover:bg-slate-100` → `text-slate-300 hover:bg-slate-800`；「STOCK AGENT」標題 `text-slate-500` 可留。
+- `components/ui/Card.tsx`：`border-slate-200 bg-white shadow-sm` → `border-slate-800 bg-slate-900`（深色底 `shadow-sm` 幾乎看不到，可留可拿掉）；`Stat` 的 `text-slate-400` label 留、`text-slate-900` value → `text-slate-100`；`Card` title `text-slate-500` 留。
+- `components/ui/Button.tsx`：三個 variant 全改（見上表；`primary` 建議 `bg-blue-600 text-white hover:bg-blue-500 disabled:bg-slate-700`，`secondary` `border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700`，`danger` `border-rose-800 bg-slate-900 text-rose-400 hover:bg-rose-950`）。
+- `app/page.tsx` / `app/screening/page.tsx` / `app/watchlist/page.tsx`：`text-slate-900` 標題 → `text-slate-100`，`text-slate-500` 說明留。
+- `components/screening/ScreeningPanel.tsx` + `components/watchlist/WatchlistTable.tsx`：grep `slate-` / `bg-white` / `text-slate-900` / `border-slate-2` / `hover:bg-slate-100` 全部逐一換深色對應；表格 `divide-slate-200` → `divide-slate-800`、表頭底 `bg-slate-50` → `bg-slate-900` 或 `bg-slate-800/50`；選中列 highlight 用 `bg-blue-950/40`。漲跌色 `rose-500/emerald-500` → `rose-400/emerald-400`。
 
-```ts
-export interface CandidateResult { /* 改 export，形狀不變 */ }
-
-export interface IntradaySnapshotOutput {
-  queriedAt: string;
-  elapsedRatio: number;
-  stats: { totalQueried: number; failedCount: number; triggered: number; passedGates: number };
-  warnings: string[];
-  results: CandidateResult[];
-}
-
-export async function checkIntradayBreakout(
-  options: CheckIntradayBreakoutOptions = {},
-): Promise<IntradaySnapshotOutput> { /* ... */ }
-```
-
-- `runSnapshot` 回傳型別同步改 `Promise<IntradaySnapshotOutput>`。
-- 兩個 `return` 點（空結果早退 line ~355、正常結束 line ~601）都改成 `return { queriedAt, elapsedRatio, stats, warnings, results }`（空結果 `results: []`）。
-- **`writeFileSync` 落地完全不動**（結果檔的 `{timestamp}.json` 照舊，只多一個 `warnings` 欄位——落地物件加 `warnings` 是無害擴充，或不加也行，UI 從 action 回傳拿）。
-- `main()` 薄殼不用改（`checkIntradayBreakout()` 現在有回傳但 `main` 不接也不影響）。
-
-### 2.3 驗證
-
-- `pnpm tsx scripts/screening/check-intraday-breakout.ts`（**盤中時段跑**，或非盤中跑看它印警告 + 落地空/舊資料）：
-  - `data/intraday-breakout-snapshots/{timestamp}.json` 仍正常產出，結構與改動前一致（頂多多 `warnings`）。
-  - 執行過程中 `data/intraday-breakout-snapshots/progress.json` 有被逐批更新（`fetchedBatches` 遞增）。
-  - `console.table` 輸出照舊。
-- 非交易日 / 非盤中跑不應 crash，`warnings` 有內容。
+> 驗收：`grep -rn "bg-white\|slate-50\b\|slate-100\b\|slate-200\b\|text-slate-900" app/ components/` 應只剩「深色底下仍合理」的少數（例如反白按鈕的 `text-slate-900`、`bg-slate-100`）。其餘不得殘留淺色。
 
 ---
 
-## 3. `lib/actions/intraday.ts`（新檔）
+## 2. Dashboard「DB 連通性」區塊重寫
+
+### 2.1 `lib/actions/health.ts` — 改 `getDbHealth`
+
+新回傳型別：
 
 ```ts
-"use server";
-
-import { spawn } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import type { CandidateResult } from "../../scripts/screening/check-intraday-breakout";
-
-const REPO_ROOT = process.cwd();
-const SNAPSHOT_DIR = join(REPO_ROOT, "data", "intraday-breakout-snapshots");
-const PROGRESS_PATH = join(SNAPSHOT_DIR, "progress.json");
-
-export interface IntradayProgress {
-  status: "running" | "done" | "error";
-  phase: "fetching-quotes" | "scoring" | "done" | "error";
-  queriedAt: string;
-  fetchedBatches: number;
-  totalBatches: number;
-  failedCount: number;
-  startedAt: string;
-  updatedAt: string;
-  warnings: string[];
-  error: string | null;
+export interface DbHealth {
+  today: string;                 // 伺服器今日 YYYY-MM-DD（Asia/Taipei）
+  latestQuoteDate: string | null;
+  quoteFresh: boolean;           // latestQuoteDate === today
+  stockCount: number;            // securityType = "stock" 的檔數（分母）
+  coverage: {
+    quote: { count: number; pct: number };       // 當日 DailyQuote 覆蓋
+    institutional: { count: number; pct: number }; // 當日 InstitutionalTrading 覆蓋
+    technical: { count: number; pct: number };     // 當日 TechnicalIndicator 覆蓋
+  };
 }
-
-export interface IntradayRow {
-  code: string;
-  name: string;
-  price: number;
-  changePercent: number;
-  volumeRatio: number;
-  totalScore: number;
-  rank: number;
-  scores: CandidateResult["scores"];
-  degraded: string[];
-}
-
-export interface IntradayResult {
-  queriedAt: string;
-  elapsedRatio: number;
-  stats: Record<string, number>;
-  warnings: string[];
-  rows: IntradayRow[];
-}
-
-/** spawn detached 子進程跑掃描，立刻回傳。同時只允許一個進行中。 */
-export async function startIntradayScan(): Promise<{ started: boolean; reason?: string }>;
-
-/** 讀 progress.json */
-export async function getIntradayProgress(): Promise<IntradayProgress | null>;
-
-/** 讀「最新」一份 {timestamp}.json 結果檔（排除 progress.json），轉成可序列化 rows */
-export async function getIntradayResult(): Promise<IntradayResult | null>;
 ```
 
 實作要點：
 
-1. **`startIntradayScan`**：
-   - 先讀 `progress.json`，若 `status === "running"` 且 `updatedAt` 在最近 ~90 秒內 → 回 `{ started: false, reason: "已有掃描進行中" }`（避免重複 spawn）。（超過 90 秒沒更新視為死掉的舊掃描，允許重跑。）
-   - `tsxCli = join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs")`；`script = join(REPO_ROOT, "scripts", "screening", "_run-intraday-scan.ts")`。
-   - `spawn(process.execPath, [tsxCli, script], { detached: true, stdio: "ignore", cwd: REPO_ROOT })` + `child.unref()`。（子進程 heap 需求低，不用 `--max-old-space-size`。）
-   - **在 spawn 前，這個 action 先原子寫一份 `progress.json`**（`status: "running"`, `phase: "fetching-quotes"`, `fetchedBatches: 0`, `startedAt` = now）——這樣即使子進程啟動有幾秒延遲，client 第一次輪詢也拿得到「running」狀態，不會誤判成「沒在跑」。
-   - 回 `{ started: true }`。
-2. **`getIntradayProgress`**：`existsSync` → `readFileSync` → `JSON.parse`，`catch` 回 `null`。
-3. **`getIntradayResult`**：`readdirSync(SNAPSHOT_DIR)` → filter `/^\d{4}-\d{2}-\d{2}T/` 的 `.json`（排除 `progress.json`）→ 取檔名字典序最大（= 最新 timestamp）→ `readFileSync` + `JSON.parse` → 挑欄位組 `IntradayRow`（`CandidateResult` 已全是 `number` / `string`，無 `Decimal` / `Date` / `BigInt`，直接挑）。回傳 `stats` 用 `{ ...parsed.stats }`，`warnings` 用 `parsed.warnings ?? []`。
-4. **錯誤處理**：子進程自己會在 `progress.json` 寫 `status: "error"` + `error` 訊息（見 §4）。action 不吞。
-5. **auth**：本專案單人本機，不做。
-6. **import 邊界**：`intraday.ts` 只 `import type { CandidateResult }`——**不 import `checkIntradayBreakout` 本體**（它 module-level `import "dotenv/config"` + `node:fs`，type-only import 不會把實作拉進 bundler，比照 backtest `load-forward-returns.ts` 只 import 型別的做法）。§6 build 驗證要確認。
+- **`today`**：用 `Asia/Taipei` 當天日期字串（`new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Taipei" }).format(new Date())` → `YYYY-MM-DD`），不要用伺服器 local time。
+- **分母 `stockCount`**：`prisma.stock.count({ where: { securityType: "stock" } })`（跟 `runScreening` 一致，只算一般股票；不是全 `Stock` 表）。
+- **`latestQuoteDate`**：`prisma.dailyQuote.findFirst({ where: { stock: { securityType: "stock" } }, orderBy: { date: "desc" }, select: { date: true } })`。
+- **`quoteFresh`**：`latestQuoteDate === today`。
+- **當日覆蓋率**：以 `latestQuoteDate`（不是 `today`——非交易日 `today` 無資料會全 0，用「資料庫最新那天」才有意義）為基準日 `refDate`，三個 `count`：
+  - `dailyQuote.count({ where: { date: refDate, stock: { securityType: "stock" } } })`
+  - `institutionalTrading.count({ where: { date: refDate } })`（此表只 upsert 一般股票，不必再過濾）
+  - `technicalIndicator.count({ where: { date: refDate } })`（同上）
+  - `pct = stockCount > 0 ? Math.round((count / stockCount) * 1000) / 10 : 0`（一位小數）。
+- `refDate` 是 `Date`；查詢用 `new Date(latestQuoteDate + "T00:00:00.000Z")`（`DailyQuote.date` 存的是 UTC 午夜，跟現有 `runScreening` `new Date(dateStr)` 對齊）。
+- 三表日期可能不同步（`listWatchlist` 註解已提過）——覆蓋率一律以 `refDate` 為準，若某表當天還沒算，覆蓋率就是低的，這是「今天 pipeline 有沒有跑完」的真實訊號，符合需求。
+
+### 2.2 `app/page.tsx` — DB 連通性 Card 內容
+
+三欄（沿用 `flex gap-10` 或改 `grid grid-cols-3`）：
+
+1. **今日行情燈號**：一顆圓點 + 文字。
+   - `quoteFresh` → 綠燈（`bg-emerald-500`）+「已更新（{latestQuoteDate}）」。
+   - `!quoteFresh` → 紅燈（`bg-rose-500`）+「未更新（DB 最新 {latestQuoteDate ?? "無"}，今日 {today}）」。
+   - 圓點：`<span className="inline-block h-2.5 w-2.5 rounded-full ..." />`。
+2. **股票數量**：`stockCount.toLocaleString()`（沿用 `Stat`），label「一般股票檔數」。
+3. **當日三表覆蓋率**：一個小區塊，三行 `DailyQuote / 籌碼 / 技術指標`，各顯示 `{pct}%`（`{count} / {stockCount}`）。pct < 90 標黃字（`text-amber-400`）、< 50 標紅字，其餘 `text-slate-100`。可做成極簡水平 bar（`bg-slate-800` 底 + `bg-emerald-500` 寬度 `{pct}%`），或純文字。**先純文字 + 顏色，bar 視行有餘力再加。**
+
+Card title 從「DB 連通性」可留或改「資料狀態」。
+
+### 2.3 移除 Recharts smoke
+
+- `app/page.tsx` 刪掉 `<Card title="Recharts smoke...">` 整段與 `import { ChartSmoke }`。
+- 刪 `components/ChartSmoke.tsx`。
+- **不動** `package.json` 的 `recharts` 依賴。
 
 ---
 
-## 4. `scripts/screening/_run-intraday-scan.ts`（新，薄 runner）
+## 3. Dashboard 新區塊：「觀察類股今日表現」
 
-被 `startIntradayScan` spawn 的進入點。底線前綴 = 內部 runner（比照 `scripts/archive/` 慣例，不是給人手動跑的）。
+以「帶量帶價第一根」的角度，對**觀察清單裡的每一檔**呈現今日狀態。不是重跑全市場 screening，只針對 watchlist 標的算/取這幾個面向。
+
+### 3.1 資料來源決策
+
+觀察清單通常 < 50 檔。兩條路：
+
+- **(A) 重用 `calculateBreakoutStrength(refDate, { prisma })` 再篩 watchlist 交集**：能拿到定案的 7 分項與 `totalScore`，但純函式內部有 gate（市值 / 量 / trigger volume ratio），**沒觸發突破的觀察股不會出現在 `results` 裡**——而觀察清單多數股當天不會剛好突破，交集會很少。不符「列出每一檔」的需求。
+- **(B) 自己組每檔的面向指標**（推薦）：對 watchlist 每檔讀 `refDate` 當天的 `DailyQuote` + `TechnicalIndicator` + `InstitutionalTrading` + 近 20 日 `DailyQuote` 視窗，用 `breakout-shared.ts` 既有的 pure helper 現算需要的分項。不經 gate，每檔都有值。
+
+→ **採 (B)**。新增 `lib/actions/dashboard.ts` 的 `getWatchlistPerformance()`。
+
+### 3.2 呈現的面向（欄位）
+
+需求原文：「今日 k 棒趨勢、動能（突破布林或漲幅等）、籌碼面、力道、盤整多久（位階）」。對應：
+
+| 欄位 | 定義 | 資料 / helper |
+| --- | --- | --- |
+| **今日 K 棒** | 收紅/收黑 + 實體強弱。用 `computeCandleShape({ open, high, low, close })`（`breakout-shared.ts`，回 `{ score, degraded }`）→ 分數 + 箭頭。 | 當日 `DailyQuote` OHLC |
+| **動能** | 兩個子訊號：①漲跌幅 `changePercent`（`quote.change / (close - change) * 100`，或直接存的 `change` 是「漲跌價」要換算成 %）；②是否站上布林上軌 `close >= indicator.bollingerUpper`（布林突破 = true 時標亮）。 | 當日 `DailyQuote` + `TechnicalIndicator.bollingerUpper` |
+| **力道（量能）** | `computeVolumeStrength(volumeRatio, curve)`，`volumeRatio = 今日 volume / 近 20 日均量`（近 20 日均量自己從 `DailyQuote` 視窗算）。回 0~100 分。 | 近 21 筆 `DailyQuote.volume` |
+| **籌碼面** | 今日三大法人合計淨買賣（`foreignNetBuy + investmentTrustNetBuy + dealerNetBuy`，單位張），正紅負綠；投信單獨標記（accumulation 邏輯裡投信權重最高）。**不做完整 accumulation chipScore**（那要 20 日視窗 + 多 helper，本批從簡），只顯示當日淨額 + 投信當日淨額。 | 當日 `InstitutionalTrading` |
+| **位階 / 盤整多久** | `computeBase(historyWindow, curve)`（`breakout-shared.ts`，吃近 N 日 close 序列，回「底部深度 + 打底天數」合成分數，degraded 門檻 40 天）。分數高 = 剛從長打底/深回檔區起來（位階低、後勁足）；分數低 = 已在高位。 | 近 ~240 筆 `DailyQuote.close`（不足 40 筆標 degraded） |
+
+> 註：`computeBase` / `computeVolumeStrength` / `computeCandleShape` 的 curve 參數傳 `DEFAULT_BREAKOUT_CONFIG.score.curves.*`（`resolveBreakoutConfig()` 取得）。`computeFirstBar` 需要「close vs 布林上軌」的歷史序列，本批不納入（要另拉 `bollingerUpper` 歷史），動能欄用「當日是否站上上軌」代替即可。
+
+### 3.3 `lib/actions/dashboard.ts`（新檔）
 
 ```ts
-import "dotenv/config";
-import { writeFileSync, renameSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../../generated/prisma/client";
-import { checkIntradayBreakout } from "./check-intraday-breakout";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PROGRESS_PATH = join(__dirname, "..", "..", "data", "intraday-breakout-snapshots", "progress.json");
-
-function atomicWrite(path: string, obj: unknown) {
-  writeFileSync(path + ".tmp", JSON.stringify(obj, null, 2));
-  renameSync(path + ".tmp", path);
+"use server";
+export interface WatchlistPerfRow {
+  stockCode: string;
+  name: string;
+  refDate: string;              // 該檔實際取到的當日資料日期（quote 的 date）
+  close: number;
+  changePercent: number;
+  // 面向分數（0~100，缺資料為 null）
+  candleScore: number | null;
+  volumeScore: number | null;
+  baseScore: number | null;     // 位階（高=低位階剛起步）
+  // 動能
+  aboveBollingerUpper: boolean | null;
+  // 籌碼（張，可為 null）
+  instTotalNet: number | null;
+  trustNet: number | null;
+  degraded: string[];           // 例 ["base", "candleShape"]
 }
-
-async function main() {
-  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-  const prisma = new PrismaClient({ adapter });
-  const startedAt = new Date().toISOString();
-  try {
-    // checkIntradayBreakout 內部會逐批覆寫 progress.json（phase: fetching-quotes）
-    const out = await checkIntradayBreakout({ prisma });
-    atomicWrite(PROGRESS_PATH, {
-      status: "done", phase: "done",
-      queriedAt: out.queriedAt,
-      fetchedBatches: 0, totalBatches: 0,   // 已無意義，done 態不看
-      failedCount: out.stats.failedCount,
-      startedAt, updatedAt: new Date().toISOString(),
-      warnings: out.warnings, error: null,
-    });
-  } catch (err) {
-    atomicWrite(PROGRESS_PATH, {
-      status: "error", phase: "error",
-      queriedAt: startedAt,
-      fetchedBatches: 0, totalBatches: 0, failedCount: 0,
-      startedAt, updatedAt: new Date().toISOString(),
-      warnings: [],
-      error: err instanceof Error ? err.message : String(err),
-    });
-    process.exitCode = 1;
-  } finally {
-    await prisma.$disconnect();
-  }
-}
-
-void main();
+export async function getWatchlistPerformance(): Promise<WatchlistPerfRow[]>;
 ```
 
-- **職責分工**：`checkIntradayBreakout` 內部負責 `phase: "fetching-quotes"` 的逐批進度（§2.1）；runner 只在**最外層**覆寫 `done` / `error`。
-- runner 不 `isMain` guard（它就是為了被 spawn 執行）。
-- **stdio**：`startIntradayScan` 用 `stdio: "ignore"`。若除錯需要，可改導到 `data/intraday-breakout-snapshots/_last-run.log`（`openSync` 拿 fd 傳給 `spawn` 的 `stdio: ["ignore", fd, fd]`）——**優先 `"ignore"`，除錯再說**。
+實作：
+
+1. `prisma.watchlistItem.findMany({ include: { stock: { select: { name: true } } }, orderBy: { addedAt: "desc" } })`。空清單直接回 `[]`。
+2. 對每檔 `Promise.all` / 分批（< 50 檔可全平行，比照 `listWatchlist`）：
+   - 最新 `DailyQuote`（`orderBy date desc`，取 `date/open/high/low/close/volume/change`）→ 沒有就整列 skip（回一個 `close: 0` 佔位 or 直接濾掉；**濾掉**較乾淨）。
+   - 該 `date` 往前近 21 筆 `DailyQuote`（算 20 日均量）、近 240 筆 `DailyQuote.close`（算 `computeBase`）。可一次 `findMany({ where: { stockCode, date: { lte: refDate } }, orderBy: { date: "desc" }, take: 240 })` 拿齊，再切片。
+   - 最新 `TechnicalIndicator`（`bollingerUpper`）。
+   - 最新 `InstitutionalTrading`（三欄）。
+3. `changePercent`：`prevClose = close - change`；`changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0`。
+4. `candleScore = computeCandleShape({ open, high, low, close }).score`；degraded 收集。
+5. `volumeRatio = avg20Volume > 0 ? Number(todayVolume) / avg20Volume : 0`；`volumeScore = computeVolumeStrength(volumeRatio, curves.volumeStrength)`。
+6. `baseScore`：`closeSeries`（新到舊或舊到新依 helper 要求，查 `computeBase` 簽名）長度 < 40 → `baseScore = null` + `degraded.push("base")`，否則 `computeBase(series, curves.base).score`。
+7. `aboveBollingerUpper = bollingerUpper != null ? close >= bollingerUpper : null`。
+8. `instTotalNet` / `trustNet`：`InstitutionalTrading` 三欄單位是「股」，換算成「張」＝ `Math.round(Number(x) / 1000)`。`instTotalNet = round((foreign + trust + dealer) / 1000)`、`trustNet = round(trust / 1000)`。缺資料為 `null`。
+9. 回傳全部序列化（`Decimal` / `BigInt` 都轉 `number`，`Date` 轉字串）。
+
+**Prisma 用前端單例**（`import { prisma } from "../prisma"`），不 `$disconnect`。
+
+### 3.4 `components/dashboard/WatchlistPerfTable.tsx`（新，client 或 server 皆可）
+
+- 純展示表格即可（**不需互動**，本批不做排序/展開；日後要再說）。做成 Server Component 直接 `await getWatchlistPerformance()` 最簡單，省一個 `"use client"`。
+- 欄位順序：`代號 名稱 | 收盤 漲跌% | K棒 | 動能 | 力道 | 籌碼(合計/投信) | 位階`。
+- 分數欄（K棒/力道/位階）：顯示數字 + 依高低上色（`>=70` `text-emerald-400`、`40~70` `text-slate-200`、`<40` `text-slate-500`）；`null` 顯示「—」+ 若在 `degraded` 加個灰底 `資料不足` tag。
+- 動能欄：漲跌% 台股色（漲 `rose-400` 跌 `emerald-400`）＋ 若 `aboveBollingerUpper` 加一個 `突破` 藍色 pill。
+- 籌碼欄：`合計 {instTotalNet>0?"+":""}{instTotalNet} 張`（正紅負綠）＋ 第二行小字 `投信 {trustNet} 張`。
+- 空清單：顯示「觀察清單為空，先到 Screening 加入標的」。
+
+### 3.5 `app/page.tsx` 組裝
+
+```tsx
+export default async function Page() {
+  const health = await getDbHealth();
+  return (
+    <div className="space-y-6">
+      <h1 className="text-xl font-semibold text-slate-100">Dashboard</h1>
+      <Card title="資料狀態">{/* §2.2 三欄 */}</Card>
+      <Card title="觀察類股今日表現（帶量帶價第一根視角）">
+        <WatchlistPerfTable />
+      </Card>
+    </div>
+  );
+}
+```
+
+`export const dynamic = "force-dynamic"` 保留（新 action 也查 DB）。
 
 ---
 
-## 5. `ScreeningPanel.tsx` 加第三個 tab
+## 4. 驗收
 
-### 5.1 tab 與狀態
-
-- `ScreeningStrategy` 型別在 `lib/actions/screening.ts`——**新增 `"intraday"`**？還是 intraday 完全走另一條路？
-  - **定案**：`ScreeningPanel` 內部把 tab 值擴成 `"breakout" | "accumulation" | "intraday"`（元件內 local 型別，不動 `runScreening` 的 `ScreeningStrategy`）。breakout / accumulation 兩 tab 照舊呼叫 `runScreening`；intraday tab 呼叫 `lib/actions/intraday.ts` 的三支。
-- `STRATEGY_LABELS` 加 `intraday: "盤中即時掃描"`。
-- intraday tab 專屬 state：`intradayProgress` / `intradayResult` / `intradayError` / `scanBusy`。**不放進 `results: Partial<Record<...>>`**（那是 `ScreeningResult` 形狀，intraday 不同），另開變數。
-- `switchStrategy` 切到 / 切走 intraday 時：**不中斷正在跑的子進程**（它是 detached），只停掉 client 的輪詢 `setInterval`；切回來時若 `progress.json` 還 `running` 就重新開始輪詢（`useEffect` 依賴 `tab === "intraday"`）。
-
-### 5.2 intraday tab 的互動
-
-- **一顆「開始掃描」按鈕** → `startIntradayScan()`：
-  - 回 `{ started: false, reason }` → 顯示 reason（「已有掃描進行中」），不清空現有結果。
-  - 回 `{ started: true }` → 清空 `intradayResult`，設 `scanBusy = true`，啟動輪詢。
-- **輪詢**（`useEffect`，`tab === "intraday" && scanBusy`）：`setInterval(2000)` → `getIntradayProgress()`：
-  - `status === "running"` → 更新進度條（`fetchedBatches / totalBatches`，phase 文案「抓取即時報價中… 3/16 批」）。
-  - `status === "done"` → `clearInterval`，`getIntradayResult()` → `setIntradayResult`，`scanBusy = false`。
-  - `status === "error"` → `clearInterval`，顯示 `error`，`scanBusy = false`。
-  - `null`（progress.json 還沒出現）→ 維持「啟動中…」。
-- **進度條**：純 Tailwind（`<div>` 寬度 % ），不引入元件庫。
-- **警語列**（tab 頂端常駐）：「盤中即時掃描：對 `mis.twse.com.tw` 即時報價跑全市場快照，約需 20–30 秒。收盤價 / 量 / OHLC / 布林上軌為即時或估計值，**與盤後結果不可直接比較**。僅盤中 09:00–13:30 有效。」
-- **`result.warnings`** 非空 → 結果表格上方紅字列出（開盤前、MIS 日期異常等）。
-
-### 5.3 結果表格（重用）
-
-- 新增 `intradayColumns: Column<IntradayRow>[]`：`rank` / `code` / `name` / `即時價`(price) / `漲跌%`(changePercent, 漲紅跌綠) / `量比(估)`(volumeRatio) / `總分`(totalScore) / `降級項目`(degraded)。
-- 排序 `useMemo`、行內展開 `<Detail>`（intraday 的 `scores` 7 分項跟 breakout 同形狀，`<Detail>` 加一個 `strategy === "intraday"` 分支或直接複用 breakout 分支的渲染）、勾選 `Set<string>` + `addToWatchlist({ codes: [...selected], source: "intraday" })` → 提示「已加入 N 檔，略過 M 檔」。
-- 空結果（`rows.length === 0` 且 `status === "done"`）→ 「本次快照無符合條件的候選股」（不是錯誤）。
-
-### 5.4 `app/screening/page.tsx`
-
-- 不用改（`ScreeningPanel` 是 client 元件，`force-dynamic` 已在）。頁面說明文字可補一句「盤中即時掃描為背景執行，可切走再回來看進度」。
+1. `pnpm exec tsc --noEmit` 乾淨（`scripts/` + `app/` 共用 tsconfig）。
+2. `pnpm build` 通過（需本機 Postgres 開著；`force-dynamic` 已擋 build-time 預渲染，但 action 仍會在 dev/start 連線）。
+3. `pnpm dev` 開 `/`：
+   - 整頁深色底，無殘留白卡 / 淺灰。側欄、`/screening`、`/watchlist` 一致深色，漲跌紅綠在深色底清楚。
+   - 「資料狀態」：燈號正確（今天有跑 pipeline → 綠；沒跑 → 紅 + 日期差提示）；股票數量 = 一般股票檔數；三表覆蓋率百分比合理（pipeline 跑完當天應接近 100%）。
+   - 無 Recharts smoke 區塊；`components/ChartSmoke.tsx` 已刪、無 import 殘留。
+   - 「觀察類股今日表現」：watchlist 每檔一列，K棒/力道/位階有分數（打底不足 40 天的標「資料不足」），動能顯示漲跌% + 突破 pill，籌碼顯示合計/投信淨額。空清單有提示文案。
+4. `/screening` 跑一次 breakout、`/watchlist` 開一次，確認只有配色變、互動與資料照舊。
 
 ---
 
-## 6. 驗證（本 PLAN 的驗收）
+## 5. 檔案清單
 
-### 6.1 腳本改動
+**改：**
 
-1. `pnpm tsx scripts/screening/check-intraday-breakout.ts`（盤中時段最佳；非盤中跑驗證不 crash + `warnings` 有內容）：
-   - 執行中 `watch -n1 cat data/intraday-breakout-snapshots/progress.json` 看到 `fetchedBatches` 從 0 遞增到 `totalBatches`。
-   - 結束後 `{timestamp}.json` 正常產出，`console.table` 照舊。
-2. `pnpm exec tsc --noEmit`：`scripts/` 零新增錯誤（`CandidateResult` export、回傳型別改動、`renameSync` import）。
+- `app/globals.css`（§1.2）
+- `app/layout.tsx` `app/page.tsx` `app/screening/page.tsx` `app/watchlist/page.tsx`（配色 + Dashboard 重組）
+- `components/ui/Card.tsx` `components/ui/Button.tsx`（配色）
+- `components/screening/ScreeningPanel.tsx` `components/watchlist/WatchlistTable.tsx`（配色）
+- `lib/actions/health.ts`（`getDbHealth` 換回傳，§2.1）
 
-### 6.2 `_run-intraday-scan.ts` + actions
+**新增：**
 
-1. 直接跑 runner：`pnpm tsx scripts/screening/_run-intraday-scan.ts` →
-   - 過程中 `progress.json` 有 `running` → 結束 `done`（或非盤中時 `done` 但 `results` 空 + `warnings` 有料）。
-   - `data/intraday-breakout-snapshots/{timestamp}.json` 有新檔。
-2. 模擬 action 邏輯（tsx 小腳本或 `pnpm dev` 手測）：
-   - `startIntradayScan()` 連按兩次 → 第二次回 `{ started: false, reason: ... }`。
-   - `getIntradayProgress()` 在跑的時候回 `running` + 遞增的 `fetchedBatches`。
-   - `getIntradayResult()` 回最新那份、`rows` 已是 plain object（`JSON.stringify` 不丟錯）。
+- `lib/actions/dashboard.ts`（`getWatchlistPerformance`，§3.3）
+- `components/dashboard/WatchlistPerfTable.tsx`（§3.4）
 
-### 6.3 選股頁端到端（`pnpm dev`）
+**刪除：**
 
-1. `/screening` →「盤中即時掃描」tab：
-   - 頂端警語常駐。
-   - 「開始掃描」→ 進度條出現，phase 文案「抓取即時報價中… N/16 批」，約 20–30 秒後跑完。
-   - **切到「第一根突破」tab 再切回來** → 進度條/結果狀態還在（切走只停輪詢、沒中斷子進程）。
-   - 跑完 → 候選表格出現，內容與 `data/intraday-breakout-snapshots/{最新}.json` 的 `results` 一致（rank / code / totalScore 對得上）。
-   - 點列 → 展開 7 分項明細。
-   - 點欄位標題 → 排序生效。
-   - 勾 2 檔 → 「加入觀察清單」→ DB `WatchlistItem` 多 2 筆、`source = "intraday"`。再勾同 2 檔 → 「已加入 0 檔，略過 2 檔」。
-   - 非盤中跑 → 警語列紅字（開盤前 / MIS 日期異常），表格可能空 → 顯示「本次快照無符合條件的候選股」，不白屏不報錯。
-2. 「第一根突破」/「冷水區醞釀」兩 tab 行為**完全不變**（同步跑、`useTransition`）。
+- `components/ChartSmoke.tsx`
 
-### 6.4 typecheck / build
-
-- `pnpm exec tsc --noEmit`：`scripts/` + 根目錄零新增錯誤。
-- `pnpm build`：通過。重點確認：
-  - `lib/actions/intraday.ts` 只 `import type { CandidateResult }` → **不把 `check-intraday-breakout.ts` 的 `dotenv/config` / `node:fs` / MIS fetch 拉進 Turbopack bundle**（比照上一份 PLAN 對 `scripts/screening/*` import 的驗證結果——那次沒炸，這次 type-only 更安全）。
-  - `_run-intraday-scan.ts` **不被任何 `app/` 或 `lib/` 檔 import**（只被 spawn 當獨立腳本跑）→ 不進 build。
-  - `/screening` 靜態分析照舊（`force-dynamic`）。
-
-### 6.5 舊行為不變
-
-- `calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts` 的 CLI 輸出與落地照舊（`check` 頂多結果檔多 `warnings` 欄位）。
-- `daily-pipeline.ts` 不受影響。
-- `/` Dashboard、`/watchlist` 不變。
-- 盤後兩個 screening tab 不變。
+**不動：** `package.json`（`recharts` 留）、`prisma/schema.prisma`（無 schema 變更）、`scripts/`（純函式只讀不改）。
 
 ---
 
-## 7. 實作步驟（順序）
+## 6. 收尾
 
-1. **`check-intraday-breakout.ts`**：`CandidateResult` 改 `export`；加 `IntradaySnapshotOutput` 回傳型別；`fetchAllMisQuotes` 加 `onBatch` callback；`runSnapshot` 傳 callback（原子寫 `progress.json`，`phase: "fetching-quotes"`）+ 收集 `warnings`；兩個 `return` 點回 `{ queriedAt, elapsedRatio, stats, warnings, results }`；檔頭 import 加 `renameSync`。CLI 跑一次驗落地/console 不變 + `progress.json` 有遞增。（§2、§6.1）
-2. **`scripts/screening/_run-intraday-scan.ts`**：薄 runner，最外層覆寫 `done` / `error`。`pnpm tsx` 直接跑驗證。（§4、§6.2）
-3. **`lib/actions/intraday.ts`**：`startIntradayScan`（spawn + 防重複 + spawn 前先寫一次 `running`）/ `getIntradayProgress` / `getIntradayResult`（讀最新結果檔 → plain rows）。（§3、§6.2）
-4. **`ScreeningPanel.tsx`**：tab 值擴 `"intraday"`；`STRATEGY_LABELS` 加；intraday 專屬 state + 輪詢 `useEffect` + 進度條 + 警語列 + `intradayColumns` + 重用表格/排序/展開/勾選（`source: "intraday"`）。（§5、§6.3）
-5. **`app/screening/page.tsx`**：說明文字補一句（可選）。
-6. **驗證**：§6 全部（腳本、runner、actions、選股頁 E2E、typecheck、`pnpm build`、舊行為）。
-7. **回寫文件**：
-   - `CLAUDE.md`：
-     - 「既有腳本 / `scripts/screening/`」段：`check-intraday-breakout.ts` 補「回傳現含 `IntradaySnapshotOutput`（`results` + `warnings` 等）供前端 action 取用；執行時逐批覆寫 `data/intraday-breakout-snapshots/progress.json`」；新增 `_run-intraday-scan.ts`（被 `lib/actions/intraday.ts` spawn 的 runner）。
-     - 「前端（Next.js + Prisma）」段：`/screening` 補「第三個 tab『盤中即時掃描』走**背景任務模式**（spawn detached 子進程跑 `_run-intraday-scan.ts` → 子進程逐批寫 `progress.json` → `getIntradayProgress` 輪詢 → client `setInterval` 進度條），與盤後兩 tab 的同步跑不同；跑完重用同一套表格/排序/展開/勾選，`source: "intraday"`」；`lib/actions/` 補 `intraday.ts`。
-     - 「背景任務」段：把「PoC 已刪、模式如上記錄」更新為「已有正式使用者：`lib/actions/intraday.ts`（盤中掃描）」。
-   - `README.md`：「前端」段 / 「使用方式」的 `/screening` 說明補第三個 tab。
-   - `docs/PROGRESS.md`：本批（`check` 進度回報 + 回傳擴充、背景任務模式首個正式落地、`_run-intraday-scan.ts` runner 的職責分工、`intraday.ts` type-only import 邊界、防重複 spawn 的 90 秒判斷、切 tab 不中斷子進程、非盤中警語處理、`pnpm build` 驗證結果）。
-   - `docs/ROADMAP.md`：這是 ROADMAP 沒明列的加項（第 4 節聚焦盤後選股，盤中在第 5 節但那是「排程 + 通知」）。**在第 4 節或第 5 節前加一條註記**：「盤中即時掃描的**手動觸發 UI**（背景任務模式）已於 2026-08-30 併入 `/screening` 第三個 tab；第 5 節的『排程 + 通知管道』仍未做」。不動第 5 節既有 `- [ ]`。
-
----
-
-## 8. 待決小事（實作時當場定）
-
-| 項目 | 選項 | 傾向 |
-| --- | --- | --- |
-| intraday 是否併進 `ScreeningStrategy` 型別 | 併 / `ScreeningPanel` 內部 local 型別 | **local 型別**（`runScreening` 不服務 intraday，型別分開更清楚）|
-| `progress.json` 帶不帶 runId | 帶（可並行多掃描）/ 不帶（單檔、單一進行中）| **不帶**（盤中掃描沒有並行需求，單檔最簡單）|
-| 防重複 spawn 的判斷 | 純看 `status === "running"` / 加「`updatedAt` 超過 N 秒視為死掉」 | **加 90 秒 staleness**（子進程可能 crash 沒寫 error，不能永遠卡住）|
-| 子進程 stdio | `"ignore"` / 導到 `_last-run.log` | **`"ignore"`**（除錯再改；`progress.json` 的 `error` 欄位已夠定位）|
-| 進度粒度 | 每批寫 / 每 N 批寫 | **每批寫**（16 批、原子寫成本低，進度條更順）|
-| 切 tab 時正在跑的掃描 | 中斷子進程 / 只停輪詢 | **只停輪詢**（detached 子進程本就該跑完；切回來重連進度）|
-| 非盤中時段 | 禁止按鈕 / 只警語 | **只警語**（使用者可能想看「昨收凍結值」的樣子；腳本內部已防呆）|
-| runner 檔名 | `_run-intraday-scan.ts` / `run-intraday-scan.ts` | **底線前綴**（內部 runner，非手動執行入口，跟 `scripts/_poc` 歷史慣例一致）|
-
----
-
-## 9. 已知風險 / 待後續處理
-
-| 項目 | 處理時機 |
-| --- | --- |
-| 排程自動盤中掃描 + Telegram 通知 + 「大漲大跌」判斷邏輯 | ROADMAP 第 5 節（依賴資料庫外部連線 + 通知模組，本批不碰）|
-| `mis.twse.com.tw` 是社群逆向工程端點，格式可能無預警改 | 既有風險，本批不新增；`failedCount` / `warnings` 已能反映抓取失敗 |
-| 盤中訊號的歷史回測（命中率回顧）| 回測系統撿回後（`feat/backtest-ui-3.6-3.7`），且受 TPEx 盤中/歷史端點限制（ROADMAP 3.1 已註記）|
-| `data/intraday-breakout-snapshots/` 結果檔堆積 | 手動清（`.gitignore` 已含）；GC 策略待日後 |
-| 子進程若在 `next dev` 熱重載 / server 重啟時被連累 | detached + `unref` 已隔離；最壞情況是 `progress.json` 停在 `running`，90 秒 staleness 會放行重跑 |
-| Next.js server 部署到多實例時 `progress.json` 在本機檔案系統 | 本專案單機 `localhost`（ROADMAP 第 5 節前都是），多實例不在考量 |
-| 同時有人在跑盤後 tab + 盤中 tab | 各自獨立（盤後同步、盤中背景），`prisma` 單例併發查詢無問題 |
+- `docs/PROGRESS.md`：新增一段記錄黑暗模式切換範圍、`getDbHealth` 新欄位定義（燈號判定 = DB 最新日 vs Asia/Taipei 今日；覆蓋率分母 = `securityType="stock"` 檔數、基準日 = DB 最新交易日）、「觀察類股今日表現」用 `breakout-shared.ts` 的 `computeCandleShape/computeVolumeStrength/computeBase` 現算而非重跑 screening 的理由（gate 會濾掉未突破的觀察股）。
+- `docs/ROADMAP.md`：對應項目打勾（若 ROADMAP 第 4 節有「Dashboard」子項）。
+- `CLAUDE.md`「前端」段：補「全站固定深色（無 toggle）」「`/` Dashboard = 資料狀態卡（行情燈號 / 股票數 / 三表覆蓋率）+ 觀察類股今日表現表」「`lib/actions/dashboard.ts`」。
+- `README.md`：若「目前功能」列了 Dashboard 內容，同步更新。

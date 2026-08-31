@@ -4,11 +4,11 @@ type Variant = "primary" | "secondary" | "danger";
 
 const styles: Record<Variant, string> = {
   primary:
-    "bg-slate-900 text-white hover:bg-slate-700 disabled:bg-slate-400",
+    "bg-blue-600 text-white hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-400",
   secondary:
-    "border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 disabled:opacity-50",
+    "border border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-50",
   danger:
-    "border border-red-300 bg-white text-red-600 hover:bg-red-50 disabled:opacity-50",
+    "border border-rose-800 bg-slate-900 text-rose-400 hover:bg-rose-950 disabled:opacity-50",
 };
 
 export function Button({

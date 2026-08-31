@@ -70,15 +70,15 @@ function WatchlistCard({ row }: { row: WatchlistRow }) {
   };
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+    <div className="rounded-lg border border-slate-800 bg-slate-900 p-5">
       {/* 標頭 */}
       <div className="flex flex-wrap items-baseline gap-3">
-        <span className="text-lg font-semibold text-slate-900">
+        <span className="text-lg font-semibold text-slate-100">
           {row.stockCode}
         </span>
-        <span className="text-slate-700">{row.name}</span>
+        <span className="text-slate-300">{row.name}</span>
         {row.source ? (
-          <span className="rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
+          <span className="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-400">
             {row.source}
           </span>
         ) : null}
@@ -102,9 +102,9 @@ function WatchlistCard({ row }: { row: WatchlistRow }) {
                   <span
                     className={
                       cp && cp > 0
-                        ? "text-red-600"
+                        ? "text-rose-400"
                         : cp && cp < 0
-                          ? "text-green-600"
+                          ? "text-emerald-400"
                           : ""
                     }
                   >
@@ -166,7 +166,7 @@ function WatchlistCard({ row }: { row: WatchlistRow }) {
       </div>
 
       {/* 買入狀態區 */}
-      <div className="mt-4 border-t border-slate-100 pt-4">
+      <div className="mt-4 border-t border-slate-800 pt-4">
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -251,7 +251,7 @@ function WatchlistCard({ row }: { row: WatchlistRow }) {
         <div className="mt-3">
           <label className="text-xs text-slate-400">備註</label>
           <textarea
-            className="mt-1 w-full rounded border border-slate-300 px-2 py-1 text-sm"
+            className="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100"
             rows={2}
             value={notes}
             disabled={isPending}
@@ -279,7 +279,7 @@ function SnapshotBlock({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded border border-slate-100 bg-slate-50 p-3">
+    <div className="rounded border border-slate-800 bg-slate-800/50 p-3">
       <div className="mb-2 flex items-baseline justify-between">
         <span className="text-xs font-semibold text-slate-500">{title}</span>
         <span className="text-xs text-slate-400">{date ?? "—"}</span>
@@ -325,7 +325,7 @@ function InputField({
       <input
         type={type}
         inputMode={type === "text" ? "decimal" : undefined}
-        className="mt-1 w-full rounded border border-slate-300 px-2 py-1 text-sm tabular-nums"
+        className="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100 tabular-nums"
         value={value}
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
