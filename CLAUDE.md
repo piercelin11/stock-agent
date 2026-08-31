@@ -18,6 +18,7 @@
 - **StockValuation**：個股每日估值（本益比/股價淨值比/殖利率/收盤價），依 `stockCode + date` 唯一。TPEx 來源沒有收盤價（`closePrice` 為 null）；虧損公司 `peRatio` 為 null。
 - **IndustryHeatSnapshot**：產業熱度每日快照（等權平均漲跌幅、漲跌家數、當日排名），依 `sectorId + date` 唯一。**不存 heatScore**——熱度分數要用時從原始欄位現算，避免公式調整後需要重刷歷史。
 - **Stock 的股本欄位**：`sharesOutstanding`（已發行普通股數）與 `sharesOutstandingUpdatedAt`。市值不落地存欄位，要用時以 `sharesOutstanding × 當日收盤價` 現算。
+- **數量單位一律「股」**：`DailyQuote.volume`、`Stock.sharesOutstanding`、`InstitutionalTrading.*NetBuy`、`TechnicalIndicator.volumeMa20`，以及日後任何「數量」欄位，統一存「股」。原始資料源若以「張」計（1 張 = 1000 股，如融資融券的 TWSE `MI_MARGN` / TPEx `margin/balance`），入庫時 ×1000 轉「股」，並在該 model 的欄位註解標明「原始為張，入庫 ×1000」。這樣跨欄位計算（如「融資餘額 ÷ volumeMa20」）不需再換算。
 
 ## 資料來源與限制
 
@@ -41,6 +42,13 @@
 
 ## 開發慣例
 
+- **每個新任務開始前先 `git branch --show-current` 確認分支**：
+  - 分支名跟新任務主題**明顯不符**（例如在 `feat/watchlist-flow-4` 上要開始做「盤中提醒」）→ 停下來問使用者要哪一種，得到答覆才動手：
+    (A) 從當前分支直接切新分支（`git checkout -b feat/xxx`，新工作疊在現有未合併的工作上）；
+    (B) 先把當前分支合併/發 PR 回 `main`，再從 `main` 開新分支（**合併是使用者才能下的決定，選 B 時還要再確認「merge 進 main 還是先發 PR」，不要自作主張直接 merge**）；
+    (C) 就在當前分支繼續改。
+  - 分支名還算相符、或使用者已說「就在這改」→ 直接做，不用每次問。
+  - **在 `main` 上絕不直接改**——一定先開 feature 分支（既有規範，這裡重申）。
 - Prisma model 單數命名（`Stock` 不是 `Stocks`），欄位用 camelCase（`stockCode` 不是 `stock_code`）。
 - **套件管理器是 pnpm**（2026-08-28 從 npm 轉換）。`package.json` 的 `packageManager` 欄位鎖 `pnpm@8.15.4`（corepack）。`.npmrc` 設 `node-linker=hoisted`——扁平 `node_modules` 佈局，讓 `generated/prisma` client、tsx 腳本、plist 的絕對路徑都能照舊解析，代價是放棄 pnpm 的嚴格 phantom-dependency 檢查。指令一律 `pnpm ...`（`pnpm dev` / `pnpm tsx scripts/...` / `pnpm prisma ...` / `pnpm exec tsc --noEmit`）。lockfile 是 `pnpm-lock.yaml`，`package-lock.json` 已刪。
 - 新增/更新基礎資料（股票清單、產業別）用 `pnpm prisma db seed`（會執行 `prisma/seed.ts`），不要每次手寫新腳本。
@@ -89,7 +97,7 @@
 
 ## 既有腳本
 
-`scripts/` 依用途分子資料夾：`pipeline/`（每日自動跑）、`screening/`（要選股時手動跑）、`backfill/`（偶爾手動回補）、`lib/`（純函式庫 + 撈 DB helper，多處共用）、`archive/`（已停用、留著參考，不刪不維護）。移動腳本時記得一併更新這裡與 README 的路徑。（`scripts/backtest/` 已隨回測系統擱置移除，見下方「回測系統 — 已擱置」段。）
+`scripts/` 依用途分子資料夾：`pipeline/`（每日自動跑）、`screening/`（要選股時手動跑）、`backfill/`（偶爾手動回補）、`lib/`（純函式庫 + 撈 DB helper，多處共用）、`archive/`（已停用、留著參考，不刪不維護）。移動腳本時記得一併更新這裡與 README 的路徑。（`scripts/backtest/` 已隨回測系統放棄移除，見下方「回測系統 — 已放棄」段。）
 
 ### `scripts/pipeline/` — 每日排程
 
@@ -107,15 +115,16 @@
 - **`check-intraday-breakout.ts`**：盤中一次性快照篩選，把 `calculate-breakout-strength.ts` 的三層邏輯套用在 `mis.twse.com.tw` 即時報價上（社群逆向工程端點，非官方文件）。**一次性手動執行，不排程、不接進 daily-pipeline**，不支援 `--date`。批次查詢（120 檔/批，1.5 秒節流），`elapsedRatio` 現算預估全天量。與 `calculate-breakout-strength.ts` 評分邏輯 100% 共用，但當日 close/volume/OHLC/布林上軌全是即時或估計值（vs 盤後版的定案值），比較基準日也差一天（即時價 vs T-1 上軌）。結果輸出至 `data/intraday-breakout-snapshots/{timestamp}.json`。匯出 `checkIntradayBreakout({ prisma?, config?, now? })`（`main()` 為薄殼；`now` 供回測注入時間，預設 `new Date()`），**回傳 `IntradaySnapshotOutput`（`results` + `stats` + `warnings` + `queriedAt` + `elapsedRatio`）供前端 action 直接取用**（落地/CLI 輸出不變，結果檔多一個 `warnings` 欄位）。執行時每掃完一批 MIS 就原子覆寫 `data/intraday-breakout-snapshots/progress.json`（`fetchedBatches` 遞增，供背景任務輪詢）。MIS 抓取常數（`BATCH_SIZE` 等）不進 config。`pnpm tsx scripts/screening/check-intraday-breakout.ts`。
 - **`_run-intraday-scan.ts`**：被 `lib/actions/intraday.ts` 的 `startIntradayScan()` spawn 的內部 runner（底線前綴 = 非手動執行入口）。建 `prisma` → 呼叫 `checkIntradayBreakout({ prisma })` → 最外層覆寫 `progress.json` 的 `done` / `error` 終態（逐批進度由 `checkIntradayBreakout` 內部負責，職責分工）。不排程、不接進 daily-pipeline。
 
-### 回測系統 — 已擱置（2026-08-30）
+### 回測系統 — 已放棄（2026-08-31）
 
-回測系統（ROADMAP 第 3 節，Layer 0～Layer 3 + 訓練/驗證切分 + 完整儀表板 UI）**已從 `main` 移除**，完整實作保留在 `feat/backtest-ui-3.6-3.7` 分支（回測第 4 批做完的狀態）。移除的檔案：`scripts/backtest/*`、`scripts/lib/backtest-{replay,stats,stats.test,config-hash}.ts`、`lib/actions/backtest.ts`、`app/backtest/*`、`components/{BacktestRunner,BacktestSummary,ForwardReturnsBuilder}.tsx` 及 `components/backtest/*`。
+回測系統（ROADMAP 第 3 節，Layer 0～Layer 3 + 訓練/驗證切分 + 完整儀表板 UI）**已從 `main` 移除，且不再撿回**。2026-08-30 曾因效能問題擱置，2026-08-31 決定直接放棄這條路——參數校準改用「肉眼看單日排名 + 實盤觀察」。完整實作凍結在 `feat/backtest-ui-3.6-3.7` 分支（回測第 4 批做完的狀態），僅供參考。移除的檔案：`scripts/backtest/*`、`scripts/lib/backtest-{replay,stats,stats.test,config-hash}.ts`、`lib/actions/backtest.ts`、`app/backtest/*`、`components/{BacktestRunner,BacktestSummary,ForwardReturnsBuilder}.tsx` 及 `components/backtest/*`。
 
-擱置原因：`runBacktestSummary` 進儀表板時把整個 run 的 `raw-factors/*.jsonl` 一次 `JSON.parse` 進記憶體，即使「一年 breakout」也讓 Next dev server heap OOM（8 GB 打滿）。要修得改成「逐日串流 replay、只累積候選 picks」，不是小改。決定先擱置、專心做 ROADMAP 第 4 節（選股→挑股→觀察清單）。
+放棄原因：`runBacktestSummary` 進儀表板時把整個 run 的 `raw-factors/*.jsonl` 一次 `JSON.parse` 進記憶體，即使「一年 breakout」也讓 Next dev server heap OOM（8 GB 打滿）。要修得把 Layer 0 讀取整個改成逐日串流，投入產出比不划算。
 
-要撿回來：`git checkout feat/backtest-ui-3.6-3.7`，或把該分支 merge / cherry-pick 回來後,先做「Layer 0 讀取改逐日串流」再接 UI。`data/backtest-runs/` `data/backtest-cache/` 是 `.gitignore` 的執行產物,刪了重跑腳本即重生。
-
-（`scripts/lib/breakout-shared.ts` / `accumulation-shared.ts` 的 `fetchXxxRawInputs` helper 是回測第 3 批為 Layer 0 抽出的，選股腳本本身不用；分支撿回時會一起回來。留在 `main` 上不影響選股腳本。）
+**留在 `main` 的殘留物**（都是回測前置抽出的，選股腳本正式跑不用，但留著無害、不要刪）：
+- `scripts/lib/{breakout,accumulation}-shared.ts` 的 config 三件組（`XxxConfig` / `DEFAULT_XXX_CONFIG` / `resolveXxxConfig`）與 `fetchXxxRawInputs` helper。
+- `scripts/lib/types.ts` 的 `DeepPartial<T>`。
+- 這些讓「用 config 覆蓋參數跑一次比對排名」這種輕量校準仍可行。
 
 ### `scripts/backfill/` — 歷史回補（偶爾手動）
 
@@ -132,7 +141,7 @@
 - **`breakout-shared.ts`**：`calculate-breakout-strength.ts` / `check-intraday-breakout.ts` 共用（無 CLI，但 import 了 `PrismaClient` 型別 + 多個查 DB 的 helper）。內容：舊 `GATES`/`WEIGHTS`/`TRIGGER_VOLUME_RATIO` 等常數（保留）、`BreakoutConfig`/`DEFAULT_BREAKOUT_CONFIG`/`resolveBreakoutConfig`、`rankScore`/`clip`，以及 `computeVolumeStrength`/`computeBreakoutMargin`/`computeFirstBar`/`computeBase`/`computeProximityToHigh`/`computeMarketWideReturns`/`computeCandleShape` 七項評分函式。**撈 DB helper**（2026-08-29 為回測 Layer 0 抽入，選股腳本正式跑也可用）：`fetchTodayQuotes` / `fetchIndicatorsForDate` / `fetchHistoryWindow` / `fetchBreakoutRawInputs(prisma, date, windows, codes?)`（回傳每股 `{ quote, indicator, prevTradingDate, firstBarSeries, history, rsCloseSeries }`；`codes` 省略 = 全市場；`windows` 帶視窗長度）。**已抽進 `config.score.curves` 的曲線轉折點**：`computeVolumeStrength`（2×→40/6×→100）、`computeBreakoutMargin`（3% 轉折 + 每 1% 扣 5 分 + 下限 60）、`computeBase`（0.6/0.4 權重 + duration 封頂 40 天）。`computeCandleShape`/`computeProximityScale`/`computeFirstBar`/`computeBase` 的 p25 門檻維持寫死。`GATES.minMarketCap` 為 30 億。
 - **`accumulation-shared.ts`**：`calculate-accumulation-score.ts` 用。純評分函式無 Prisma；2026-08-29 起追加的 `fetchAccumulationRawInputs`（為回測 Layer 0 抽入）import `PrismaClient` 型別且查 DB（比照 `breakout-shared.ts`）。內容：舊視窗/門檻/權重常數（保留，`INSTITUTIONAL_WINDOW_DAYS=20`、`SQUEEZE_VOLUME_WINDOW_DAYS=5`、`MIN_AVG_VOLUME_SHARES`、`READINESS_FLOOR` 等）、`AccumulationConfig`/`DEFAULT_ACCUMULATION_CONFIG`/`resolveAccumulationConfig`、`rankScore`/`clip`、`computeTrustRawMetrics`/`computeOtherInstitutionRatio`/`computeQuietVolumeRatio`/`combineChipScore`/`combineTrustScore`/`computeReadinessCoefficient`/`combineFinalScore`，以及 `fetchAccumulationRawInputs(prisma, date, codes, volumeMa20ByCode, windows)`（從 `buildFactorInputs` 抽出、去掉門檻篩選）。壓縮度分數沿用 `breakout-shared.ts` 的 `computeBase`，曲線參數取 `DEFAULT_BREAKOUT_CONFIG.score.curves.base`。
 
-（`backtest-replay.ts` / `backtest-stats.ts` / `backtest-stats.test.ts` / `backtest-config-hash.ts` 隨回測系統擱置移出 `main`，見上方「回測系統 — 已擱置」段。）
+（`backtest-replay.ts` / `backtest-stats.ts` / `backtest-stats.test.ts` / `backtest-config-hash.ts` 隨回測系統放棄移出 `main`，見上方「回測系統 — 已放棄」段。）
 
 ### `scripts/archive/` — 已停用，不維護
 
