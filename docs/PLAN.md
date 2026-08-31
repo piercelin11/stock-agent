@@ -1,422 +1,469 @@
-# PLAN：大盤濾網（市場狀態燈號）
+# PLAN：技術指標只算當天 + 首頁「立即更新資料」按鈕（跑 daily pipeline）
 
-ROADMAP 4.5.1。做一個**獨立於「三層選股漏斗」之外**的市場狀態模組：輸出 `bullish` / `neutral` / `bearish` 三段標籤，顯示在首頁 banner + `/screening` 頁頂，供人工在「要不要進場」「部位大小」上判斷。**不參與個股評分、不做硬性 gate、不排除任何股票**——空頭時照跑選股、資料照存，只是醒目警示 + 建議降低單筆風險預算。
+兩個獨立小改，一次做：
 
-這份是單一任務的實作規格書，做完即被下一份 PLAN 取代；穩定知識完成後回寫 `CLAUDE.md`，過程紀錄回寫 `docs/PROGRESS.md`，ROADMAP 4.5.1 對應項目打勾。
+1. **`calculateTechnicalIndicators` 加「只算最新一天」模式**，`daily-pipeline.ts` 第 4 步改用它 → pipeline 從 ~10 分鐘降到秒級。CLI 預設仍是全歷史重算，不影響任何現有手動用法。
+2. **首頁「資料狀態」卡加一顆按鈕**，按下去 spawn 子進程跑 `daily-pipeline.ts`，粗粒度進度（跑多久 + 活著沒 + log 尾巴），可離開頁面、切回來重連。**不改 `daily-pipeline.ts` 的結構 / 介面 / 退出碼**（launchd 那條路照舊）。
+
+分支：`feat/margin-trading`（延續，融資融券那批已做完）。
+
+這份是單一任務的實作規格書，做完即被下一份 PLAN 取代；穩定知識回寫 `CLAUDE.md`，過程紀錄回寫 `docs/PROGRESS.md`。
 
 ---
 
-## 0. 這一批的邊界
+## 0. 邊界
 
 **做的事：**
 
-1. **TAIEX 日線落地**：`SecurityType` enum 加 `index` 值 → 建 `Stock`（`code="TAIEX"`）→ 寫一支 backfill 腳本抓 FinMind `TaiwanStockPrice` 的 `TAIEX` 進 `DailyQuote` → 讓 `calculate-technical-indicators.ts` 能算 TAIEX 的 MA60 / 帶寬。
-2. **市場狀態純函式** `scripts/lib/market-regime.ts`：三維度合成三段式。
-3. **pipeline 步驟** `scripts/pipeline/calculate-market-regime.ts`：每日算一次，寫 `data/market-regime/{date}.json`（不落地 DB）。接進 `daily-pipeline.ts`。
-4. **Server Action** `lib/actions/market-regime.ts`：讀最新的 regime JSON，回可序列化物件。
-5. **前端**：首頁 banner（regime 燈號 + 三段對應部位建議文字）＋ `/screening` 頁頂燈號。
+1. `calculateTechnicalIndicators(codes?, options?)` 加 `options.mode: "full" | "latest"`（預設 `"full"`）。`"latest"` 模式：每支股票只撈最近約 250 筆 `DailyQuote` 當輸入、只 `upsert` 最新一筆日期的指標。
+2. `daily-pipeline.ts` 第 4 步：`calculateTechnicalIndicators(undefined, { mode: "latest" })`。這是 pipeline 內唯一改動，對外行為只有「變快」。
+3. `lib/actions/pipeline.ts`（新）：`runDailyPipeline()` spawn 子進程 + `getDailyPipelineStatus()` 讀狀態。單一任務鎖。
+4. `components/dashboard/PipelineRunner.tsx`（新，client component）：按鈕 + 輪詢 + 粗進度顯示 + 切頁重連。
+5. `app/page.tsx`：「資料狀態」卡塞 `<PipelineRunner />`（按鈕 + 狀態列）。
+6. `.gitignore`：加 `/data/daily-pipeline-runs/`。
 
-**分兩階段實作（同一份 PLAN，不同 commit）：**
+**明確不做：**
 
-- **Step 1**：只做「市場寬度」單維度（零新資料，`DailyQuote` + `TechnicalIndicator` 現成），先讓三段燈號上線。含第 2/3/4/5 項的骨架，`market-regime.ts` 先只算 breadth 維度。
-- **Step 2**：TAIEX 落地（第 1 項）後，補「指數位置 + 均線斜率」兩維度，`market-regime.ts` 變成三票合成。
-
-**明確不在範圍（留給後續）：**
-
-- **regime 落地 DB / 寫 `AnalysisResult`** → 不做。理由：整個市場每天一個標籤、資訊量小、盤中會多次取（允許一天多筆）、不做回測不需要歷史查詢 → 建表不划算。走 JSON 檔（比照 `data/*-results/`、`data/intraday-breakout-snapshots/`）。
-- **盤中即時 regime** → 不做。這批 regime 只從資料庫算（盤後 `daily-pipeline` 每日一次），盤中看到的是上一個交易日收盤定案值。盤中要看即時大盤狀態，等 ROADMAP 4.5.3 路線 A 把「即時報價抓取」基礎設施建好後再評估要不要接（現在單為 regime 自己搭一套即時抓取不划算）。`data/market-regime/{date}.json` 用「一天一檔」命名，未來要加盤中版塞 `data/market-regime/intraday/{timestamp}.json` 即可，兩者不打架。
-- **regime 影響選股結果 / 部位計算自動化** → 不做。只做「顯示 + 文字建議」，人工判斷。
-- **三段門檻的校準** → 先用本 PLAN 寫死的值，日後肉眼對照盤感再調（`market-regime.ts` 的門檻集中成一個 `const` 物件，方便改）。
-- **006208 或其他指數** → 只做 TAIEX。
+- **`daily-pipeline.ts` 加 `isMain` guard / progress callback / 7 步進度條** → 不做。它目前「import 即執行 `main()`」的特性正是 `lib/actions/pipeline.ts` 要利用的（spawn 它當獨立腳本跑）。進度只做粗粒度（子進程存活 + log tail），不做逐步。
+- **技術指標「最近 N 天」** → 只做「當天」（`mode: "latest"` = 最新一筆日期）。使用者已拍板只算當天；pipeline 漏跑那天的指標事後手動 `calculate-technical-indicators.ts <code>` 補。
+- **按鈕跑「單一步驟」（只補報價 / 只補融資融券…）** → 不做，這批只有「跑完整 pipeline」一顆按鈕。
+- **`daily_pipeline.plist` 部署 / 修改** → 不碰（本來就還沒建立）。
+- **並發多使用者 / 佇列** → 單機自用，`progress.json` 單檔鎖就夠。
 
 ---
 
-## 1. TAIEX 日線落地（Step 2 前置）
+## 1. `calculateTechnicalIndicators` 加 `mode: "latest"`
 
-### 1.1 schema：`SecurityType` 加 `index`
+檔案：`scripts/pipeline/calculate-technical-indicators.ts`
 
-```prisma
-enum SecurityType {
-  stock
-  etf
-  preferred
-  warrant
-  bond
-  index   // 大盤指數（目前只有 TAIEX），僅供大盤濾網算 MA60/斜率，不進選股
-  other
-}
-```
-
-Migration 只有 `ALTER TYPE "SecurityType" ADD VALUE 'index'`，**不動任何現有 row**。`pnpm prisma migrate dev --name add_index_security_type` → `pnpm prisma generate`。
-
-> **Prisma 7 note**：`ADD VALUE` 在部分 Postgres 版本不能在 transaction 內跑。若 `migrate dev` 報 `ALTER TYPE ... ADD VALUE cannot run inside a transaction block`，把生成的 migration.sql 的 `BEGIN/COMMIT` 拿掉（或分成獨立 migration）。實作時遇到再處理。
-
-### 1.2 建 `Stock` 記錄
-
-`TAIEX` 不在 seed 的股票清單裡（seed 來源是 `TaiwanStockInfo`，指數不在內）。用一次性 upsert 建：
+### 1.1 現況
 
 ```ts
-await prisma.stock.upsert({
-  where: { code: "TAIEX" },
-  update: {},
-  create: {
-    code: "TAIEX",
-    name: "發行量加權股價指數",
-    market: "TWSE",
-    securityType: "index",
-    sectorId: null,
-  },
-});
-```
-
-放在 backfill 腳本開頭（比照 `backfill-benchmark-quotes.ts` 檢查 `Stock` 是否存在的邏輯，改成 upsert 自建）。
-
-### 1.3 backfill 腳本 `scripts/backfill/backfill-index-quotes.ts`
-
-**照抄 `backfill-benchmark-quotes.ts` 的結構**（FinMind `TaiwanStockPrice`、`REQUEST_DELAY_MS`、`BACKFILL_START_DATE` 覆蓋、upsert `DailyQuote`），差異：
-
-- `data_id` = `"TAIEX"`（FinMind 的加權指數代號，實作時先用一支測試腳本確認 `TaiwanStockPrice?data_id=TAIEX` 有回資料；若沒有，改用 `dataset=TaiwanStockTotalReturnIndex` 或 `TaiwanVariousIndicators5Seconds` 的日彙總——**開工第一步先驗這個**）。
-- 開頭 upsert `Stock`（1.2）。
-- `securityType` 已是 `index`，寫 `DailyQuote` 時 `source: "TWSE"`。
-- `volume`：指數沒有成交股數概念，FinMind 回的 `Trading_Volume` 是全市場成交量，照存即可（不會被選股用到，`calculate-technical-indicators.ts` 算 `volumeMa20` 對 TAIEX 沒意義但無害）。
-- 註解註明：**TAIEX 這筆 `DailyQuote` 只給大盤濾網算 MA60/帶寬用，不是個股、不進任何選股候選池**。
-
-指令：`pnpm tsx scripts/backfill/backfill-index-quotes.ts`（`BACKFILL_START_DATE=YYYY-MM-DD` 覆蓋，預設 `2020-01-01`）。
-
-### 1.4 讓 `calculate-technical-indicators.ts` 算 TAIEX
-
-現況：`calculateTechnicalIndicators(codes?)` 的 `findMany` 篩 `securityType: "stock"`，`TAIEX`（`securityType: "index"`）**不會被選到**。
-
-改法（最小改動）：`where` 從 `{ securityType: "stock", ...codes }` 改成 `{ OR: [{ securityType: "stock" }, { code: "TAIEX" }], ...codes }`。
-
-- 傳 `codes` 時（單股補算）維持原行為（`code: { in: codes }` 疊上去，`TAIEX` 只有在 `codes` 含 `"TAIEX"` 時才算）。
-- 不傳時全市場一般股票 + TAIEX。
-- TAIEX 的 MACD/RSI/ATR 等分項算出來無妨，大盤濾網只讀 `ma60` 和 `bollingerBandwidth`（斜率用 `ma60` 序列現算，不另存欄位）。
-
-log 的「共 N 支一般股票待計算」文案順手改成「共 N 支（含 TAIEX）」。
-
-### 1.5 首次回補 + 驗證
-
-1. `pnpm tsx scripts/backfill/backfill-index-quotes.ts` → TAIEX `DailyQuote` 補到 2020-01-02 ~ 今（約 1600+ 筆）。
-2. `pnpm tsx scripts/pipeline/calculate-technical-indicators.ts TAIEX` → 單獨補 TAIEX 的 `TechnicalIndicator`。
-3. 查 DB 抽驗：`TAIEX` 最新一筆 `TechnicalIndicator.ma60` 不為 null、`bollingerBandwidth` 不為 null，`ma60` 數量級對得上大盤點數（萬點級）。
-
----
-
-## 2. 市場狀態純函式 `scripts/lib/market-regime.ts`
-
-**純函式，無 CLI。** 可 import `PrismaClient` 型別 + 查 DB helper（比照 `breakout-shared.ts` 的定位——純函式庫但允許查 DB）。
-
-### 2.1 對外介面
-
-```ts
-import type { PrismaClient } from "../../generated/prisma/client";
-
-export type RegimeLabel = "bullish" | "neutral" | "bearish";
-
-export interface DimensionScore {
-  score: -1 | 0 | 1;
-  degraded: boolean;   // 資料不足 → score 記 0 且 degraded
-  detail: Record<string, number | null>;  // 該維度的原始數值（顯示/除錯用）
-}
-
-export interface MarketRegimeResult {
-  date: string;              // YYYY-MM-DD（DB 最新交易日）
-  label: RegimeLabel;
-  totalScore: number;        // -3 ~ +3（Step 1 只有 breadth 時 -1 ~ +1）
-  dimensions: {
-    indexPosition: DimensionScore | null;   // Step 1 為 null
-    ma60Slope: DimensionScore | null;       // Step 1 為 null
-    breadth: DimensionScore;
-  };
-  stage: "step1-breadth-only" | "step2-full";
-}
-
-export interface CalculateRegimeOptions {
-  prisma: PrismaClient;      // 一律外部傳（pipeline 傳自建的、action 傳單例）
-  config?: Partial<RegimeConfig>;
-}
-
-export async function calculateMarketRegime(
-  date: Date,
-  options: CalculateRegimeOptions,
-): Promise<MarketRegimeResult>;
-```
-
-### 2.2 門檻常數（集中，方便日後校準）
-
-```ts
-export interface RegimeConfig {
-  indexPosBufferDays: number;   // 指數位置維度的「連續 N 交易日」緩衝
-  ma60SlopeLookbackDays: number; // MA60 斜率回看天數
-  ma60SlopeUpThreshold: number;  // MA60 (今 - N日前) / N日前 > 此值 → +1（如 0.005 = 0.5%）
-  ma60SlopeDownThreshold: number; // < -此值 → -1
-  breadthBullPct: number;   // 站上 MA60 佔比 > 此值 → +1（如 55）
-  breadthBearPct: number;   // < 此值 → -1（如 45）
-  bullishTotalScore: number; // totalScore >= 此值 → bullish（三維時 2）
-  bearishTotalScore: number; // <= 此值 → bearish（三維時 -2）
-}
-
-export const DEFAULT_REGIME_CONFIG: RegimeConfig = {
-  indexPosBufferDays: 3,
-  ma60SlopeLookbackDays: 5,
-  ma60SlopeUpThreshold: 0.005,
-  ma60SlopeDownThreshold: 0.005,
-  breadthBullPct: 55,
-  breadthBearPct: 45,
-  bullishTotalScore: 2,
-  bearishTotalScore: -2,
-};
-```
-
-**Step 1（只有 breadth）的三段判定**：`breadth.score === 1` → `bullish`；`=== -1` → `bearish`；`=== 0` → `neutral`。（不套 `bullishTotalScore`，因為只有一維、範圍 -1~+1。）
-
-**Step 2（三維）**：`totalScore >= bullishTotalScore` → `bullish`；`<= bearishTotalScore` → `bearish`；其餘 `neutral`。
-
-### 2.3 維度 A：市場寬度 breadth（Step 1 就做）
-
-**定義**：DB 最新交易日，全市場 `securityType="stock"` 且當日有 `DailyQuote` 的股票中，`收盤 > 該股當日 TechnicalIndicator.ma60` 的佔比（%）。
-
-實作：
-
-```ts
-// 1. 該日全市場一般股票的 close（排除 TAIEX 本身）
-const quotes = await prisma.dailyQuote.findMany({
-  where: { date, stock: { securityType: "stock" } },
-  select: { stockCode: true, close: true },
-});
-// 2. 同日 TechnicalIndicator.ma60
-const indicators = await prisma.technicalIndicator.findMany({
-  where: { date, stockCode: { in: quotes.map(q => q.stockCode) } },
-  select: { stockCode: true, ma60: true },
-});
-// 3. 逐檔比對：ma60 非 null 才計入分母
-```
-
-- 分母 = `ma60` 非 null 的檔數；分子 = `close > ma60` 的檔數。
-- `pct = 分子 / 分母 * 100`。
-- `pct > breadthBullPct` → `score = 1`；`< breadthBearPct` → `score = -1`；之間 → `0`。
-- **degraded**：分母 < 500（正常應 1000+）→ `score = 0`, `degraded = true`（資料不齊，不表態）。
-- `detail`: `{ aboveMa60: 分子, total: 分母, pct }`。
-
-### 2.4 維度 B：指數位置 indexPosition（Step 2）
-
-TAIEX 收盤 vs 自己的 MA60，加「連續 N 交易日」緩衝：
-
-```ts
-// TAIEX 近 (indexPosBufferDays) 筆 close + 同日 ma60，新到舊
-const rows = await fetchTaiexCloseVsMa60(prisma, date, config.indexPosBufferDays);
-// rows: { date, close, ma60 }[]，長度可能 < N（早期資料不足）
-```
-
-- 全部 N 筆都 `close > ma60` → `score = 1`。
-- 全部 N 筆都 `close < ma60` → `score = -1`。
-- 混合（有的在上有的在下）→ `score = 0`（緩衝過濾 whipsaw：站上/跌破要「站穩」N 天才表態）。
-- **degraded**：`rows.length < N` 或任一筆 `ma60` 為 null → `score = 0`, `degraded = true`。
-- `detail`: `{ latestClose, latestMa60, daysAbove, daysBelow }`。
-
-### 2.5 維度 C：MA60 斜率 ma60Slope（Step 2）
-
-TAIEX 的 MA60 近 `ma60SlopeLookbackDays` 交易日是否上彎（只看價格穿越會被假跌破騙，斜率確認趨勢方向）：
-
-```ts
-// TAIEX 近 (ma60SlopeLookbackDays + 1) 筆 ma60，新到舊
-const ma60Series = await fetchTaiexMa60Series(prisma, date, config.ma60SlopeLookbackDays + 1);
-const latest = ma60Series[0];
-const past = ma60Series[ma60SlopeLookbackDays]; // N 日前
-const slope = (latest - past) / past;
-```
-
-- `slope > ma60SlopeUpThreshold` → `score = 1`。
-- `slope < -ma60SlopeDownThreshold` → `score = -1`。
-- 之間 → `0`（走平）。
-- **degraded**：序列長度不足、或 `past` <= 0、或任一 `ma60` 為 null → `score = 0`, `degraded = true`。
-- `detail`: `{ latestMa60, pastMa60, slopePct: slope * 100 }`。
-
-### 2.6 合成
-
-```ts
-const dims = stage === "step2-full"
-  ? [indexPosition, ma60Slope, breadth]
-  : [breadth];
-const totalScore = dims.reduce((s, d) => s + d.score, 0);
-// label 判定見 2.2
-```
-
-`stage` 由「TAIEX 的 `TechnicalIndicator` 是否有該日資料」自動決定：有 → `step2-full`；沒有 → `step1-breadth-only`（優雅降級，TAIEX 資料還沒補時 pipeline 也不會炸）。
-
-### 2.7 查 DB helper（放同檔）
-
-- `fetchBreadthInputs(prisma, date)` → `{ aboveMa60, total, pct }`（2.3）
-- `fetchTaiexCloseVsMa60(prisma, date, n)` → `{ date, close, ma60 }[]`（新到舊，`DailyQuote` join `TechnicalIndicator`，`stockCode="TAIEX"`, `date <= date`, `take: n`）
-- `fetchTaiexMa60Series(prisma, date, n)` → `(number|null)[]`（新到舊）
-- `hasTaiexIndicatorForDate(prisma, date)` → `boolean`（決定 `stage`）
-
----
-
-## 3. pipeline 步驟 `scripts/pipeline/calculate-market-regime.ts`
-
-**薄殼**：建 `prisma` → 找 DB 最新交易日 → `calculateMarketRegime(latestDate, { prisma })` → 原子寫 `data/market-regime/{date}.json` → log。
-
-```ts
-export async function calculateOneDayRegime(date: Date, prisma: PrismaClient): Promise<MarketRegimeResult> {
-  const result = await calculateMarketRegime(date, { prisma });
-  const outputDir = join(__dirname, "..", "..", "data", "market-regime");
-  mkdirSync(outputDir, { recursive: true });
-  // 原子寫：先寫 .tmp 再 renameSync（比照 intraday progress.json）
-  const tmpPath = join(outputDir, `${result.date}.json.tmp`);
-  const finalPath = join(outputDir, `${result.date}.json`);
-  writeFileSync(tmpPath, JSON.stringify({ ...result, generatedAt: new Date().toISOString() }, null, 2));
-  renameSync(tmpPath, finalPath);
-  return result;
-}
-```
-
-CLI（`isMain` guard）：無參數跑「DB 最新交易日」；`--date=YYYY-MM-DD` 補算指定日（backfill regime 用，可選）。
-
-**`.gitignore`**：加 `/data/market-regime/`（執行產物，比照 `/data/backtest-runs/` 等）。
-
-### 3.1 接進 `daily-pipeline.ts`
-
-在**第 4 步（技術指標）之後**新增第 5 步，原第 5 步（產業熱度）順延為第 6 步：
-
-```ts
-import { calculateOneDayRegime } from "./calculate-market-regime.js";
-// ...
-// 5. 計算大盤濾網（市場狀態燈號）
-try {
-  const latestQuote = await prisma.dailyQuote.findFirst({
-    orderBy: { date: "desc" },
-    select: { date: true },
-  });
-  if (latestQuote) {
-    const regime = await calculateOneDayRegime(latestQuote.date, prisma);
-    console.log(`大盤濾網：${regime.label}（totalScore ${regime.totalScore}, stage ${regime.stage}）`);
+export async function calculateTechnicalIndicators(codes?: string[]): Promise<{ processed: number; indicatorsWritten: number }> {
+  const stocks = await prisma.stock.findMany({ where: { OR: [{ securityType: "stock" }, { code: "TAIEX" }], ...(codes ? { code: { in: codes } } : {}) }, ... });
+  for (const stock of stocks) {
+    const quotes = await prisma.dailyQuote.findMany({
+      where: { stockCode: stock.code },
+      orderBy: { date: "asc" },
+      select: { date: true, high: true, low: true, close: true, volume: true },
+    });
+    // ...對 quotes 每一筆 i 算指標 → rows
+    for (const row of rows) {
+      await prisma.technicalIndicator.upsert({ where: { stockCode_date: { stockCode: row.stockCode, date: row.date } }, update: row, create: row });
+    }
   }
-} catch (err) {
-  // 非關鍵路徑：印警告，不 throw、不讓 pipeline 非 0 結束
-  console.warn(`[大盤濾網] 計算失敗（不中斷 pipeline）: ${err instanceof Error ? err.message : String(err)}`);
-  warningCount++;
 }
 ```
 
-**注意**：這步依賴第 4 步已把 TAIEX 的 `TechnicalIndicator` 更新（1.4 改完後，`calculateTechnicalIndicators()` 全市場跑會一起更新 TAIEX）。順序不能對調。
+全歷史重算：~2149 支 × 每支 ~1600 筆 `upsert` ≈ 340 萬筆逐筆 await，實測 ~10 分鐘。
 
-`daily_pipeline.plist`（尚未部署）不受影響。
+### 1.2 改法
+
+**簽名**：
+
+```ts
+interface CalcOptions {
+  mode?: "full" | "latest"; // 預設 "full"
+}
+
+export async function calculateTechnicalIndicators(
+  codes?: string[],
+  options: CalcOptions = {},
+): Promise<{ processed: number; indicatorsWritten: number }> {
+  const mode = options.mode ?? "full";
+  // ...
+}
+```
+
+**`quotes` 撈取**：`mode === "latest"` 時只取最近一段窗口。最長回看需求是 MA60（60）、bollinger（20）、rsi14（15）、atr20（21）、macd（26+9 EMA，但 EMA 需要更長 warm-up 才穩）、volatility20d（21）。MACD 的 EMA 拿 200 筆暖身足夠穩定。取 **`LOOKBACK = 250`** 給足餘裕：
+
+```ts
+const LOOKBACK = 250; // mode "latest" 每支撈最近這麼多筆 DailyQuote 當輸入，足夠算出最長窗口（MA60 / MACD EMA 暖身）
+
+const quotes = mode === "latest"
+  ? (await prisma.dailyQuote.findMany({
+      where: { stockCode: stock.code },
+      orderBy: { date: "desc" },
+      take: LOOKBACK,
+      select: { date: true, high: true, low: true, close: true, volume: true },
+    })).reverse() // 反轉回 asc，下游計算不變
+  : await prisma.dailyQuote.findMany({
+      where: { stockCode: stock.code },
+      orderBy: { date: "asc" },
+      select: { date: true, high: true, low: true, close: true, volume: true },
+    });
+```
+
+**`rows` → upsert**：`mode === "latest"` 時只寫最後一筆（最新日期）。指標函式吃的是整個 `closes` 陣列 + index，所以照算全部 `rows`，只挑 `rows.at(-1)` 寫：
+
+```ts
+const rowsToWrite = mode === "latest" ? rows.slice(-1) : rows;
+for (const row of rowsToWrite) {
+  await prisma.technicalIndicator.upsert({ ... });
+  indicatorsWritten++;
+}
+```
+
+> `rows.slice(-1)`：若某支 `quotes` 為空（新股當天才上市、還沒有 `DailyQuote`）→ `rows` 為空 → `slice(-1)` 也空 → 該支不寫，`processed++` 照常。與現狀一致（現狀空 `quotes` 也是不寫）。
+
+**log**：開頭那行 `console.log(\`共 ${stocks.length} 支（含 TAIEX）待計算。\`)` 後面補模式：
+
+```ts
+console.log(`共 ${stocks.length} 支（含 TAIEX）待計算。模式：${mode === "latest" ? "只算最新一天" : "全歷史重算"}`);
+```
+
+`PROGRESS_INTERVAL` 那段（`已處理 N/M`）不動。
+
+### 1.3 CLI 入口不變
+
+```ts
+const isMain = ...;
+if (isMain) {
+  const codeArgs = process.argv.slice(2).filter((a) => /^\d{4}[A-Z]?$/.test(a) || a === "TAIEX");
+  calculateTechnicalIndicators(codeArgs.length > 0 ? codeArgs : undefined)
+    // ← 不傳 options，維持 mode: "full"
+    .catch(...)
+    .finally(...);
+}
+```
+
+CLI 永遠全歷史重算（回補報價後手動重算、debug 都要全歷史），不加 `--latest` flag（要就直接跑，沒必要）。
+
+### 1.4 驗證
+
+1. `pnpm tsx scripts/pipeline/calculate-technical-indicators.ts 2330`（不帶 options）→ 仍全歷史、`TechnicalIndicator` 2330 的筆數 = 該股 `DailyQuote` 筆數（跟改之前一樣）。
+2. 寫一次性腳本呼叫 `calculateTechnicalIndicators(["2330"], { mode: "latest" })` → 只有 2330 最新一天那筆被 upsert（比對 `updatedAt` / `calculatedAt`），且該筆的 `ma60` / `bollingerBandwidth` / `rsi14` 數值與「全歷史重算」跑出來的同一天結果**一致**（誤差 0，因為 LOOKBACK=250 對這些窗口足夠）。
+3. `pnpm exec tsc --noEmit` 乾淨。
 
 ---
 
-## 4. Server Action `lib/actions/market-regime.ts`
+## 2. `daily-pipeline.ts` 第 4 步改用 `mode: "latest"`
+
+檔案：`scripts/pipeline/daily-pipeline.ts`
+
+唯一改動：
+
+```ts
+// 4. 重新計算技術指標
+try {
+  const indicatorResult = await calculateTechnicalIndicators(undefined, { mode: "latest" });
+  indicatorsProcessed = indicatorResult.processed;
+} catch (err) {
+  throw new PipelineStepError("計算技術指標", "計算失敗", err);
+}
+```
+
+**注意**：第 5 步（大盤濾網）依賴第 4 步已更新 **TAIEX 的 `ma60`**。`mode: "latest"` 的 `stocks` where 仍是 `OR: [{ securityType: "stock" }, { code: "TAIEX" }]`，TAIEX 一樣會被算最新一天，`hasTaiexIndicatorForDate()` 對「今天」仍為 true → regime 走 `step2-full`。不受影響。
+
+行為對外差異：`indicatorsProcessed` 數字不變（仍是處理股票數 ~2149），只是「寫入筆數」從 ~340 萬變 ~2149、耗時從 ~10 分鐘變數秒。退出碼 / 步驟數 / summary log 格式全不變。launchd 無感。
+
+驗證：`pnpm tsx scripts/pipeline/daily-pipeline.ts`（非交易日會提前結束也行），確認第 4 步 log 印「模式：只算最新一天」且秒級完成、後續第 5/6 步照跑。
+
+---
+
+## 3. `lib/actions/pipeline.ts`（新）
+
+**完全比照 `lib/actions/intraday.ts` 的骨架**（spawn detached + `progress.json` 原子寫 + STALE 判定），但簡化：`daily-pipeline.ts` 不寫進度檔，所以這裡的「進度」只有 `status` + 存活時間 + log 尾巴。
 
 ```ts
 "use server";
-import { readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
-import type { RegimeLabel } from "../../scripts/lib/market-regime";
 
-export interface MarketRegimeView {
-  available: boolean;
-  date: string | null;
-  label: RegimeLabel | null;
-  totalScore: number | null;
-  stage: string | null;
-  dimensions: /* 逐維 { score, degraded, detail } | null */;
-  advice: string;   // 三段對應的部位建議文字（見 4.1）
-  generatedAt: string | null;
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const REPO_ROOT = process.cwd();
+const RUN_DIR = join(REPO_ROOT, "data", "daily-pipeline-runs");
+const PROGRESS_PATH = join(RUN_DIR, "progress.json");
+
+// daily-pipeline 正常跑完約數秒～數分鐘（技術指標改 latest 後）。
+// 子進程 crash 沒寫終態 → progress.json 卡在 running。
+// startedAt 超過這個秒數還 running → 視為死掉的舊執行，允許重跑。
+const STALE_MS = 20 * 60_000; // 20 分鐘（保守，涵蓋偶發網路 retry 疊加）
+
+export interface DailyPipelineStatus {
+  status: "running" | "done" | "error";
+  startedAt: string;
+  finishedAt: string | null;
+  exitCode: number | null;
+  logTail: string[]; // log 檔最後 N 行
+  logPath: string;   // 相對 repo root，給人 debug
 }
 
-export async function getMarketRegime(): Promise<MarketRegimeView>;
+function atomicWrite(path: string, obj: unknown): void {
+  writeFileSync(`${path}.tmp`, JSON.stringify(obj, null, 2));
+  renameSync(`${path}.tmp`, path);
+}
+
+function readProgress(): DailyPipelineStatus | null {
+  if (!existsSync(PROGRESS_PATH)) return null;
+  try {
+    return JSON.parse(readFileSync(PROGRESS_PATH, "utf8")) as DailyPipelineStatus;
+  } catch {
+    return null;
+  }
+}
+
+function tailLines(path: string, n: number): string[] {
+  if (!existsSync(path)) return [];
+  try {
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).slice(-n);
+  } catch {
+    return [];
+  }
+}
 ```
 
-實作：
-- 讀 `data/market-regime/` 目錄，取檔名最大（日期最新）的 `{date}.json`（排除 `.tmp`）。
-- 沒有任何檔 → `{ available: false, ..., advice: "尚無大盤濾網資料" }`。
-- 有 → parse，組 `advice`（4.1），全部欄位是 plain object（`MarketRegimeResult` 本來就可序列化，無 `Date`/`Decimal`/`BigInt`）。
-- **只 `import type`**，不 import `market-regime.ts` 本體（避免把 `PrismaClient` 型別以外的東西、或未來的 `dotenv` 拉進 bundler；比照 `intraday.ts` 只 `import type { CandidateResult }` 的做法）。
-- 檔頭 `"use server"`，**不** import `lib/prisma.ts`（這支純讀檔，不碰 DB）。
+### 3.1 `runDailyPipeline()`
 
-### 4.1 三段部位建議文字
+```ts
+export async function runDailyPipeline(): Promise<{ started: boolean; reason?: string }> {
+  const current = readProgress();
+  if (
+    current &&
+    current.status === "running" &&
+    Date.now() - new Date(current.startedAt).getTime() < STALE_MS
+  ) {
+    return { started: false, reason: "pipeline 執行中" };
+  }
 
-| label | advice |
-| --- | --- |
-| `bullish` | 「大盤偏多，正常執行選股與部位計畫。」 |
-| `neutral` | 「大盤中性，建議降低單筆風險預算（例如從 1.5% 調到 1%），選股照跑。」 |
-| `bearish` | 「大盤偏空，訊號照看但單筆風險預算建議壓到 0.5–1%；資料持續累積，之後可回頭驗證空頭進場績效。」 |
-| 不可用 | 「尚無大盤濾網資料（TAIEX 或技術指標未更新）。」 |
+  mkdirSync(RUN_DIR, { recursive: true });
 
-（`degraded` 維度多時，`advice` 後面附「（部分維度資料不足，判斷僅供參考）」。）
+  const startedAt = new Date().toISOString();
+  const stamp = startedAt.replace(/[:.]/g, "-");
+  const logPath = join(RUN_DIR, `${stamp}.log`);
+  const relLogPath = join("data", "daily-pipeline-runs", `${stamp}.log`);
+
+  // 先寫 running，讓 client 第一次輪詢就有狀態
+  atomicWrite(PROGRESS_PATH, {
+    status: "running",
+    startedAt,
+    finishedAt: null,
+    exitCode: null,
+    logTail: [],
+    logPath: relLogPath,
+  } satisfies DailyPipelineStatus);
+
+  const tsxCli = join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
+  const script = join(REPO_ROOT, "scripts", "pipeline", "daily-pipeline.ts");
+  const out = openSync(logPath, "a");
+
+  const child = spawn(process.execPath, [tsxCli, script], {
+    detached: true,
+    stdio: ["ignore", out, out],
+    cwd: REPO_ROOT,
+  });
+
+  // 監聽結束，覆寫終態。detached + unref 後仍可在本 process 存活期間收到 exit；
+  // 若 Next 進程自己重啟，靠 getDailyPipelineStatus() 的 STALE 判定兜底。
+  child.on("exit", (code) => {
+    atomicWrite(PROGRESS_PATH, {
+      status: code === 0 ? "done" : "error",
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      exitCode: code,
+      logTail: tailLines(logPath, 12),
+      logPath: relLogPath,
+    } satisfies DailyPipelineStatus);
+  });
+  child.unref();
+
+  return { started: true };
+}
+```
+
+> **為什麼用 `child.on("exit")` 而不是像 intraday 那樣讓子進程自己寫終態**：`daily-pipeline.ts` 不能改（要保持 launchd 用的那支乾淨）。所以由 parent（Next server action 進程）監聽 exit 覆寫。風險：dev 模式 Next 進程 hot-reload 重啟時這個 listener 會丟失 → `progress.json` 卡在 running。靠 `STALE_MS`（20 分）兜底：超時後 `getDailyPipelineStatus()` 回報 `error`（見 3.2），使用者可重按。生產 `pnpm start` 不 hot-reload，正常情況 listener 都在。
+
+### 3.2 `getDailyPipelineStatus()`
+
+```ts
+export async function getDailyPipelineStatus(): Promise<DailyPipelineStatus | null> {
+  const p = readProgress();
+  if (!p) return null;
+
+  // running 但超過 STALE → listener 可能已隨進程重啟丟失，回報 error（log tail 幫 debug）
+  if (
+    p.status === "running" &&
+    Date.now() - new Date(p.startedAt).getTime() >= STALE_MS
+  ) {
+    return {
+      ...p,
+      status: "error",
+      finishedAt: p.finishedAt ?? new Date().toISOString(),
+      logTail: tailLines(join(REPO_ROOT, p.logPath), 12),
+    };
+  }
+
+  // running 中：即時補上最新 log tail（progress.json 裡的 logTail 只在終態才寫）
+  if (p.status === "running") {
+    return { ...p, logTail: tailLines(join(REPO_ROOT, p.logPath), 12) };
+  }
+
+  return p;
+}
+```
+
+**不 import 任何 `scripts/` 東西**（連 type 都不用），純檔案 IO + spawn。
 
 ---
 
-## 5. 前端
+## 4. `components/dashboard/PipelineRunner.tsx`（新）
 
-### 5.1 首頁 banner（`app/page.tsx`）
-
-在 `<h1>Dashboard</h1>` 之下、「資料狀態」Card 之上，插一條 regime banner：
+Client component。骨架照 `ScreeningPanel.tsx` 的 intraday 輪詢段（`pollRef` + `setInterval` + 切頁 `useEffect` 重連 + 卸載 `clearInterval`）。
 
 ```tsx
-const regime = await getMarketRegime();
-// ...
-<RegimeBanner regime={regime} />
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { runDailyPipeline, getDailyPipelineStatus, type DailyPipelineStatus } from "../../lib/actions/pipeline";
+
+const POLL_MS = 3000;
+
+export function PipelineRunner() {
+  const [status, setStatus] = useState<DailyPipelineStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  }, []);
+
+  const startPolling = useCallback(() => {
+    stopPolling();
+    pollRef.current = setInterval(async () => {
+      const s = await getDailyPipelineStatus();
+      setStatus(s);
+      if (s && s.status !== "running") {
+        stopPolling();
+        setBusy(false);
+        // 跑完刷新頁面資料（覆蓋率 / 燈號）
+        if (s.status === "done") window.location.reload();
+      }
+    }, POLL_MS);
+  }, [stopPolling]);
+
+  // 掛載時若已有 running 的執行（別的分頁 / 重整前觸發的）→ 接管輪詢
+  useEffect(() => {
+    (async () => {
+      const s = await getDailyPipelineStatus();
+      setStatus(s);
+      if (s?.status === "running") { setBusy(true); startPolling(); }
+    })();
+    return stopPolling;
+  }, [startPolling, stopPolling]);
+
+  async function onRun() {
+    setErr(null);
+    setBusy(true);
+    const r = await runDailyPipeline();
+    if (!r.started) { setErr(r.reason ?? "無法啟動"); setBusy(false); return; }
+    startPolling();
+  }
+
+  const running = status?.status === "running";
+  const elapsed = status ? Math.round((Date.now() - new Date(status.startedAt).getTime()) / 1000) : 0;
+
+  return (
+    <div className="mt-2 space-y-2">
+      <button
+        onClick={onRun}
+        disabled={busy || running}
+        className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50 hover:bg-blue-500"
+      >
+        {running ? "更新中…" : "立即更新資料"}
+      </button>
+
+      {running && (
+        <p className="text-sm text-slate-400">
+          執行中… 已 {elapsed} 秒（可離開此頁，回來會接上進度）
+        </p>
+      )}
+      {status?.status === "done" && !running && (
+        <p className="text-sm text-emerald-400">上次更新完成（{status.finishedAt?.slice(11, 19)}）</p>
+      )}
+      {status?.status === "error" && (
+        <p className="text-sm text-rose-400">
+          上次執行失敗（exit {status.exitCode ?? "?"}）。log：{status.logPath}
+        </p>
+      )}
+      {err && <p className="text-sm text-rose-400">{err}</p>}
+
+      {status && status.logTail.length > 0 && (
+        <pre className="max-h-40 overflow-auto rounded bg-slate-900 p-2 text-xs text-slate-400">
+          {status.logTail.join("\n")}
+        </pre>
+      )}
+    </div>
+  );
+}
 ```
 
-`components/dashboard/RegimeBanner.tsx`（Server Component，純顯示，無互動）：
-
-- 一條橫幅 Card，左側大圓點（`bullish` 綠 `bg-emerald-500` / `neutral` 琥珀 `bg-amber-500` / `bearish` 紅 `bg-rose-500` / 不可用 灰 `bg-slate-600`）。
-- 主文字：`大盤：偏多 / 中性 / 偏空`（`label` 中文化）+ 小字 `（基準 {date}，score {totalScore}）`。
-- 次行：`advice` 文字（`text-slate-400 text-sm`）。
-- `bearish` 時整條 Card 加 `border-rose-500/40` 醒目邊框。
-- 可展開（`<details>`）看三維度明細：每維 `名稱：+1/0/-1`（degraded 標灰 + 「資料不足」），下面列 `detail` 的原始數值（寬度佔比、TAIEX close/ma60、斜率%）。Step 1 時只顯示「市場寬度」一維，另兩維顯示「待 TAIEX 資料」。
-
-台股慣例：偏多綠或紅？——**這裡用「紅漲綠跌」的反面**：市場狀態燈號用**通用號誌色**（綠=通行=偏多、紅=停=偏空、琥珀=注意=中性），跟個股漲跌色（漲紅跌綠）不同語意、不同區塊，不會混淆。RegimeBanner 註解寫明這個選擇。
-
-### 5.2 `/screening` 頁頂燈號
-
-`app/screening/page.tsx`（Server Component 外殼）在頁面標題下、`ScreeningPanel` 之上，放一個**精簡版** regime 條（同 `getMarketRegime()`，只顯示圓點 + `大盤：偏空` + `advice`，不展開明細）。抽 `components/screening/RegimeStrip.tsx`（或 `RegimeBanner` 加 `variant="strip"` prop，二選一，實作時看哪個乾淨）。
-
-目的：使用者在按「開始選股」前先看到大盤狀態，空頭時心裡有數。**不擋按鈕、不改 `runScreening` 行為。**
+要點：
+- **切走頁面**：`useEffect` 的 cleanup `stopPolling` 停輪詢，子進程不受影響（detached）。**切回來**：重新掛載時 `getDailyPipelineStatus()` 若 `running` 就接管。
+- **完成後 `window.location.reload()`**：`app/page.tsx` 是 `force-dynamic` server component，reload 會重新 `getDbHealth()` 抓到新覆蓋率 / 燈號。不用 `revalidatePath`（那要在 server action 裡、且這裡是 client 輪詢流程，reload 最直接）。
+- **同時只有一個執行**：靠 server action 的 `progress.json` 鎖，按鈕本身也 `disabled={busy || running}`。
 
 ---
 
-## 6. 實作順序與驗證
+## 5. `app/page.tsx`
 
-### Step 1（先上線，零新資料）
+「資料狀態」Card 裡，「今日行情燈號」那個 `<div>` 下方或 Card 末尾加一段。放在 grid 之外、Card 內底部最單純：
 
-1. `scripts/lib/market-regime.ts`：型別 + `DEFAULT_REGIME_CONFIG` + `fetchBreadthInputs` + breadth 維度 + 合成（`stage` 一律 `step1-breadth-only`，`hasTaiexIndicatorForDate` 回 false 時的分支）。
-2. `scripts/pipeline/calculate-market-regime.ts` + `.gitignore` + 接進 `daily-pipeline.ts` 第 5 步。
-3. `lib/actions/market-regime.ts` + `advice` 文案。
-4. `components/dashboard/RegimeBanner.tsx` + `app/page.tsx` 插入 + `/screening` 頁頂 strip。
-5. **驗證**：
-   - `pnpm tsx scripts/pipeline/calculate-market-regime.ts` → `data/market-regime/{今天或最新交易日}.json` 生成，`label` 合理（對照當前盤勢肉眼判斷），`dimensions.breadth.detail.pct` 數字合理（多頭期應 >50，空頭期 <50）。
-   - `pnpm build` 通過、`pnpm exec tsc --noEmit` 對 `scripts/` 乾淨。
-   - `pnpm dev` → 首頁 banner 顯示、`/screening` 頁頂顯示。
-   - 手動改 `DEFAULT_REGIME_CONFIG.breadthBullPct` 到極端值重跑，確認 label 跟著變（門檻生效）。
+```tsx
+import { PipelineRunner } from "../components/dashboard/PipelineRunner";
+// ...
+<Card title="資料狀態">
+  <div className="grid gap-8 sm:grid-cols-3">
+    {/* ...現有三欄不動... */}
+  </div>
+  <PipelineRunner />
+</Card>
+```
 
-### Step 2（TAIEX 落地後）
-
-6. 先寫一支 5 行測試腳本確認 FinMind `TaiwanStockPrice?data_id=TAIEX` 有回日線資料（沒有就換 dataset，見 1.3）。
-7. schema 加 `index` enum + migrate + generate。
-8. `scripts/backfill/backfill-index-quotes.ts`（含 upsert `Stock`）→ 跑首次回補。
-9. `calculate-technical-indicators.ts` 的 `where` 改 `OR` → `pnpm tsx ... TAIEX` 單獨補 TAIEX 指標 → 查 DB 驗 `ma60` / `bollingerBandwidth` 非 null。
-10. `market-regime.ts` 補 `indexPosition` + `ma60Slope` 兩維度 + `fetchTaiex*` helper + `stage` 自動判定（`hasTaiexIndicatorForDate` 回 true → `step2-full`）。
-11. `RegimeBanner` 明細展開補另兩維顯示。
-12. **驗證**：
-    - `pnpm tsx scripts/pipeline/calculate-market-regime.ts` → JSON 的 `stage` 變 `step2-full`，`dimensions.indexPosition` / `ma60Slope` 不為 null，`totalScore` 在 -3~+3。
-    - 挑一個「已知大跌段」的歷史日期用 `--date=` 補算（例：2022 年某個跌破季線的日子），確認 `label` 為 `bearish`、指數位置維度為 -1。
-    - 挑一個「多頭盤堅」的日期，確認 `bullish`、三維都 +1。
-    - `pnpm exec tsc --noEmit` / `pnpm build` 乾淨。
+（`Card` 的 children 是縱向流，grid 之後直接接 `<PipelineRunner />` 即可。若 `Card` 內部有 padding wrapper，`PipelineRunner` 的 `mt-2` 給一點間距，必要時加 `border-t border-slate-800 pt-4 mt-4`。）
 
 ---
 
-## 7. 完成後回寫
+## 6. `.gitignore`
+
+```
+/data/daily-pipeline-runs/
+```
+
+（比照既有的 `/data/market-regime/`、`/data/intraday-breakout-snapshots/` 等執行產物。）
+
+---
+
+## 7. 實作順序與驗證
+
+1. **§1 技術指標 `mode` 參數** → §1.4 驗證（全歷史行為不變 + latest 模式數值一致）。
+2. **§2 daily-pipeline 第 4 步** → 跑一次 pipeline 確認第 4 步秒級、log 有「只算最新一天」、第 5/6 步照跑。
+3. **§3 `lib/actions/pipeline.ts`** → `pnpm exec tsc --noEmit`。
+4. **§4 `PipelineRunner.tsx` + §5 `app/page.tsx` + §6 `.gitignore`** → `tsc` 乾淨 → `pnpm build` 通過。
+5. **端到端**（需使用者 dev server，或臨時 `PORT=3123 pnpm dev` 自己起、收尾 kill 自己記的 PID）：
+   - 開 `/`，按「立即更新資料」→ 按鈕變「更新中…」、出現「已 N 秒」+ log tail 滾動。
+   - 切到 `/watchlist` 再切回 `/` → 狀態接上（仍顯示 running + 秒數繼續）。
+   - 等 pipeline 跑完 → 頁面自動 reload、覆蓋率 / 燈號更新、狀態列顯示「上次更新完成」。
+   - 立刻再按一次（趁還 running）→ 被 `progress.json` 鎖擋下、顯示「pipeline 執行中」。
+   - `data/daily-pipeline-runs/{stamp}.log` 裡是完整 pipeline stdout。
+6. **回寫文件**（§8）。
+
+驗證命令：
+- `pnpm exec tsc --noEmit`
+- `pnpm build`
+- 查資料用一次性 `pnpm tsx` 腳本（放 `scripts/_tmp-*.ts`，驗完刪）。
+
+---
+
+## 8. 完成後回寫
 
 - **`CLAUDE.md`**：
-  - 「資料表結構總覽」或「前端」段：加 `SecurityType.index` / `TAIEX` 這筆特殊 `Stock` 的說明（只給大盤濾網，不進選股）。
-  - 「既有腳本 → `scripts/pipeline/`」：加 `calculate-market-regime.ts`（第 5 步、非關鍵路徑、輸出 `data/market-regime/{date}.json` 不進 DB）。
-  - 「既有腳本 → `scripts/backfill/`」：加 `backfill-index-quotes.ts`。
-  - 「`scripts/lib/`」：加 `market-regime.ts`（純函式庫、允許查 DB、三維度三段式、門檻集中在 `DEFAULT_REGIME_CONFIG`）。
-  - 「前端 → Server Actions」：加 `market-regime.ts`（`getMarketRegime`，只讀檔不碰 DB）。
-  - `daily-pipeline.ts` 的步驟數描述（五步 → 六步）。
-- **`docs/PROGRESS.md`**：新增段落，記 Step 1 / Step 2 各自的實作內容、FinMind TAIEX dataset 實測結果、三段門檻的初始值與「未校準」狀態、breadth 佔比在當前盤勢的實測數字。
-- **`docs/ROADMAP.md`**：4.5.1 的子項打勾。
-- **`README.md`**：「目前功能」加一句大盤濾網；「使用方式」若有列 pipeline 步驟則同步。
+  - 「既有腳本 → `scripts/pipeline/`」的 `calculate-technical-indicators.ts` 條目：補「`options.mode: "full" | "latest"`，`daily-pipeline.ts` 用 `latest`（只算並 upsert 最新一天，秒級）；CLI 與不帶 options 時仍 `full`（全歷史重算）」。
+  - `daily-pipeline.ts` 條目：第 4 步改「算技術指標（`mode: "latest"`，只算當天）」；提一句「pipeline 漏跑那天的技術指標不會自動補，需手動 `calculate-technical-indicators.ts <code>`」。
+  - 「前端 → Server Actions」清單：加 `pipeline.ts`（`runDailyPipeline` / `getDailyPipelineStatus`——首頁「立即更新資料」按鈕；spawn `daily-pipeline.ts` 當獨立腳本、log 落 `data/daily-pipeline-runs/{stamp}.log`、`progress.json` 粗粒度狀態、parent 監聽 `child.on("exit")` 寫終態、`STALE_MS` 20 分兜底 hot-reload 丟 listener）。
+  - 「前端 → `/` Dashboard 頁」：「資料狀態」卡末尾多一顆 `<PipelineRunner />`（按鈕 + 粗進度 + log tail + 完成後 `window.location.reload()`）。
+  - 「背景任務」段：補一句「另一個正式使用者：`lib/actions/pipeline.ts`（首頁跑 daily pipeline），但它 spawn 的是**未改造的 `daily-pipeline.ts` 本體**（該檔要保持給 launchd 用，不加 progress callback），所以進度是粗粒度（存活 + log tail），非逐步。」
+- **`docs/PROGRESS.md`**：新增段落——技術指標 `full` vs `latest` 的取捨（只算當天的代價 = 漏跑不自動補）、LOOKBACK=250 的理由與數值一致性驗證結果、按鈕背景任務的做法（為何用 parent `child.on("exit")` 而非子進程自寫終態）、STALE 兜底、端到端驗證結果。
+- **`docs/ROADMAP.md`**：這兩項不在現有 4.5.x todo 清單裡（是使用者臨時加的體驗改善）。在 4.5 節底下或適當位置補一條 `- [x]`：「首頁『立即更新資料』按鈕（背景跑 daily pipeline）+ 技術指標改只算當天（pipeline 提速）」。
+- **`README.md`**：「目前功能 → Dashboard」段補「可從頁面一鍵觸發 daily pipeline（背景執行、可離開頁面）」；`daily-pipeline.ts` 描述的技術指標步驟補「只算當天」。

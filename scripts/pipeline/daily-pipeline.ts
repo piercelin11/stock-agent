@@ -4,6 +4,7 @@ import { PrismaClient } from "../../generated/prisma/client.js";
 import { fillOneDayTwse, fillTodayTpex } from "./fill-daily-quotes.js";
 import { fillOneDayInstitutional } from "./fill-institutional-trading.js";
 import { fillOneDayValuation } from "./fill-gap-valuation.js";
+import { fillOneDayMargin } from "./fill-margin-trading.js";
 import { calculateTechnicalIndicators } from "./calculate-technical-indicators.js";
 import { calculateOneDayRegime } from "./calculate-market-regime.js";
 import { calculateOneDayHeat } from "./calculate-industry-heat.js";
@@ -30,6 +31,7 @@ async function main() {
   let quotesDerivativesSkipped = 0;
   let institutionalWritten = 0;
   let valuationsWritten = 0;
+  let marginWritten = 0;
   let indicatorsProcessed = 0;
   let regimeLabel = "—";
   let heatSectorCount = 0;
@@ -81,9 +83,28 @@ async function main() {
     throw new PipelineStepError("抓取今日估值", `處理日期 ${todayStr} 失敗`, err);
   }
 
-  // 4. 重新計算技術指標
+  // 3.5. 抓取今天的融資融券餘額（TWSE + TPEx）
+  // 非關鍵路徑：融資融券證交所通常傍晚才出，TWSE+TPEx 都拿不到當日資料時印警告，不讓 pipeline 非 0 結束。
   try {
-    const indicatorResult = await calculateTechnicalIndicators();
+    const marginResult = await fillOneDayMargin(todayStr);
+    marginWritten = marginResult.twse.processed + marginResult.tpex.processed;
+    const twseGot = !marginResult.twse.isNonTradingDay;
+    const tpexGot = !marginResult.tpex.isNonTradingDay;
+    if (!twseGot && !tpexGot) {
+      console.warn(`[融資融券] ${todayStr} TWSE 與 TPEx 皆無當日資料（通常傍晚才出），跳過`);
+      warningCount++;
+    }
+  } catch (err) {
+    console.warn(
+      `[融資融券] 抓取失敗（不中斷 pipeline）: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    warningCount++;
+  }
+
+  // 4. 重新計算技術指標（只算當天：每支撈最近 ~250 筆當輸入、只 upsert 最新一天，秒級）
+  // 代價：pipeline 漏跑那天的技術指標不會自動補，需手動 calculate-technical-indicators.ts <code> 全歷史重算。
+  try {
+    const indicatorResult = await calculateTechnicalIndicators(undefined, { mode: "latest" });
     indicatorsProcessed = indicatorResult.processed;
   } catch (err) {
     throw new PipelineStepError("計算技術指標", "計算失敗", err);
@@ -135,6 +156,7 @@ async function main() {
   console.log(`今日跳過權證/可轉債: ${quotesDerivativesSkipped} 筆`);
   console.log(`今日籌碼寫入筆數: ${institutionalWritten}`);
   console.log(`今日估值寫入筆數: ${valuationsWritten}`);
+  console.log(`今日融資融券寫入筆數: ${marginWritten}`);
   console.log(`技術指標處理筆數: ${indicatorsProcessed}`);
   console.log(`大盤濾網: ${regimeLabel}`);
   console.log(`產業熱度計算產業數: ${heatSectorCount}`);

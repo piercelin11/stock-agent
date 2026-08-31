@@ -141,7 +141,21 @@ function macdStatusSeries(closes: number[]): (string | null)[] {
 
 // codes 傳入時只重算這幾支（例：某支股票事後補齊報價後單獨補指標），不傳則跑全市場一般股票 + TAIEX。
 // TAIEX（securityType=index）的 MACD/RSI/ATR 等分項算出來無妨，大盤濾網只讀 ma60 和 bollingerBandwidth。
-export async function calculateTechnicalIndicators(codes?: string[]): Promise<{ processed: number; indicatorsWritten: number }> {
+// mode "latest" 每支只撈最近這麼多筆 DailyQuote 當輸入，足夠算出最長窗口
+// （MA60 需 60、MACD 的 EMA 需更長暖身才穩，250 給足餘裕）。
+const LATEST_LOOKBACK = 250;
+
+interface CalcOptions {
+  // "full"（預設）= 對每支的全部歷史 DailyQuote 逐日重算並 upsert（回補報價後手動重算、debug 用）。
+  // "latest" = 每支只撈最近 LATEST_LOOKBACK 筆當輸入、只 upsert 最新一筆日期（daily-pipeline 每日跑，秒級）。
+  mode?: "full" | "latest";
+}
+
+export async function calculateTechnicalIndicators(
+  codes?: string[],
+  options: CalcOptions = {},
+): Promise<{ processed: number; indicatorsWritten: number }> {
+  const mode = options.mode ?? "full";
   const stocks = await prisma.stock.findMany({
     where: {
       OR: [{ securityType: "stock" }, { code: "TAIEX" }],
@@ -151,17 +165,29 @@ export async function calculateTechnicalIndicators(codes?: string[]): Promise<{ 
     orderBy: { code: "asc" },
   });
 
-  console.log(`共 ${stocks.length} 支（含 TAIEX）待計算。`);
+  console.log(
+    `共 ${stocks.length} 支（含 TAIEX）待計算。模式：${mode === "latest" ? "只算最新一天" : "全歷史重算"}`,
+  );
 
   let processed = 0;
   let indicatorsWritten = 0;
 
   for (const stock of stocks) {
-    const quotes = await prisma.dailyQuote.findMany({
-      where: { stockCode: stock.code },
-      orderBy: { date: "asc" },
-      select: { date: true, high: true, low: true, close: true, volume: true },
-    });
+    const quotes =
+      mode === "latest"
+        ? (
+            await prisma.dailyQuote.findMany({
+              where: { stockCode: stock.code },
+              orderBy: { date: "desc" },
+              take: LATEST_LOOKBACK,
+              select: { date: true, high: true, low: true, close: true, volume: true },
+            })
+          ).reverse() // 反轉回 asc，下游計算不變
+        : await prisma.dailyQuote.findMany({
+            where: { stockCode: stock.code },
+            orderBy: { date: "asc" },
+            select: { date: true, high: true, low: true, close: true, volume: true },
+          });
 
     const highs = quotes.map((q) => q.high);
     const lows = quotes.map((q) => q.low);
@@ -207,7 +233,10 @@ export async function calculateTechnicalIndicators(codes?: string[]): Promise<{ 
       };
     });
 
-    for (const row of rows) {
+    // mode "latest"：只寫最新一筆日期（rows 已按 date asc，最後一筆即最新）。
+    // quotes 為空（新股當天才上市、還沒有 DailyQuote）→ rows 空 → slice(-1) 也空，該支不寫。
+    const rowsToWrite = mode === "latest" ? rows.slice(-1) : rows;
+    for (const row of rowsToWrite) {
       await prisma.technicalIndicator.upsert({
         where: { stockCode_date: { stockCode: row.stockCode, date: row.date } },
         update: row,

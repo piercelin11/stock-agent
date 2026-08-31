@@ -12,11 +12,12 @@
 
 ### `scripts/pipeline/`
 
-- `daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」六步：補齊今日 TWSE+TPEx 報價 → 抓今日三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 算技術指標 → 算大盤濾網（市場狀態燈號，非關鍵路徑，失敗只警告）→ 算產業熱度。歷史缺漏回補、跑選股皆為個別手動執行。三個抓取步驟的對外請求走 `scripts/lib/http.ts` 的 `fetchJson`（3 次 retry + 30s timeout），單一暫時性網路錯誤不會讓整條 pipeline 中斷。
+- `daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」七步：補齊今日 TWSE+TPEx 報價 → 抓今日三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 抓今日融資融券餘額（非關鍵路徑，證交所通常傍晚才出）→ 算技術指標 → 算大盤濾網（市場狀態燈號，非關鍵路徑，失敗只警告）→ 算產業熱度。歷史缺漏回補、跑選股皆為個別手動執行。抓取步驟的對外請求走 `scripts/lib/http.ts` 的 `fetchJson`（3 次 retry + 30s timeout），單一暫時性網路錯誤不會讓整條 pipeline 中斷。
 - `fill-daily-quotes.ts`：補齊全市場報價——TWSE 用證交所 `MI_INDEX` 報表 API，支援指定任意單一天（可補歷史缺漏）；TPEx 用櫃買中心 OpenAPI，不支援指定日期，只能補「目前最新一天」。皆會自動新增資料庫沒有的股票記錄。
 - `fill-institutional-trading.ts`：抓取指定日期的 TWSE（`T86`）+ TPEx（`tpex_3insti_daily_trading`）三大法人買賣超寫入 `InstitutionalTrading`。TWSE 支援任意歷史日期，TPEx 不支援日期參數、永遠回傳「目前最新一天」。
 - `fill-gap-valuation.ts`：抓取指定日期的個股估值（本益比/股價淨值比/殖利率）寫入 `StockValuation`，TWSE 與 TPEx 皆支援任意歷史日期。
-- `calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線、波動度、最大回撤、ATR、RSI、MACD 狀態等技術指標（全市場一般股票 + TAIEX；傳代號陣列只重算指定幾支）。
+- `fill-margin-trading.ts`：抓取指定日期的個股信用交易餘額（融資、融券）寫入 `MarginTrading`，來源 TWSE `MI_MARGN` + TPEx `margin/balance`，兩邊皆支援任意歷史日期。單位一律存「股」（原始為張，入庫 ×1000）。`--date=YYYY-MM-DD`（不帶抓今天）/ `--backfill=N`（往回抓、跳非交易日，實得約 N 個交易日）。`daily-pipeline.ts` 第 3.5 步（非關鍵路徑）。評分整合尚未做。
+- `calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線、波動度、最大回撤、ATR、RSI、MACD 狀態等技術指標（全市場一般股票 + TAIEX；傳代號陣列只重算指定幾支）。`mode: "full"`（預設 / CLI）= 全歷史重算；`mode: "latest"`（`daily-pipeline.ts` 用）= 每支只算並寫入最新一天，秒級。
 - `calculate-market-regime.ts`：大盤濾網（市場狀態燈號）——三維度（市場寬度、TAIEX 指數位置、TAIEX MA60 斜率）各投 ±1 合成 `bullish` / `neutral` / `bearish` 三段標籤，寫 `data/market-regime/{date}.json`（不進 DB）。TAIEX 指標未備妥時自動降級為「只用市場寬度」單維度。`daily-pipeline.ts` 第 5 步（非關鍵路徑）。
 - `calculate-industry-heat.ts`：依每日報價計算各產業等權熱度（平均漲跌幅、漲跌家數、排名）寫入 `IndustryHeatSnapshot`，支援回補多個交易日。
 
@@ -45,7 +46,7 @@ Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4。**全站固
 - `lib/actions/`：Server Actions（不建 REST/GraphQL API），檔頭 `"use server"`——`health.ts` / `screening.ts` / `watchlist.ts` / `intraday.ts`（盤中掃描背景任務）/ `dashboard.ts`（觀察類股今日表現）/ `market-regime.ts`（大盤濾網燈號，純讀 `data/market-regime/` 檔）。
 - `components/`：`ui/`（手刻基礎元件）、`screening/`、`watchlist/`、`dashboard/`。
 
-**Dashboard `/`**：頂部一條大盤濾網橫幅（市場狀態燈號：偏多綠 / 中性琥珀 / 偏空紅 + 三段對應的部位建議文字，可展開看維度明細）。下方 ①「資料狀態」卡＝今日行情燈號（DB 最新交易日 vs Asia/Taipei 今日，綠 / 紅）＋ 一般股票檔數 ＋ 當日三表（報價 / 籌碼 / 技術指標）覆蓋率百分比。②「觀察類股今日表現」＝觀察清單每檔一張卡片（grid 2–4 欄），左側 60 日走勢圖（Y 軸用布林帶寬正規化＝收盤相對布林中軌的偏離比例，所有卡同刻度 → 盤整期線壓中線、噴出頂到邊界，卡跟卡之間絕對起伏可比；線色依當日漲跌紅綠 + 線下漸層），右側代號 / 漲跌% / 突破 pill + K 棒·力道（量能）·位階（打底深度）三分數 + 三大法人 / 投信淨買超。全部用 `breakout-shared.ts` 的評分函式現算，不重跑全市場選股。
+**Dashboard `/`**：頂部一條大盤濾網橫幅（市場狀態燈號：偏多綠 / 中性琥珀 / 偏空紅 + 三段對應的部位建議文字，可展開看維度明細）。下方 ①「資料狀態」卡＝今日行情燈號（DB 最新交易日 vs Asia/Taipei 今日，綠 / 紅）＋ 一般股票檔數 ＋ 當日四表（報價 / 籌碼 / 技術指標 / 融資融券）覆蓋率百分比 ＋「立即更新資料」按鈕（背景跑整個 daily pipeline，可離開頁面、切回接上進度，跑完自動刷新覆蓋率）。②「觀察類股今日表現」＝觀察清單每檔一張卡片（grid 2–4 欄），左側 60 日走勢圖（Y 軸用布林帶寬正規化＝收盤相對布林中軌的偏離比例，所有卡同刻度 → 盤整期線壓中線、噴出頂到邊界，卡跟卡之間絕對起伏可比；線色依當日漲跌紅綠 + 線下漸層），右側代號 / 漲跌% / 突破 pill + K 棒·力道（量能）·位階（打底深度）三分數 + 三大法人 / 投信淨買超。全部用 `breakout-shared.ts` 的評分函式現算，不重跑全市場選股。
 
 **選股頁 `/screening`**：頁頂一條精簡大盤濾網燈號（同 Dashboard 資料源），按「開始選股」前先看到大盤狀態。三個分頁。「第一根突破」/「冷水區醞釀」按鈕觸發 Server Action 同步跑最新交易日的盤後選股。「盤中即時掃描」走背景任務模式（spawn 子進程對 `mis.twse.com.tw` 即時報價跑全市場快照約 20–30 秒 → 進度條輪詢 → 跑完看候選表格；可切走再回來看進度）。三者跑完都是可排序表格 → 點列看評分明細 → 勾選一鍵加入觀察清單。結果不寫資料庫。
 
@@ -91,7 +92,7 @@ pnpm start    # 跑打包後的正式伺服器
 # 初次建置資料庫（股票清單 + 產業別）
 pnpm prisma db seed
 
-# 每日主流程（補齊今日 TWSE+TPEx 報價 → 抓今日籌碼 → 抓今日估值 → 算技術指標 → 算產業熱度）
+# 每日主流程（補齊今日 TWSE+TPEx 報價 → 抓今日籌碼 → 抓今日估值 → 抓今日融資融券 → 算技術指標 → 算大盤濾網 → 算產業熱度）
 pnpm tsx scripts/pipeline/daily-pipeline.ts
 
 # --- pipeline 各步驟也可單獨執行 ---
@@ -108,6 +109,10 @@ pnpm tsx scripts/pipeline/fill-gap-valuation.ts --date=2026-08-18
 
 # 抓取指定日期的三大法人籌碼（不帶 --date 則抓今天；TPEx 端不支援指定日期，永遠回傳最新一天）
 pnpm tsx scripts/pipeline/fill-institutional-trading.ts --date=2026-08-21
+
+# 抓取指定日期的個股融資融券餘額（不帶 --date 則抓今天；兩端皆支援歷史日期。--backfill=N 往回補約 N 個交易日）
+pnpm tsx scripts/pipeline/fill-margin-trading.ts --date=2026-08-28
+pnpm tsx scripts/pipeline/fill-margin-trading.ts --backfill=10
 
 # 計算大盤濾網（市場狀態燈號；不帶參數算 DB 最新交易日，--date=YYYY-MM-DD 補算）
 pnpm tsx scripts/pipeline/calculate-market-regime.ts
