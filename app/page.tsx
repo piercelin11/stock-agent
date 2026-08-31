@@ -1,6 +1,7 @@
 import { Card, FieldLabel, Stat } from "../components/ui/Card";
 import { WatchlistPerfTable } from "../components/dashboard/WatchlistPerfTable";
 import { RegimeBanner } from "../components/dashboard/RegimeBanner";
+import { PipelineRunner } from "../components/dashboard/PipelineRunner";
 import { getDbHealth } from "../lib/actions/health";
 import { getMarketRegime } from "../lib/actions/market-regime";
 
@@ -23,6 +24,7 @@ export default async function Page() {
     { label: "DailyQuote", ...coverage.quote },
     { label: "籌碼", ...coverage.institutional },
     { label: "技術指標", ...coverage.technical },
+    { label: "融資融券", ...coverage.margin },
   ];
 
   return (
@@ -61,7 +63,7 @@ export default async function Page() {
 
           <div>
             <FieldLabel>
-              當日三表覆蓋率（基準 {health.latestQuoteDate ?? "—"}）
+              當日四表覆蓋率（基準 {health.latestQuoteDate ?? "—"}）
             </FieldLabel>
             <div className="mt-2 space-y-1 text-base">
               {covRows.map((row) => (
@@ -78,6 +80,7 @@ export default async function Page() {
             </div>
           </div>
         </div>
+        <PipelineRunner />
       </Card>
 
       <Card title="觀察類股今日表現（帶量帶價第一根視角）">

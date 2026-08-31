@@ -228,6 +228,42 @@
 - **`pnpm exec tsc --noEmit` 乾淨、`pnpm build` 通過**。`curl localhost:3000/` 首頁 banner 顯示「大盤：中性」+ `stage step2-full` + 三維度明細（含 `latestClose` / `slopePct` / `pct` 等 detail 原始值）。
 - **留給後續**：三段門檻校準（`DEFAULT_REGIME_CONFIG` 首版未校準）、盤中版 regime。
 
+**融資融券資料層已完成（2026-08-31）**：ROADMAP 4.5.2，依 `docs/PLAN.md`。只做「資料層 + 進 pipeline + 首頁覆蓋率一個數字」，評分整合（融資融券當修正因子）留 ROADMAP 4.5.3。
+
+- **schema `MarginTrading`（新，放 `TechnicalIndicator` 之後，比照 `InstitutionalTrading` 形狀）**：`stockCode + date` 唯一 + `@@index([date])`。`marginBalance` / `marginBalancePrev` / `shortBalance` / `shortBalancePrev` non-null `BigInt`（沒信用交易的股票是 `0` 不是缺值）；`marginQuota`（融資限額）/ `offsetting`（資券互抵）nullable。`*Prev` 直接取 API 回應的「前日餘額」欄，不自己 join。**不存 change（今日−前日）**（同 `heatScore` 理由）、**不存「融資金額（仟元）」**（個股明細沒有，要金額用 `marginBalance × close` 現算）。`Stock` 加 `marginTradings MarginTrading[]`。`pnpm prisma migrate dev --name add_margin_trading` → migration 只有 `CREATE TABLE` + 2 index + FK，不動現有 row。
+- **端點實測（2026-08-31）**：
+  - **TWSE `MI_MARGN`**（`www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json&date=YYYYMMDD&selectType=ALL`）：`date` 傳西元 `YYYYMMDD`，**支援任意歷史日期**。`stat === "OK"` + 有 `tables` 才是交易日；非交易日 `stat` 為「很抱歉，沒有符合條件的資料!」。**個股明細在 `tables[1]`**（`tables[0]` 是全市場彙總）；`fields` 16 欄，用到 index `[0]代號 [1]名稱 [5]融資前日餘額 [6]融資今日餘額 [7]融資次一營業日限額 [11]融券前日餘額 [12]融券今日餘額 [14]資券互抵`。數字含千分位逗號、單位張。`data` 混 ETF（實測有 `00400A` 主動式 ETF）/ 特別股 / 一般股票。
+  - **TPEx `margin/balance`**（`www.tpex.org.tw/www/zh-tw/margin/balance?date=YYYY/MM/DD&id=&response=json`）：`date` 收西元斜線格式，**支援任意歷史日期**（與 TPEx 行情端點不同，比照估值端點 `peQryDate`）。`tables[0].date` 民國年斜線格式（`115/08/28`）`+1911` 核對；非交易日 `totalCount` 為 0。`fields` 20 欄，用到 index `[0]代號 [1]名稱 [2]前資餘額(張) [6]資餘額 [9]資限額 [10]前券餘額(張) [14]券餘額 [18]資券相抵(張)`。數字含千分位逗號、單位張。`data` 混 ETF（`00679B` 債券 ETF 等）/ 一般股票。
+- **`scripts/pipeline/fill-margin-trading.ts`（新，比照 `fill-institutional-trading.ts` 骨架）**：`fetchTwseMargin` / `fetchTpexMargin` → `writeMarginRows` upsert。`parseLots(raw)` = 去逗號 → `parseFloat` → `Math.round(n) * 1000` → `BigInt`（空 / `-` → `0n`）；`parseLotsNullable` 空 → `null`（給 `marginQuota` / `offsetting`）。過濾用 `toSecurityType`，**保留 `stock` + `preferred`**（特別股也有信用交易資格）；`existingCodes` 從 `Stock` 撈 `securityType in [stock, preferred]`，只 upsert 已存在代號。兩端點皆支援歷史日期，回傳日期不符即 throw（無 `isStaleDate` 邏輯）。CLI：無參數抓今天 / `--date=YYYY-MM-DD`（或 `YYYYMMDD`）/ `--backfill=N`（從今天往回逐個日曆日、`isNonTradingDay` 不計數、每日之間 `sleep(1500)`，實得約 N 個交易日；與 `--date` 互斥）。`isMain` guard 尾巴 `.catch(exit 1).finally($disconnect)`。
+- **首次回補 `--backfill=10`**：實得 10 個交易日 **2026-08-17 ~ 2026-08-28**，每日 1860 筆（TWSE 1059 + TPEx 801），共 **18600 筆**。TWSE 每日跳過非追蹤類型 ~235、TPEx ~117；跳過 Stock 表沒有的代號 **0**。
+  - **×1000 換算驗證**：2330 每日 `marginBalance % 1000n === 0n` ✓。數量級：2330 融資餘額 2762~2842 萬股（= 2.76~2.84 萬張），融券餘額 2.8~4.5 萬股，合理。
+  - **`*Prev` 對帳**：2330 每日 `marginBalancePrev` 精確等於前一交易日的 `marginBalance`（08-18 prev 27727000 = 08-17 bal 27727000，整串連續）✓。
+  - **覆蓋率抽算**：2026-08-28 `MarginTrading`(stock) 1860 ÷ `DailyQuote`(stock) 1954 = **95.2%**（落在預期 90~95%，非全部股票有信用交易資格屬正常）。
+- **進 `daily-pipeline.ts` 第 3.5 步**（估值之後、技術指標之前；「抓外部資料」四步連在一起）：`try/catch` 包成**非關鍵路徑**——TWSE+TPEx 皆 `isNonTradingDay` 印警告 + `warningCount++`，抓取 throw 也只 `console.warn` + `warningCount++`，不 `throw`、不讓 pipeline 非 0 結束。收尾 log 加「今日融資融券寫入筆數」。後續步驟編號沿用 3.5 標籤，未重編 4/5/6。
+- **前端覆蓋率**：`lib/actions/health.ts` 的 `DbHealth.coverage` 加 `margin: { count, pct }`，`getDbHealth` 內 `refDate` 那段 `Promise.all` 加 `prisma.marginTrading.count({ where: { date: refDate } })`。分母沿用 `stockCount`（`securityType="stock"`），`margin` 分子另含約十幾檔特別股 → pct 微幅偏高 <1%，可接受（health.ts 註解標明）。`app/page.tsx` `covRows` 加「融資融券」列，`<FieldLabel>` 文案「當日三表覆蓋率」→「當日四表覆蓋率」，其餘（`coverageClass` 上色、排版）不動。
+- **驗證**：`pnpm exec tsc --noEmit` 乾淨、`pnpm build` 通過（`/` 仍 `ƒ Dynamic`）。
+- **明確不做（留後續）**：歷史回補到 2020（`scripts/backfill/backfill-margin-trading.ts`，FinMind 逐支）、融資融券進選股評分（`computeInstitutionalFlow` 的 `margin-chasing` 修正因子，ROADMAP 4.5.3 路線 B，等資料累積 1~2 個月）、`MarginTrading` 顯示在 `/watchlist` 明細 / Dashboard 卡片。
+
+**技術指標只算當天 + 首頁「立即更新資料」按鈕（2026-08-31，同批）**：使用者要一顆按鈕從頁面跑整個 daily pipeline，順便發現 pipeline 每天全歷史重算技術指標（~10 分鐘）不合理。
+
+- **`calculateTechnicalIndicators(codes?, options?)` 加 `options.mode: "full" | "latest"`（預設 `"full"`）**：
+  - `"latest"`：每支只 `findMany({ orderBy: date desc, take: 250 }).reverse()` 撈最近 250 筆當輸入（`LATEST_LOOKBACK`；足夠算 MA60 / 布林 / RSI14 / ATR20 / MACD EMA 暖身），算完 `rows.slice(-1)` 只 upsert 最新一筆日期。`quotes` 空（新股當天上市還沒 `DailyQuote`）→ `slice(-1)` 也空、該支不寫，與現狀一致。
+  - CLI 與不帶 `options` 一律 `"full"`（回補報價後手動重算、debug 要全歷史；不加 `--latest` flag）。
+  - 開頭 log 補「模式：只算最新一天 / 全歷史重算」。
+  - **數值一致性驗證**：`full` 重算 2330 + TAIEX → 記錄最新一天各欄位 → 故意把該筆 `ma60`/`rsi14`/`bollingerBandwidth` 汙染成 `-999` → 跑 `latest` → 比對：兩者最新一天所有欄位**誤差 0**（`ma60` 2384.00 / 44898.20、`rsi14` 51.67 / 60.01、`bw` 0.04399 / 0.06451 完全一致），汙染值被覆寫，且前一天那筆 `calculatedAt` 沒變（確認只碰最新一天）。
+- **`daily-pipeline.ts` 第 4 步改 `calculateTechnicalIndicators(undefined, { mode: "latest" })`**：pipeline 內唯一改動，對外只有「變快」（`indicatorsProcessed` 仍 ~2149、寫入筆數從 ~340 萬變 ~2050、退出碼 / 步驟數 / summary log 格式不變）。第 5 步大盤濾網依賴 TAIEX 的 `ma60`——`latest` 模式 `where` 仍含 TAIEX、一樣算最新一天，`hasTaiexIndicatorForDate()` 對今天為 true → regime 走 `step2-full`，不受影響。**整支 pipeline 實測從 ~10 分鐘降到 21 秒**。
+  - **代價**（已跟使用者確認接受）：pipeline 漏跑那天的技術指標不會自動補回，要手動 `calculate-technical-indicators.ts <code>` 全歷史重算。
+- **`lib/actions/pipeline.ts`（新，`"use server"`）**：`runDailyPipeline()` / `getDailyPipelineStatus() → DailyPipelineStatus`（`status` / `startedAt` / `finishedAt` / `exitCode` / `logTail` / `logFile` / `logPath`）。
+  - **為何不照 intraday 讓子進程自寫終態**：`daily-pipeline.ts` 不能改（要保持乾淨給 launchd）。所以 spawn 它當獨立腳本（利用它無 `isMain` guard、`import` 即跑 `main()` 的特性），`stdio: ["ignore", out, out]` 導到 `data/daily-pipeline-runs/{stamp}.log`，**parent（Next server action 進程）`child.on("exit")` 覆寫 `progress.json` 終態**。進度只有粗粒度（`status` + 存活秒數 + log 檔尾 12 行），沒有 7 步進度條。
+  - **hot-reload 兜底**：dev 模式 Next 進程 hot-reload 會丟 exit listener → `progress.json` 卡 `running`。`getDailyPipelineStatus()` 判 `running` 且 `startedAt` 超過 `STALE_MS`(20 分) → 回報 `error`（帶 log tail 幫 debug）、允許重按。生產 `pnpm start` 不 hot-reload，正常情況 listener 都在。
+  - **單一任務鎖**：`progress.json` 存在且 `running` 且未逾時 → `runDailyPipeline()` 回 `{ started: false, reason: "pipeline 執行中" }`。
+  - **Turbopack build warning 修正**：`tailLines` 原本吃「相對或絕對路徑」再 `join(REPO_ROOT, ...)`，Turbopack 靜態分析判定「dynamic filesystem access」會追蹤整個專案。改成只吃 log 基本檔名、`join(RUN_DIR, logFile)`（靜態 scope 到子資料夾），warning 消失。
+- **`components/dashboard/PipelineRunner.tsx`（新，client component）**：骨架照 `ScreeningPanel.tsx` 的 intraday 輪詢段（`pollRef` + `setInterval` + 掛載時若 `running` 接管 + 卸載 `clearInterval`）。「立即更新資料」按鈕 → `runDailyPipeline()` → `setInterval(3s)` 輪詢 → `running` 顯示「已 N 秒（可離開此頁）」+ `<pre>` log tail；`done` → `window.location.reload()`（`app/page.tsx` 是 `force-dynamic`，reload 重抓 `getDbHealth()` 新覆蓋率）；`error` 顯示 exit code + log 路徑。切走 `useEffect` cleanup 停輪詢、子進程不受影響；切回重掛載時若 `running` 接管。
+- **`app/page.tsx`**：「資料狀態」Card 的 grid 之後接 `<PipelineRunner />`（`border-t` 分隔）。
+- **`.gitignore`**：加 `/data/daily-pipeline-runs/`。
+- **端到端驗證**：直接呼叫 `runDailyPipeline()` → `{ started: true }`；立刻再呼叫 → `{ started: false, reason: "pipeline 執行中" }`（鎖生效）；輪詢 `getDailyPipelineStatus()` 看到 `status: running` + `logTail` 逐輪更新（報價 → 籌碼 → 估值 → 技術指標「已處理 N/2149」→ summary）+ 存活秒數遞增；~40 秒後 `status: done` / `exitCode: 0` / 終態 logTail = pipeline summary。log 檔落 `data/daily-pipeline-runs/2026-08-31T15-00-22-614Z.log`。`curl localhost:3000/` HTML 含「立即更新資料」按鈕。
+- **`pnpm exec tsc --noEmit` 乾淨、`pnpm build` 通過（無 warning）**。
+
 尚未開始/明確不做：估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯（`topic_alignment` 因子固定中性分）、AnalysisResult 產出流程（Phase D）、`screening/` 三支（`calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts`）與 `backfill/` 各支皆為獨立手動執行（不在 `daily-pipeline.ts` 內）、`calculate-accumulation-score.ts` 的參數校準（首版未校準，前段偏大型股，併入回測階段做）、**整個回測系統**（3.0～3.7 已從 `main` 移除、擱置，見上方；程式碼在 `feat/backtest-ui-3.6-3.7` 分支，OOM 待修）。`archive/` 的 `calculate-screen-score.ts` / `run-screener.ts` / `fetch-candidate-details.ts` / `top20-gainers.js` 已停用不維護。
 
 （每次進度更新，麻煩幫我一併更新這個區塊。）

@@ -100,12 +100,17 @@
 
 證交所 / 櫃買每日公開的個股信用交易餘額。初版只補資料 + 進 pipeline + 顯示覆蓋率，評分整合留後。
 
-- [ ] **新 `MarginTrading` model**（`stockCode + date` 唯一）：`marginBalance` / `marginBalancePrev` / `marginQuota?` / `shortBalance` / `shortBalancePrev` / `offsetting?` / `source` / `fetchedAt`。**單位一律存「股」**（原始資料源以「張」計，入庫 ×1000），schema 註解標明。`marginBalancePrev` 直接取 API 回應的「前日餘額」欄，不自己 join
-- [ ] **`scripts/pipeline/fill-margin-trading.ts`**：TWSE `MI_MARGN`（`?response=json&date=YYYYMMDD&selectType=ALL`，個股明細在 `tables[1]`，支援任意歷史日期）+ TPEx `www.tpex.org.tw/www/zh-tw/margin/balance`（`?date=YYYY/MM/DD&id=&response=json`，`tables[0]`，亦支援歷史日期）。走 `lib/http.ts` 的 `fetchJson`。套 CLAUDE.md 過濾規則只留一般股票 + 特別股，只 upsert 已存在的 Stock。匯出 `fillOneDayMargin(date)`。CLI `--date=YYYY-MM-DD`（不帶抓今天）/ `--backfill=N`（往回抓 N+約 4 個日曆日、跳非交易日，實得約 N 個交易日）
-- [ ] **首次回補**：補今天 + 往回約 10 個交易日
-- [ ] **進 pipeline**：`daily-pipeline.ts` 新增步驟（估值之後）。非關鍵路徑：TWSE+TPEx 都拿不到當日資料時印警告，不讓 pipeline 非 0 結束（融資融券證交所通常傍晚才出）
-- [ ] **前端覆蓋率**：擴充 `lib/actions/health.ts` 加 `getMarginCoverage()`（最新交易日有 `MarginTrading` 的一般股票數 ÷ 該日有 `DailyQuote` 的一般股票數）。顯示在首頁「資料狀態」卡。預期正常覆蓋率 90~95%（非全部股票有信用交易資格，正常）
+- [x] **新 `MarginTrading` model**（`stockCode + date` 唯一）：`marginBalance` / `marginBalancePrev` / `marginQuota?` / `shortBalance` / `shortBalancePrev` / `offsetting?` / `source` / `fetchedAt`。**單位一律存「股」**（原始資料源以「張」計，入庫 ×1000），schema 註解標明。`marginBalancePrev` 直接取 API 回應的「前日餘額」欄，不自己 join
+- [x] **`scripts/pipeline/fill-margin-trading.ts`**：TWSE `MI_MARGN`（`?response=json&date=YYYYMMDD&selectType=ALL`，個股明細在 `tables[1]`，支援任意歷史日期）+ TPEx `www.tpex.org.tw/www/zh-tw/margin/balance`（`?date=YYYY/MM/DD&id=&response=json`，`tables[0]`，亦支援歷史日期）。走 `lib/http.ts` 的 `fetchJson`。套 CLAUDE.md 過濾規則只留一般股票 + 特別股，只 upsert 已存在的 Stock。匯出 `fillOneDayMargin(date)`。CLI `--date=YYYY-MM-DD`（不帶抓今天）/ `--backfill=N`（往回抓 N+約 4 個日曆日、跳非交易日，實得約 N 個交易日）
+- [x] **首次回補**：補今天 + 往回約 10 個交易日
+- [x] **進 pipeline**：`daily-pipeline.ts` 新增步驟（估值之後）。非關鍵路徑：TWSE+TPEx 都拿不到當日資料時印警告，不讓 pipeline 非 0 結束（融資融券證交所通常傍晚才出）
+- [x] **前端覆蓋率**：擴充 `lib/actions/health.ts` 的 `DbHealth.coverage` 加 `margin`（最新交易日有 `MarginTrading` 的股票數 ÷ `stockCount`）。首頁「資料狀態」卡「當日三表覆蓋率」→「當日四表覆蓋率」。實測覆蓋率 95.2%（非全部股票有信用交易資格，正常）
 - [ ] 歷史回補到 2020（另寫 `scripts/backfill/backfill-margin-trading.ts`，FinMind `TaiwanStockMarginPurchaseShortSale` 逐支）**不在此輪範圍**
+
+### 4.5.x 體驗改善（使用者臨時加項，非原 todo）
+
+- [x] **技術指標 pipeline 提速**：`calculateTechnicalIndicators` 加 `mode: "full" | "latest"`，`daily-pipeline.ts` 第 4 步改 `"latest"`（每支只撈最近 250 筆、只 upsert 最新一天）→ 整支 pipeline 從 ~10 分鐘降到 ~21 秒。CLI 仍 `"full"`（全歷史）。代價：pipeline 漏跑那天的指標需手動 `calculate-technical-indicators.ts <code>` 補
+- [x] **首頁「立即更新資料」按鈕**：`lib/actions/pipeline.ts` + `components/dashboard/PipelineRunner.tsx` — spawn 未改造的 `daily-pipeline.ts` 當背景子進程、粗粒度進度（存活秒數 + log 尾）、可離開頁面切回接管、`progress.json` 單檔鎖、完成後 `window.location.reload()` 刷新覆蓋率
 
 ### 4.5.3 選股引擎統一（三路線收斂）
 

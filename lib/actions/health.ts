@@ -11,6 +11,9 @@ export interface DbHealth {
     quote: { count: number; pct: number };
     institutional: { count: number; pct: number };
     technical: { count: number; pct: number };
+    // 分母沿用 stockCount（securityType="stock"）；MarginTrading 另含約十幾檔特別股，
+    // 分子可能略高於分母造成 pct 微幅偏高（<1%），可接受，不為此改分母。
+    margin: { count: number; pct: number };
   };
 }
 
@@ -47,13 +50,15 @@ export async function getDbHealth(): Promise<DbHealth> {
   let quoteCount = 0;
   let institutionalCount = 0;
   let technicalCount = 0;
+  let marginCount = 0;
   if (refDate) {
-    [quoteCount, institutionalCount, technicalCount] = await Promise.all([
+    [quoteCount, institutionalCount, technicalCount, marginCount] = await Promise.all([
       prisma.dailyQuote.count({
         where: { date: refDate, stock: { securityType: "stock" } },
       }),
       prisma.institutionalTrading.count({ where: { date: refDate } }),
       prisma.technicalIndicator.count({ where: { date: refDate } }),
+      prisma.marginTrading.count({ where: { date: refDate } }),
     ]);
   }
 
@@ -71,6 +76,10 @@ export async function getDbHealth(): Promise<DbHealth> {
       technical: {
         count: technicalCount,
         pct: pct(technicalCount, stockCount),
+      },
+      margin: {
+        count: marginCount,
+        pct: pct(marginCount, stockCount),
       },
     },
   };

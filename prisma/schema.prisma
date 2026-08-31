@@ -59,6 +59,7 @@ model Stock {
   institutionalTradings InstitutionalTrading[]
   technicalIndicators   TechnicalIndicator[]
   stockValuations       StockValuation[]
+  marginTradings        MarginTrading[]
 }
 
 // 個股估值（PE/PB/殖利率），來源：TWSE BWIBBU_d / TPEx
@@ -258,6 +259,27 @@ model TechnicalIndicator {
   rsi14          Float? // 14 日 RSI
   macdStatus     String? // "bullish" | "bearish" | null
   calculatedAt   DateTime @default(now())
+
+  stock Stock @relation(fields: [stockCode], references: [code])
+
+  @@unique([stockCode, date])
+  @@index([date])
+}
+
+// 個股信用交易餘額（融資、融券），來源：TWSE MI_MARGN / TPEx margin/balance
+// 單位一律「股」：原始資料源以「張」計（1 張 = 1000 股），入庫時 ×1000
+model MarginTrading {
+  id                Int      @id @default(autoincrement())
+  stockCode         String
+  date              DateTime
+  marginBalance     BigInt // 融資今日餘額（股）。原始為張，入庫 ×1000
+  marginBalancePrev BigInt // 融資前日餘額（股），直接取 API 的「前日餘額」欄，不自己 join。原始為張，入庫 ×1000
+  marginQuota       BigInt? // 融資次一營業日限額（股）。TWSE 有；TPEx 為「資限額」。原始為張，入庫 ×1000
+  shortBalance      BigInt // 融券今日餘額（股）。原始為張，入庫 ×1000
+  shortBalancePrev  BigInt // 融券前日餘額（股）。原始為張，入庫 ×1000
+  offsetting        BigInt? // 資券互抵（張數 ×1000 → 股）。TWSE「資券互抵」/ TPEx「資券相抵(張)」
+  source            Market
+  fetchedAt         DateTime @default(now())
 
   stock Stock @relation(fields: [stockCode], references: [code])
 
