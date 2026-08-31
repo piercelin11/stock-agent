@@ -139,15 +139,19 @@ function macdStatusSeries(closes: number[]): (string | null)[] {
   return status;
 }
 
-// codes 傳入時只重算這幾支（例：某支股票事後補齊報價後單獨補指標），不傳則跑全市場一般股票
+// codes 傳入時只重算這幾支（例：某支股票事後補齊報價後單獨補指標），不傳則跑全市場一般股票 + TAIEX。
+// TAIEX（securityType=index）的 MACD/RSI/ATR 等分項算出來無妨，大盤濾網只讀 ma60 和 bollingerBandwidth。
 export async function calculateTechnicalIndicators(codes?: string[]): Promise<{ processed: number; indicatorsWritten: number }> {
   const stocks = await prisma.stock.findMany({
-    where: { securityType: "stock", ...(codes ? { code: { in: codes } } : {}) },
+    where: {
+      OR: [{ securityType: "stock" }, { code: "TAIEX" }],
+      ...(codes ? { code: { in: codes } } : {}),
+    },
     select: { code: true },
     orderBy: { code: "asc" },
   });
 
-  console.log(`共 ${stocks.length} 支一般股票待計算。`);
+  console.log(`共 ${stocks.length} 支（含 TAIEX）待計算。`);
 
   let processed = 0;
   let indicatorsWritten = 0;
@@ -227,8 +231,8 @@ export async function calculateTechnicalIndicators(codes?: string[]): Promise<{ 
 
 const isMain = process.argv[1] && import.meta.url === new URL(process.argv[1], "file://").href;
 if (isMain) {
-  // 可選：傳股票代號當參數，只重算那幾支（npx tsx scripts/calculate-technical-indicators.ts 4104 2330）
-  const codeArgs = process.argv.slice(2).filter((a) => /^\d{4}[A-Z]?$/.test(a));
+  // 可選：傳股票代號當參數，只重算那幾支（pnpm tsx scripts/pipeline/calculate-technical-indicators.ts 4104 2330 TAIEX）
+  const codeArgs = process.argv.slice(2).filter((a) => /^\d{4}[A-Z]?$/.test(a) || a === "TAIEX");
   calculateTechnicalIndicators(codeArgs.length > 0 ? codeArgs : undefined)
     .catch((err) => {
       console.error("技術指標計算失敗:", err);

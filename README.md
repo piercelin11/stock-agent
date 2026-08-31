@@ -16,8 +16,8 @@
 - `fill-daily-quotes.ts`：補齊全市場報價——TWSE 用證交所 `MI_INDEX` 報表 API，支援指定任意單一天（可補歷史缺漏）；TPEx 用櫃買中心 OpenAPI，不支援指定日期，只能補「目前最新一天」。皆會自動新增資料庫沒有的股票記錄。
 - `fill-institutional-trading.ts`：抓取指定日期的 TWSE（`T86`）+ TPEx（`tpex_3insti_daily_trading`）三大法人買賣超寫入 `InstitutionalTrading`。TWSE 支援任意歷史日期，TPEx 不支援日期參數、永遠回傳「目前最新一天」。
 - `fill-gap-valuation.ts`：抓取指定日期的個股估值（本益比/股價淨值比/殖利率）寫入 `StockValuation`，TWSE 與 TPEx 皆支援任意歷史日期。
-- `calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線、波動度、最大回撤、ATR、RSI、MACD 狀態等技術指標。
-- `calculate-market-regime.ts`：大盤濾網（市場狀態燈號）——依市場寬度等維度算 `bullish` / `neutral` / `bearish` 三段標籤，寫 `data/market-regime/{date}.json`（不進 DB）。目前 Step 1 只做「市場寬度」單維度；Step 2（TAIEX 指數位置 + MA60 斜率）待做。`daily-pipeline.ts` 第 5 步（非關鍵路徑）。
+- `calculate-technical-indicators.ts`：計算 MA5/10/20/60、布林通道、量能均線、波動度、最大回撤、ATR、RSI、MACD 狀態等技術指標（全市場一般股票 + TAIEX；傳代號陣列只重算指定幾支）。
+- `calculate-market-regime.ts`：大盤濾網（市場狀態燈號）——三維度（市場寬度、TAIEX 指數位置、TAIEX MA60 斜率）各投 ±1 合成 `bullish` / `neutral` / `bearish` 三段標籤，寫 `data/market-regime/{date}.json`（不進 DB）。TAIEX 指標未備妥時自動降級為「只用市場寬度」單維度。`daily-pipeline.ts` 第 5 步（非關鍵路徑）。
 - `calculate-industry-heat.ts`：依每日報價計算各產業等權熱度（平均漲跌幅、漲跌家數、排名）寫入 `IndustryHeatSnapshot`，支援回補多個交易日。
 
 ### `scripts/screening/`
@@ -33,6 +33,7 @@
 - `backfill-daily-quotes.ts`：用 FinMind API 逐支股票回補歷史報價至 `DailyQuote`，回補區間預設 `2020-01-01` 起（`BACKFILL_START_DATE` 覆蓋）到執行當天。
 - `backfill-institutional-trading.ts`：用 FinMind API 逐支股票回補歷史三大法人買賣超至 `InstitutionalTrading`（回補區間同上），補上 `fill-institutional-trading.ts` 只能抓當天資料的歷史缺口。
 - `backfill-benchmark-quotes.ts`：用 FinMind API 回補回測用大盤基準標的（目前 0050）的 `DailyQuote`，只寫報價、不碰技術指標/籌碼。
+- `backfill-index-quotes.ts`：用 FinMind `TaiwanStockPrice?data_id=TAIEX` 回補加權指數日線至 `DailyQuote`（開頭自建 `Stock` 記錄 `code="TAIEX"`、`securityType="index"`）。只寫報價，給大盤濾網算 MA60/帶寬用，不進選股。
 - `update-shares-outstanding.ts`：從 MOPS 公開 CSV 更新各股票已發行普通股數（月頻手動執行；市值用「股數 × 收盤價」現算，不落地存欄位）。
 
 ### 前端（`app/` + `lib/` + `components/`）
@@ -137,6 +138,9 @@ pnpm tsx scripts/backfill/backfill-institutional-trading.ts
 
 # 回補大盤基準標的報價（目前 0050，回測用）
 pnpm tsx scripts/backfill/backfill-benchmark-quotes.ts
+
+# 回補加權指數（TAIEX）日線（大盤濾網用；預設 2020-01-01 起）
+pnpm tsx scripts/backfill/backfill-index-quotes.ts
 
 # 更新已發行股數（月頻手動執行）
 pnpm tsx scripts/backfill/update-shares-outstanding.ts

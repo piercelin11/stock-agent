@@ -20,6 +20,7 @@ enum SecurityType {
   preferred
   warrant
   bond
+  index // 大盤指數（目前只有 TAIEX），僅供大盤濾網算 MA60/斜率，不進選股
   other
 }
 

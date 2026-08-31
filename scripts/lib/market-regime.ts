@@ -6,10 +6,10 @@ import type { PrismaClient } from "../../generated/prisma/client";
 // 輸出 bullish / neutral / bearish 三段標籤，供人工判斷「要不要進場」「部位大小」。
 // **不參與個股評分、不做 gate、不排除任何股票。**
 //
-// 分兩階段（同一份 PLAN）：
-//   Step 1 = 只算「市場寬度 breadth」單維度（零新資料，DailyQuote + TechnicalIndicator 現成）。
-//   Step 2 = TAIEX 日線落地後，補「指數位置 indexPosition」+「MA60 斜率 ma60Slope」兩維度，變三票合成。
-// stage 由「TAIEX 的 TechnicalIndicator 是否有該日資料」自動決定（優雅降級）。
+// 三維度合成（breadth + indexPosition + ma60Slope），stage 由「TAIEX 的 TechnicalIndicator
+// 是否有該日資料」自動決定：有 → step2-full 三票合成；沒有 → step1-breadth-only 只看 breadth
+// （優雅降級——TAIEX 資料還沒補時 pipeline 也不會炸）。
+// 歷史沿革：分兩階段實作（同一份 PLAN），Step 1 先只上 breadth、Step 2 補另兩維 + TAIEX 落地。
 
 export type RegimeLabel = "bullish" | "neutral" | "bearish";
 
