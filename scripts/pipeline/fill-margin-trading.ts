@@ -312,11 +312,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// 從今天往回逐個日曆日抓，非交易日不計數，實得約 N 個交易日
+// 從今天往回逐個日曆日抓，非交易日不計數，實得約 N 個交易日。
+// 日曆日上限抓 n*2（涵蓋週末 + 連假；交易日約佔日曆日 5/7），避免大 N 提早停在上限。
 async function runBackfill(n: number): Promise<void> {
   const collected: string[] = [];
   const start = new Date(localToday() + "T00:00:00");
-  for (let i = 0; collected.length < n && i < n + 6; i++) {
+  const maxCalendarDays = Math.max(n + 6, n * 2);
+  for (let i = 0; collected.length < n && i < maxCalendarDays; i++) {
     const d = new Date(start);
     d.setDate(d.getDate() - i);
     const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;

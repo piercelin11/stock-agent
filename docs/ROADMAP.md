@@ -82,6 +82,8 @@
 
 選股殼跑起來後的下一輪：加「市場狀態」判斷、把融資融券資料補進來、把三支選股路線收斂。三個子項彼此獨立，可分開做。
 
+**進度（2026-09-01）**：4.5.1 大盤濾網、4.5.2 融資融券資料層、4.5.3 選股引擎統一（路線 A + B + 三大法人分項 + `margin-chasing` 警示）皆完成。**4.5.3 除「等資料再校準 `margin-chasing` 觸發點」外已全部完成。** 剩餘：4.5.2 的「歷史回補到 2020」（deferred，融資融券已補到約兩個月、暫不做全 6 年）、**4.5.4 舊三支退役 + `signal-factors/` 目錄化**（收尾批，等統一引擎跑穩 + `feat/screening-unified` merge 後再做）。
+
 ### 4.5.1 大盤濾網（市場狀態燈號）— 有 PLAN.md
 
 獨立於「三層選股漏斗」之外的市場狀態模組。**不參與個股評分、不做硬性 gate**（會篩掉整個候選池，跟「篩個股」是不同層級的事），只輸出一個 `bullish` / `neutral` / `bearish` 三段標籤，顯示在首頁 banner + `/screening` 頁頂，供人工在「要不要進場」「部位大小」上判斷。空頭時照跑選股（資料照存），只是醒目警示 + 建議降低單筆風險預算。
@@ -114,15 +116,59 @@
 
 ### 4.5.3 選股引擎統一（三路線收斂）
 
-現在 `/screening` 有三個分頁：「第一根突破」（盤後）、「冷水區醞釀」（accumulation）、「盤中即時掃描」。想收斂成更少入口。分兩層，A 可先做、B 較大。
+現在 `/screening` 有三個分頁：「第一根突破」（盤後）、「冷水區醞釀」（accumulation）、「盤中即時掃描」。想收斂成更少入口。
 
-- [ ] **路線 A：盤中 / 盤後突破合併（資料源自動切換）** — 把「盤後突破」和「盤中即時掃描」兩個分頁合成一支。程式開頭查「DB 有今天的 `DailyQuote` 嗎」→ 有就用盤後 DB 資料、沒有就打 `mis.twse.com.tw` 即時 API。兩者評分邏輯本來就 100% 共用（都吃 `breakout-shared.ts`），所以只是「合併殼 + 加資料源判斷 + 產出標記行情來源（即時 / 盤後定案）」。**不依賴回測，可先做**
-- [ ] **路線 B：單一評分管線 + 階段標籤** — 突破 + 醞釀共用一組因子庫（把散在 `breakout-shared.ts` / `accumulation-shared.ts` 兩邊的評分函式合進 `signal-factors.ts`），跑全市場算完整因子分，再依 `firstBar` 狀態打階段標籤：`pre-breakout`（還沒站上布林上軌、醞釀中）/ `breakout-day`（今天第一根）/ `extended`（突破已走多日）。同一份因子分，不同階段套不同權重組合排名。前端整併為單頁 + 標籤 filter
-  - **階段權重靠肉眼校準 / 實盤觀察**（不做回測）
+**決定（2026-08-31）：跳過路線 A，直接做路線 B。** 路線 A 真正「白做」的只有前端那層兩合一殼（B 會再併成單頁 + 階段 filter，改第二次）；資料源自動切換邏輯不算白做——它本來就是 B 的一部分，**把它當 B 的第一步先落地**，不算走回頭路。
+
+- [x] **路線 A：盤中 / 盤後突破合併（資料源自動切換）** — ~~把「盤後突破」和「盤中即時掃描」兩個分頁合成一支~~。**併入路線 B 一起做**：`run-signal-scan.ts` 開頭查「DB 有今天的 `DailyQuote` 嗎」→ 有 → `source: "eod"`（讀 DB）；沒有 → `source: "realtime"`（打 `mis.twse.com.tw`）。`SignalResult.priceSource`（`eod` / `realtime` / `estimated`）標記行情來源
+- [x] **路線 B：單一評分管線 + 階段標籤** — `scripts/lib/signal-factors.ts`（統一因子庫，re-export 舊評分函式 + 新增 `computeInstitutionalFlow` / `computeBreakoutMarginMonotone` / `consecutiveAboveBand` helper + `SignalScanConfig`）+ `scripts/screening/run-signal-scan.ts`（單一評分管線）。跑全市場一般股票 → 單一 gate（市值 + 當日量 + 均量）→ 依「連續站上上軌天數」打階段標籤 `pre-breakout` / `breakout-day` / `extended` → 同一份因子分、階段套不同合併方式 → 各階段各自排名 → 落地 `data/signal-scan-results/`。前端 `ScreeningPanel.tsx` 重寫成單頁 + 階段 filter（全部 / 醞釀中 / 今日突破 / 已延伸）；Server Action `lib/actions/signal-scan.ts` 取代 `screening.ts` + `intraday.ts`
+  - **統一的範圍界定**：因子庫共用 + 單一候選池 + 資料源自動切換 + 單一前端 → **統一**；「最後一步怎麼把各因子合成一個總分」→ **按階段各自保留，不強制統一**
+  - **`pre-breakout` 階段的合併保留乘法結構**（`籌碼分數 × 技術就緒係數`，含下限 0.5 保底），**不改成加權和**。理由：這是「籌碼強 ∧ 技術收斂」的 AND 關係，加權和只能表達「可互相補償的加權投票」；一檔籌碼分數極高、但股價還在亂噴完全沒收斂的股票，加權和會靠籌碼分硬拉出高總分，判成「準備好的醞釀股」——正是乘法 + 保底原本要擋的。「統一因子分」不代表「每個階段都用同一種合併公式」
+  - **`breakout-day` / `extended` 階段用加權和**（沿用 `calculate-breakout-strength.ts` 現行的 7 分項加權結構）
+  - **階段權重 / 合併參數靠肉眼校準 / 實盤觀察**（不做回測）
   - **候選池互斥要處理**：accumulation 現在排除「已站上布林上軌」、breakout 要求「站上」，兩者候選池天然互斥；統一管線改為「都算、用階段標籤分」，互斥規則變成標籤邏輯
   - **盤中版籌碼**：三大法人 / 融資融券都是盤後才公布，盤中拿不到「當日」。盤中版籌碼因子讀「到 T-1 為止的回看窗」（例：投信近 5 日買超讀到昨天），「突破當日法人是否淨買超」這種當日子項盤中降級給中性分（沿用現有 `degraded` 機制）
-- [ ] **三大法人評分分項**（併入路線 B 的因子庫，或先單獨加進 breakout 第三層當第 8 分項）：`computeInstitutionalFlow()` — 投信近 5 日淨買超 + 外資近 5 日淨買超，各自 ÷ `volumeMa20` 標準化後線性 clip 0~100，權重投信 > 外資（30 億市值門檻區間投信訊號較乾淨）。突破當日法人淨賣超 → 分數封頂（類似 `computeCandleShape` 收黑封頂）。資料層**不用改**，`InstitutionalTrading` 的 `*NetBuy` 淨額欄位已足夠。加第 8 分項要從現有 7 項權重勻出來（`WEIGHTS` 總和維持 1）
-  - **融資融券當修正因子**（等 4.5.2 資料累積 1~2 個月後）：突破當天法人淨賣超 + 融資餘額暴增（散戶追、法人跑）→ `computeInstitutionalFlow` 分數額外封頂 + 標記 `margin-chasing` 警示。初版併進法人分項，不獨立成第 9 分項
+  - **盤中價格缺失處理（MIS `z` bug：超過半數個股回應無成交價）**：缺 `z` 時**不剔除、不用中價猜**。
+    - `breakoutMargin` / `firstBar` / `proximityToHigh` / `relativeStrength` 四項：**用當日最高價 `h` 代入 close**。`h` 是「有沒有站上上軌 / 距高點多遠 / 期間報酬」這類問題有數學確定性的保守上界，代入只會低估突破強度，方向安全。**分數照常參與加權，不標 degraded**（h 代入的分數是真實有意義的，不是佔位分）。
+    - `candleShape`：**走既有 degraded 慣例，給中性 50 分**。這項問的正是「有沒有從高點 `h` 拉回」，用 `h` 代入會強制回答「沒拉回」——不是保守，是編造答案；用中價 `(h+l)/2` 也是無根據的填空。缺 `z` 就套系統本來就有的降級規則，不發明新例外。
+    - `volumeStrength`：不受影響（吃 volume 不吃價）。
+    - **落地 JSON**：`data/intraday-breakout-snapshots/{timestamp}.json` 每檔加 `priceSource: "realtime" | "estimated"`（有 `z` / 缺 `z`）。前端 `getIntradayResult` 讀到 `estimated` 顯示標記 + 提示「突破判定基於盤中最高價、K棒形態項為佔位分」。盤後版結果無此欄（或固定 `"final"`），前端合併顯示時靠這欄區分即時估計 vs 盤後定案（= 路線 B「標記行情來源」）。`candleShape` 分項的 `degraded` 沿用現有評分明細機制，本來就在檔內。
+- [x] **三大法人評分分項**：`computeInstitutionalFlow()`（`scripts/lib/signal-factors.ts`）— 近 5 日投信 + 外資淨買超各自 ÷ `volumeMa20` → clip `[0, clipDivisor]` 線性映射 0~100，投信權重 0.6 > 外資 0.4。突破當日法人淨賣超 → 分數封頂 `sellCapScore`(40)；盤中拿不到當日法人 → 不封頂但標 `degraded`。breakout-day / extended 階段的第 8 分項（從現行 7 項各 ×0.90 勻出 `institutionalFlow: 0.10`，總和維持 1）。首版參數全部拍腦袋、待肉眼校準
+  - **正規化先用「÷ `volumeMa20`」的簡單版，不一開始就上歷史百分位**。若實測「前段偏大型股」的偏誤仍明顯（權值股外資穩定流入吃高分，見第 1 節 §1「參數校準」的同一現象），再升級成「每檔對自己歷史淨買超分布取百分位」的版本
+  - [x] **融資融券當修正因子 — `margin-chasing` 警示**（PLAN 2026-09-01）：`breakout-day`/`extended` 階段，突破當天三大法人（投信＋外資）淨賣超 **且** 這檔融資餘額近 5 日累積增速排在自己 40 天歷史前 20%（`computeMarginSurgePercentile` 百分位 > 80）→ `SignalResult.warnings` push `"margin-chasing"`。**只標記不動分數**（不疊 `computeInstitutionalFlow` 封頂 / 權重）——標記取代動態調整，跟 `degraded` 哲學一致。`warnings` 與 `degraded` 語意分開（資料充足的風險訊號 vs 資料不足的不確定）。realtime 當日融資餘額拿不到 → 恆不觸發。前端列尾紅「追」badge + 展開紅框提示
+    - **待校準觸發點**：累積滿 3 個月融資融券資料後（約 2026-11 起），回頭檢查此因子實際觸發頻率 + 命中準確度，再決定 `surgePercentileThreshold`(80) / `lookbackDays`(5) / `historyWindowDays`(40) 要不要調
+
+### 4.5.4 舊三支退役 + `signal-factors/` 目錄化（收尾，不急）
+
+4.5.3 統一引擎（`run-signal-scan.ts`）上線後，`/screening`、Dashboard、Server Action 都已改吃統一管線。舊三支（`calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts`）+ 兩個 shared 檔（`breakout-shared.ts` / `accumulation-shared.ts`）目前**留原地可跑、退役待這一批**。這批把它們正式收掉，並把因子庫從「`signal-factors.ts` 薄 re-export 層 + 兩個 shared 檔本體」整併成 `signal-factors/` 目錄。
+
+**做這批的前提**：(1) 統一引擎跑過幾天、肉眼確認排名穩定；(2) `feat/screening-unified` 已 merge 進 `main`。**確認前不動**（現在動 = 在還有 4 個外部 import 者、舊路徑沒退役時動刀，風險 > 收益）。
+
+**現況盤點（2026-09-01）**：
+- `breakout-shared.ts`（662 行）現役 import 者：`signal-factors.ts` + `calculate-breakout-strength.ts` + `calculate-accumulation-score.ts` + `check-intraday-breakout.ts` + **`lib/actions/dashboard.ts`**（唯一前端消費者，拿 `computeCandleShape` / `computeVolumeStrength` / `computeBase` / `resolveBreakoutConfig`）。
+- `accumulation-shared.ts`（427 行）現役 import 者：`signal-factors.ts` + `calculate-accumulation-score.ts`。
+- `market-regime.ts`、`accumulation-shared.ts` 內文提到 breakout-shared 的地方都只是**註解**，非 import。
+- `signal-factors.ts` 已是聚合層：import 兩 shared 檔的評分函式 → re-export；`run-signal-scan.ts` 只認 `signal-factors.ts`。
+- 兩 shared 檔各有一份重複的 `clip` / `rankScore`（合併時消除）。
+
+**步驟**：
+
+- [ ] **Step 1 — 補齊 `signal-factors.ts` 的 re-export 面**：把 `dashboard.ts` 需要但目前沒 re-export 的（`resolveBreakoutConfig` 等）補上，使 `signal-factors.ts` 的 export = `breakout-shared` + `accumulation-shared` + 自身新增的全集。
+- [ ] **Step 2 — 所有 import 者改指向 `signal-factors`**：`lib/actions/dashboard.ts`、`calculate-breakout-strength.ts`、`calculate-accumulation-score.ts`、`check-intraday-breakout.ts` 的 `breakout-shared` / `accumulation-shared` import 全部換成 `signal-factors`（或 Step 4 的新 barrel 路徑）。改完後兩 shared 檔的 import 者只剩 `signal-factors.ts` 一個。`pnpm exec tsc --noEmit` + `pnpm build` 驗證。
+- [ ] **Step 3 — 舊三支 + 孤兒 runner 移進 `archive/`**：`calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts` / `_run-intraday-scan.ts` → `scripts/archive/`（專案慣例：停用留參考，不是 `rm`）。同步更新 CLAUDE.md「既有腳本」段 + README 路徑。
+- [ ] **Step 4 — 因子庫目錄化**：新建 `scripts/lib/signal-factors/`：
+  - `index.ts` — barrel（`export * from` 各檔；`run-signal-scan.ts` / `dashboard.ts` 都 import 這個）
+  - `breakout.ts` — 原 `breakout-shared.ts` 內容
+  - `accumulation.ts` — 原 `accumulation-shared.ts` 內容（去掉重複的 `clip` / `rankScore`，改從 `breakout.ts` 或共用 `util.ts` 拿）
+  - `institutional.ts` — `computeInstitutionalFlow` / `computeMarginSurgePercentile`
+  - `staging.ts` — `consecutiveAboveBand` / `computeBreakoutMarginMonotone`
+  - `config.ts` — `SignalScanConfig` / `DEFAULT_SIGNAL_CONFIG` / `resolveSignalConfig`
+  - 舊 `scripts/lib/signal-factors.ts` 單檔刪除（import 全改指向目錄）。
+- [ ] **Step 5 — 刪 `breakout-shared.ts` / `accumulation-shared.ts`**：內容已搬進 `signal-factors/`、無人 import → `git rm`。**這兩個是被吸收進新結構的函式庫，直接刪、不進 `archive/`**（留著只會有兩份同名函式）。
+- [ ] **Step 6 — 刪 `data/` 舊輸出資料夾**：`data/breakout-strength-results/` / `data/accumulation-score-results/` / `data/intraday-breakout-snapshots/` — 只有已 archive 的腳本會寫，無保留價值（先確認是否 gitignored）。
+- [ ] **Step 7 — 單測搬遷**：`scripts/lib/signal-factors.test.ts` 的 import 路徑跟著改；若 `breakout-shared` / `accumulation-shared` 原本有各自的測試，一併併進 `signal-factors/` 的測試。
+- **不動**：`scripts/lib/mis-quotes.ts`（`run-signal-scan.ts` realtime 路徑仍在用）、`scripts/lib/market-regime.ts`（獨立，只註解提到 shared 檔）、`scripts/lib/http.ts` / `types.ts`。
+- **驗收**：`pnpm exec tsc --noEmit` + `pnpm build` + `pnpm tsx --test scripts/lib/signal-factors/*.test.ts` 全綠；`grep -rl "breakout-shared\|accumulation-shared" --include="*.ts"` 只在 CLAUDE.md / docs 的歷史敘述出現、程式碼 0 命中。
 
 ## 5. 盤中提醒
 

@@ -13,11 +13,12 @@ export default async function ScreeningPage() {
       <div>
         <h1 className="text-xl font-semibold text-slate-100">選股</h1>
         <p className="mt-1 text-sm text-slate-500">
-          跑最新交易日的盤後選股，結果不寫資料庫（沿用純函式的 data/*-results 落地）。
-          勾選候選股可一鍵加入觀察清單。「盤中即時掃描」為背景執行，可切走再回來看進度。
+          單一訊號掃描：一顆按鈕自動判斷盤後 / 盤中資料源，全市場算完整因子分後依「第一根」
+          狀態分成醞釀中 / 今日突破 / 已延伸三階段各自排名。結果不寫資料庫（落地 data/signal-scan-results）。
+          勾選候選股可一鍵加入觀察清單。盤中模式為背景執行，可切走再回來看進度。
         </p>
       </div>
-      {/* 按「開始選股」前先看到大盤狀態；不擋按鈕、不改 runScreening 行為。 */}
+      {/* 按掃描前先看到大盤狀態；不擋按鈕。 */}
       <RegimeBanner regime={regime} variant="strip" />
       <ScreeningPanel />
     </div>

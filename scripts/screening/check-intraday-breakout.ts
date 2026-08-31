@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient, Market } from "../../generated/prisma/client";
+import { PrismaClient } from "../../generated/prisma/client";
 import type { DeepPartial } from "../lib/types";
 import {
   rankScore,
@@ -19,6 +19,12 @@ import {
   type BreakoutConfig,
   type HistoryPoint,
 } from "../lib/breakout-shared";
+import {
+  BATCH_SIZE,
+  computeElapsedRatio,
+  fetchAllMisQuotes,
+  type MisQuote,
+} from "../lib/mis-quotes";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -36,159 +42,11 @@ function makePrisma(): PrismaClient {
   return new PrismaClient({ adapter });
 }
 
-const MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp";
-const BATCH_SIZE = 120;
-const BATCH_DELAY_MS = 1500;
-
-const MARKET_OPEN_HOUR = 9;
-const MARKET_CLOSE_HOUR = 13;
-const MARKET_CLOSE_MINUTE = 30;
-const TRADING_MINUTES = (MARKET_CLOSE_HOUR - MARKET_OPEN_HOUR) * 60 + MARKET_CLOSE_MINUTE; // 270 分鐘
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function toIsoDate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
-// ---- MIS 即時報價 ----
-interface MisRawRow {
-  c: string; // 代號
-  n: string; // 名稱
-  z: string; // 成交價（可能是 "-"）
-  y?: string; // 昨收
-  v?: string; // 累計成交量（張，可能缺失或 "-"）
-  d?: string; // 日期
-  o?: string; // 開盤價（可能缺失或 "-"）
-  h?: string; // 盤中至今最高價（可能缺失或 "-"）
-  l?: string; // 盤中至今最低價（可能缺失或 "-"）
-}
-
-interface MisQuote {
-  code: string;
-  name: string;
-  price: number;
-  prevClose: number | null;
-  cumulativeVolume: number;
-  date: string | null;
-  open: number | null;
-  high: number | null;
-  low: number | null;
-}
-
-function exChPrefix(market: Market): string {
-  return market === Market.TWSE ? "tse" : "otc";
-}
-
-function parseMisDate(raw: string | undefined): string | null {
-  if (!raw) return null;
-  // 觀察到的格式可能是 YYYYMMDD；若格式不符，回傳 null 而不是猜測解析
-  if (/^\d{8}$/.test(raw)) {
-    return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
-  }
-  if (/^\d{4}\/\d{2}\/\d{2}$/.test(raw)) {
-    return raw.replaceAll("/", "-");
-  }
-  return null;
-}
-
-async function fetchMisBatch(codes: { code: string; market: Market }[]): Promise<{
-  quotes: MisQuote[];
-  failed: boolean;
-}> {
-  const exCh = codes.map((c) => `${exChPrefix(c.market)}_${c.code}.tw`).join("|");
-  const url = new URL(MIS_URL);
-  url.searchParams.set("ex_ch", exCh);
-  url.searchParams.set("json", "1");
-  url.searchParams.set("delay", "0");
-
-  try {
-    const res = await fetch(url.toString(), { headers: { "User-Agent": "Mozilla/5.0" } });
-    if (!res.ok) {
-      console.warn(`⚠ MIS 批次請求失敗: ${res.status} ${res.statusText}（${codes.length} 檔）`);
-      return { quotes: [], failed: true };
-    }
-    const body = (await res.json()) as { msgArray?: MisRawRow[] };
-    const rows = body.msgArray ?? [];
-
-    const quotes: MisQuote[] = [];
-    for (const row of rows) {
-      if (row.z === "-" || row.z === undefined) continue; // 尚無成交，跳過
-      const price = parseFloat(row.z);
-      if (!Number.isFinite(price)) continue;
-
-      // MIS 的 v 欄位單位是「張」，換算成「股」以跟 DailyQuote.volume / GATES.minVolumeShares 的股數單位一致
-      const volumeRaw = row.v;
-      const cumulativeVolumeLots =
-        volumeRaw === undefined || volumeRaw === "-" ? 0 : (parseFloat(volumeRaw) || 0);
-      const cumulativeVolume = cumulativeVolumeLots * 1000;
-
-      const prevCloseRaw = row.y;
-      const prevCloseParsed =
-        prevCloseRaw === undefined || prevCloseRaw === "-" ? NaN : parseFloat(prevCloseRaw);
-      const prevClose = Number.isFinite(prevCloseParsed) && prevCloseParsed > 0 ? prevCloseParsed : null;
-
-      const parsePositive = (raw: string | undefined): number | null => {
-        if (raw === undefined || raw === "-") return null;
-        const parsed = parseFloat(raw);
-        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-      };
-
-      quotes.push({
-        code: row.c,
-        name: row.n,
-        price,
-        prevClose,
-        cumulativeVolume,
-        date: parseMisDate(row.d),
-        open: parsePositive(row.o),
-        high: parsePositive(row.h),
-        low: parsePositive(row.l),
-      });
-    }
-    return { quotes, failed: false };
-  } catch (err) {
-    console.warn(`⚠ MIS 批次請求例外: ${err instanceof Error ? err.message : String(err)}（${codes.length} 檔）`);
-    return { quotes: [], failed: true };
-  }
-}
-
-async function fetchAllMisQuotes(
-  stocks: { code: string; market: Market }[],
-  onBatch?: (done: number, total: number, failedSoFar: number) => void,
-): Promise<{ quotes: Map<string, MisQuote>; failedCount: number }> {
-  const quotes = new Map<string, MisQuote>();
-  let failedCount = 0;
-
-  for (let i = 0; i < stocks.length; i += BATCH_SIZE) {
-    const batch = stocks.slice(i, i + BATCH_SIZE);
-    const { quotes: batchQuotes, failed } = await fetchMisBatch(batch);
-    if (failed) {
-      failedCount += batch.length;
-    } else {
-      for (const q of batchQuotes) {
-        quotes.set(q.code, q);
-      }
-    }
-    onBatch?.(Math.min(i + BATCH_SIZE, stocks.length), stocks.length, failedCount);
-    if (i + BATCH_SIZE < stocks.length) {
-      await sleep(BATCH_DELAY_MS);
-    }
-  }
-
-  return { quotes, failedCount };
-}
-
-// ---- elapsedRatio ----
-function computeElapsedRatio(now: Date): { raw: number; clipped: number } {
-  const minutesSinceOpen =
-    (now.getHours() - MARKET_OPEN_HOUR) * 60 + now.getMinutes() + now.getSeconds() / 60;
-  const raw = minutesSinceOpen / TRADING_MINUTES;
-  const clipped = Math.min(Math.max(raw, 0.05), 1.0);
-  return { raw, clipped };
-}
+// MIS 即時報價抓取已抽到 scripts/lib/mis-quotes.ts（run-signal-scan.ts 的 realtime 路徑共用）。
 
 // ---- 主流程 ----
 export interface CandidateResult {
@@ -342,6 +200,8 @@ async function runSnapshot(
 
   for (const code of codes) {
     const quote = misQuotes.get(code)!;
+    // MIS z bug：缺成交價的檔在此腳本沿用舊行為直接跳過（run-signal-scan.ts 才做 h 代入）
+    if (quote.price === null) continue;
     const ind = prevIndicatorByCode.get(code);
     if (!ind || ind.bollingerUpper === null || ind.volumeMa20 === null || ind.volumeMa20 <= 0) continue;
 
@@ -500,6 +360,7 @@ async function runSnapshot(
   const marketHistoryByStock = new Map<string, { date: Date; close: number }[]>();
   for (const code of codes) {
     const quote = misQuotes.get(code)!;
+    if (quote.price === null) continue; // 缺成交價：此腳本不納入 RS 母體（沿用舊行為）
     marketHistoryByStock.set(code, [{ date: now, close: quote.price }]);
   }
   for (const row of marketHistoryRows) {

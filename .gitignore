@@ -45,6 +45,7 @@ tsconfig.tsbuildinfo
 /data/breakout-strength-results/
 /data/intraday-breakout-snapshots/
 /data/accumulation-score-results/
+/data/signal-scan-results/
 /data/market-regime/
 /data/daily-pipeline-runs/
 
