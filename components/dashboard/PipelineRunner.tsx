@@ -81,12 +81,12 @@ export function PipelineRunner() {
     : 0;
 
   return (
-    <div className="mt-5 border-t border-slate-800 pt-4">
+    <div className="mt-5 border-t border-border pt-4">
       <div className="flex items-center gap-3">
         <button
           onClick={onRun}
           disabled={busy || running}
-          className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+          className="rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {running ? "更新中…" : "立即更新資料"}
         </button>
@@ -94,25 +94,25 @@ export function PipelineRunner() {
           <FieldLabel>已 {elapsed} 秒（可離開此頁，回來會接上進度）</FieldLabel>
         )}
         {!running && status?.status === "done" && (
-          <FieldLabel className="text-emerald-400">
+          <FieldLabel className="text-success">
             上次更新完成（{status.finishedAt?.slice(11, 19) ?? "—"}）
           </FieldLabel>
         )}
         {!running && status?.status === "error" && (
-          <FieldLabel className="text-rose-400">
+          <FieldLabel className="text-destructive">
             上次執行失敗（exit {status.exitCode ?? "?"}）
           </FieldLabel>
         )}
       </div>
 
-      {err && <p className="mt-2 text-sm text-rose-400">{err}</p>}
+      {err && <p className="mt-2 text-sm text-destructive">{err}</p>}
 
       {status && status.status === "error" && (
-        <p className="mt-2 text-xs text-slate-500">log：{status.logPath}</p>
+        <p className="mt-2 text-xs text-muted-foreground/70">log：{status.logPath}</p>
       )}
 
       {status && status.logTail.length > 0 && (
-        <pre className="mt-2 max-h-40 overflow-auto rounded bg-slate-950 p-2 text-xs text-slate-400">
+        <pre className="mt-2 max-h-40 overflow-auto rounded bg-background p-2 text-xs text-muted-foreground">
           {status.logTail.join("\n")}
         </pre>
       )}

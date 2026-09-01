@@ -38,8 +38,9 @@
 
 ### 前端（`app/` + `lib/` + `components/`）
 
-Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4。**全站固定深色**（無 light/dark 切換）。
+Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4 + `clsx` / `tailwind-merge` / `class-variance-authority`。**全站固定深色**（無 light/dark 切換）。
 
+- 配色：`app/globals.css` 的**角色化** semantic color token（`bg-background` / `bg-card` / `bg-muted` / `text-foreground` / `text-muted-foreground` / `border-border` / `bg-primary` / `text-up` / `text-warning` / `text-destructive`…）為單一出處，值為 HEX；token 代表「用途」不是「色階深淺」，要更淡的字用 `text-foreground/80` 這類透明度修飾。元件不直接寫 `slate-*` / `blue-*` 等色階。`lib/cn.ts` 的 `cn()` = `clsx` + `tailwind-merge`；`Button.tsx` 用 `cva` 定義 variant。
 - `app/`：`layout.tsx`（側邊欄）、`page.tsx`（Dashboard：資料狀態卡 + 觀察類股今日表現表）、`screening/`（選股頁）、`watchlist/`（觀察清單頁）。
 - `lib/prisma.ts`：`PrismaClient` 單例（`globalThis` 快取，dev hot reload 不爆連線池），檔頭 `import "server-only"`。**只能在 Server Component / Server Action import。**
 - `lib/actions/`：Server Actions（不建 REST/GraphQL API），檔頭 `"use server"`——`health.ts` / `signal-scan.ts`（統一選股：`getScanMode` + eod 同步跑 + realtime 背景任務）/ `watchlist.ts` / `dashboard.ts`（觀察類股今日表現）/ `market-regime.ts`（大盤濾網燈號，純讀 `data/market-regime/` 檔）/ `pipeline.ts`（首頁「立即更新資料」）。
