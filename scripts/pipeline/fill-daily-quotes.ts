@@ -138,13 +138,29 @@ function parseTpexRow(row: TpexRow): ParsedRow | null {
   };
 }
 
+// 打政府端點的冷握手常被 RST，重試放寬到 5 次、間隔拉長（3s→6s→12s→24s）。
+const GOV_FETCH_OPTS = { retries: 5, baseDelayMs: 3000 } as const;
+
+// 冷進程對 www.tpex.org.tw 第一次 DNS+TLS 握手常被 RST（launchd 事故 2026-09-01）。
+// 先用一個「便宜、允許失敗」的請求把 DNS 解析 + TLS session 建起來，真正的 API 呼叫走溫連線。
+async function warmUpTpex(): Promise<void> {
+  try {
+    await fetch("https://www.tpex.org.tw/", {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    /* 預熱失敗無所謂，下面的正式呼叫自己有 retry */
+  }
+}
+
 async function fetchTwseQuotes(date: string): Promise<ParsedRow[] | null> {
   const url = new URL(MI_INDEX_URL);
   url.searchParams.set("response", "json");
   url.searchParams.set("date", toApiDate(date));
   url.searchParams.set("type", "ALL");
 
-  const body = await fetchJson<MiIndexResponse>(url.toString());
+  const body = await fetchJson<MiIndexResponse>(url.toString(), GOV_FETCH_OPTS);
   if (!body.tables) {
     // 非交易日或無資料時，回應不含 tables 欄位
     return null;
@@ -160,7 +176,8 @@ async function fetchTwseQuotes(date: string): Promise<ParsedRow[] | null> {
 
 // TPEx OpenAPI 不支援指定日期查詢，只能拿到目前的最新一天，跟 top20-gainers.js 同源
 async function fetchTpexQuotes(): Promise<{ date: string; rows: ParsedRow[] } | null> {
-  const body = await fetchJson<TpexRow[]>(TPEX_QUOTES_URL);
+  await warmUpTpex();
+  const body = await fetchJson<TpexRow[]>(TPEX_QUOTES_URL, GOV_FETCH_OPTS);
   const firstRow = body[0];
   if (!Array.isArray(body) || firstRow === undefined) {
     return null;

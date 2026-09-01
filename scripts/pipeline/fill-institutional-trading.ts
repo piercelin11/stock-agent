@@ -73,7 +73,7 @@ async function fetchTwseInstitutional(isoDate: string): Promise<InstitutionalRow
   url.searchParams.set("selectType", "ALL");
   url.searchParams.set("response", "json");
 
-  const body = await fetchJson<TwseT86Response>(url.toString());
+  const body = await fetchJson<TwseT86Response>(url.toString(), { retries: 5, baseDelayMs: 3000 });
   if (body.stat !== "OK" || !body.data) {
     // 非交易日的 stat 是「很抱歉，沒有符合條件的資料!」
     return null;
@@ -97,7 +97,7 @@ async function fetchTwseInstitutional(isoDate: string): Promise<InstitutionalRow
 
 // TPEx OpenAPI 不支援指定日期查詢，只能拿到目前的最新一天
 async function fetchTpexInstitutional(): Promise<{ date: string; rows: InstitutionalRow[] } | null> {
-  const body = await fetchJson<TpexInstitutionalRow[]>(TPEX_URL);
+  const body = await fetchJson<TpexInstitutionalRow[]>(TPEX_URL, { retries: 5, baseDelayMs: 3000 });
   const firstRow = body[0];
   if (!Array.isArray(body) || firstRow === undefined) {
     return null;
