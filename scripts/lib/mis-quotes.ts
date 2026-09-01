@@ -1,7 +1,7 @@
 // MIS（mis.twse.com.tw）即時報價抓取 —— 純 Node 函式庫（無 Prisma / CLI），比照 scripts/lib/http.ts。
 //
-// 2026-08-31 從 check-intraday-breakout.ts 抽出，供 run-signal-scan.ts 的 realtime 路徑與
-// （尚未退役的）check-intraday-breakout.ts 共用。純搬移，行為不變。
+// 2026-08-31 從當時的 check-intraday-breakout.ts 抽出（該檔已於 4.5.4 退役移除）。
+// 現由 run-signal-scan.ts 的 realtime 路徑使用。純搬移，行為不變。
 //
 // mis.twse.com.tw/stock/api/getStockInfo.jsp 是社群逆向工程端點，非官方文件。
 // 回應中超過半數個股 `z`（成交價）為空——是 API bug（不是冷門股沒成交），呼叫端要自行處理

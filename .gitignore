@@ -42,9 +42,6 @@ tsconfig.tsbuildinfo
 # Screener output (generated daily, not source)
 /data/screener-results/
 /data/screen-score-results/
-/data/breakout-strength-results/
-/data/intraday-breakout-snapshots/
-/data/accumulation-score-results/
 /data/signal-scan-results/
 /data/market-regime/
 /data/daily-pipeline-runs/

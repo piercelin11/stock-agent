@@ -31,7 +31,7 @@ import {
   type SignalScanConfig,
   type HistoryPoint,
   type BreakoutRawInputs,
-} from "../lib/signal-factors";
+} from "../lib/signal-factors/index";
 import {
   BATCH_SIZE,
   computeElapsedRatio,

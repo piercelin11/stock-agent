@@ -25,8 +25,8 @@
 
 - `run-signal-scan.ts`：**統一選股引擎**（三路線收斂）。跑全市場一般股票 → 單一 gate（30 億市值 + 當日量 1000 張 + 近 20 日均量 500 張）→ 依「連續站上布林上軌天數」打階段標籤 `pre-breakout`（醞釀中）/ `breakout-day`（今日突破）/ `extended`（已延伸）→ 同一份因子分、階段套不同合併方式（醞釀 = 乘法「籌碼分 × 就緒係數」；突破 = 8 分項加權和）→ 各階段各自排名 → 落地 `data/signal-scan-results/`。**資料源自動切換**：今天有 `DailyQuote` → 讀 DB（盤後定案）；沒有 → 打 `mis.twse.com.tw` 即時報價（缺成交價用當日最高價代入、標 `estimated`）。匯出 `runSignalScan(date, { prisma?, config?, source?, now? })`。CLI：不帶參數自動判斷 / `--date=YYYY-MM-DD`（強制盤後補算）/ `--source=realtime|eod`。不接進 `daily-pipeline.ts`。
 - `_run-signal-scan.ts`：被選股頁 `startSignalScan()` spawn 的內部 runner（非手動執行入口），只跑 realtime，最外層覆寫 `progress.json` 終態。
-- `calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts`：**舊三支，已由 `run-signal-scan.ts` 統一**。保留可跑（各自 CLI / 匯出純函式），退役待下一批。`check-intraday-breakout.ts` 改用 `scripts/lib/mis-quotes.ts`。`_run-intraday-scan.ts`（舊 intraday runner）因對應 Server Action 已刪成孤兒，仍可 CLI 跑。
-- `scripts/lib/`：純函式庫。`http.ts`（retry/timeout fetch）、`signal-factors.ts`（統一因子庫：re-export 舊評分函式 + `computeInstitutionalFlow` / `computeBreakoutMarginMonotone` / `consecutiveAboveBand` + `SignalScanConfig`；單測 `signal-factors.test.ts`）、`mis-quotes.ts`（MIS 即時報價抓取）、`breakout-shared.ts` / `accumulation-shared.ts`（各含常數 + `XxxConfig` 型別 + `DEFAULT_XXX_CONFIG` + `resolveXxxConfig` + 評分純函式 + `fetchXxxRawInputs` 撈 DB helper）、`market-regime.ts`（大盤濾網）、`types.ts`（`DeepPartial`）。
+- （舊三支 `calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts` + 孤兒 runner `_run-intraday-scan.ts` 已於 4.5.4（2026-09-01）退役刪除，功能全由 `run-signal-scan.ts` 涵蓋。）
+- `scripts/lib/`：純函式庫。`http.ts`（retry/timeout fetch）、`signal-factors/`（統一因子庫目錄：`index.ts` barrel + `util.ts`（`clip`/`rankScore`）+ `breakout.ts` / `accumulation.ts`（常數 + `XxxConfig` 三件組 + 評分純函式 + `fetchXxxRawInputs` 撈 DB helper）+ `institutional.ts`（`computeInstitutionalFlow` / `computeMarginSurgePercentile`）+ `staging.ts`（`consecutiveAboveBand` / `computeBreakoutMarginMonotone`）+ `config.ts`（`SignalScanConfig` / `DEFAULT_SIGNAL_CONFIG` / `resolveSignalConfig`）；單測 `signal-factors/factors.test.ts`）、`mis-quotes.ts`（MIS 即時報價抓取）、`market-regime.ts`（大盤濾網）、`types.ts`（`DeepPartial`）。
 
 ### `scripts/backfill/`
 
@@ -45,7 +45,7 @@ Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4。**全站固
 - `lib/actions/`：Server Actions（不建 REST/GraphQL API），檔頭 `"use server"`——`health.ts` / `signal-scan.ts`（統一選股：`getScanMode` + eod 同步跑 + realtime 背景任務）/ `watchlist.ts` / `dashboard.ts`（觀察類股今日表現）/ `market-regime.ts`（大盤濾網燈號，純讀 `data/market-regime/` 檔）/ `pipeline.ts`（首頁「立即更新資料」）。
 - `components/`：`ui/`（手刻基礎元件）、`screening/`、`watchlist/`、`dashboard/`。
 
-**Dashboard `/`**：頂部一條大盤濾網橫幅（市場狀態燈號：偏多綠 / 中性琥珀 / 偏空紅 + 三段對應的部位建議文字，可展開看維度明細）。下方 ①「資料狀態」卡＝今日行情燈號（DB 最新交易日 vs Asia/Taipei 今日，綠 / 紅）＋ 一般股票檔數 ＋ 當日四表（報價 / 籌碼 / 技術指標 / 融資融券）覆蓋率百分比 ＋「立即更新資料」按鈕（背景跑整個 daily pipeline，可離開頁面、切回接上進度，跑完自動刷新覆蓋率）。②「觀察類股今日表現」＝觀察清單每檔一張卡片（grid 2–4 欄），左側 60 日走勢圖（Y 軸用布林帶寬正規化＝收盤相對布林中軌的偏離比例，所有卡同刻度 → 盤整期線壓中線、噴出頂到邊界，卡跟卡之間絕對起伏可比；線色依當日漲跌紅綠 + 線下漸層），右側代號 / 漲跌% / 突破 pill + K 棒·力道（量能）·位階（打底深度）三分數 + 三大法人 / 投信淨買超。全部用 `breakout-shared.ts` 的評分函式現算，不重跑全市場選股。
+**Dashboard `/`**：頂部一條大盤濾網橫幅（市場狀態燈號：偏多綠 / 中性琥珀 / 偏空紅 + 三段對應的部位建議文字，可展開看維度明細）。下方 ①「資料狀態」卡＝今日行情燈號（DB 最新交易日 vs Asia/Taipei 今日，綠 / 紅）＋ 一般股票檔數 ＋ 當日四表（報價 / 籌碼 / 技術指標 / 融資融券）覆蓋率百分比 ＋「立即更新資料」按鈕（背景跑整個 daily pipeline，可離開頁面、切回接上進度，跑完自動刷新覆蓋率）。②「觀察類股今日表現」＝觀察清單每檔一張卡片（grid 2–4 欄），左側 60 日走勢圖（Y 軸用布林帶寬正規化＝收盤相對布林中軌的偏離比例，所有卡同刻度 → 盤整期線壓中線、噴出頂到邊界，卡跟卡之間絕對起伏可比；線色依當日漲跌紅綠 + 線下漸層），右側代號 / 漲跌% / 突破 pill + K 棒·力道（量能）·位階（打底深度）三分數 + 三大法人 / 投信淨買超。全部用 `scripts/lib/signal-factors/` 的評分函式現算，不重跑全市場選股。
 
 **選股頁 `/screening`**：頁頂一條精簡大盤濾網燈號（同 Dashboard 資料源）。**單一「跑掃描」按鈕**——自動判斷資料源：今天有盤後資料 → 同步跑「盤後掃描」（秒級）；還沒有 → 「盤中掃描」背景任務（spawn 子進程對 `mis.twse.com.tw` 即時報價跑全市場快照約 20–30 秒 → 進度條輪詢；可切走再回來看進度）。跑完一張表格 + 階段 filter（全部 / 醞釀中 / 今日突破 / 已延伸）→ 點列看該階段評分明細 → 勾選一鍵加入觀察清單。盤中缺成交價的檔用最高價代入、列尾標「估」。突破階段若「突破當日法人淨賣超 + 這檔融資餘額近期暴增」列尾標紅「追」（`margin-chasing` 警示，僅提示不影響分數）。結果不寫資料庫（落地 `data/signal-scan-results/`）。
 
@@ -126,10 +126,8 @@ pnpm tsx scripts/screening/run-signal-scan.ts                  # 自動判斷盤
 pnpm tsx scripts/screening/run-signal-scan.ts --date=2026-08-31 # 強制盤後補算指定日
 pnpm tsx scripts/screening/run-signal-scan.ts --source=realtime # 強制打 MIS 即時報價
 
-# 舊三支（已由 run-signal-scan.ts 統一，保留可跑，退役待下一批）
-pnpm tsx scripts/screening/calculate-breakout-strength.ts --date=2026-08-18
-pnpm tsx scripts/screening/calculate-accumulation-score.ts --date=2026-08-26
-pnpm tsx scripts/screening/check-intraday-breakout.ts
+# 因子庫單測
+pnpm tsx --test scripts/lib/signal-factors/factors.test.ts
 
 # 回測系統已擱置，指令見 feat/backtest-ui-3.6-3.7 分支的 README
 

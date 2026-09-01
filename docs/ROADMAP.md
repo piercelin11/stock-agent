@@ -82,7 +82,7 @@
 
 選股殼跑起來後的下一輪：加「市場狀態」判斷、把融資融券資料補進來、把三支選股路線收斂。三個子項彼此獨立，可分開做。
 
-**進度（2026-09-01）**：4.5.1 大盤濾網、4.5.2 融資融券資料層、4.5.3 選股引擎統一（路線 A + B + 三大法人分項 + `margin-chasing` 警示）皆完成。**4.5.3 除「等資料再校準 `margin-chasing` 觸發點」外已全部完成。** 剩餘：4.5.2 的「歷史回補到 2020」（deferred，融資融券已補到約兩個月、暫不做全 6 年）、**4.5.4 舊三支退役 + `signal-factors/` 目錄化**（收尾批，等統一引擎跑穩 + `feat/screening-unified` merge 後再做）。
+**進度（2026-09-01）**：4.5.1 大盤濾網、4.5.2 融資融券資料層、4.5.3 選股引擎統一（路線 A + B + 三大法人分項 + `margin-chasing` 警示）、**4.5.4 舊三支退役 + `signal-factors/` 目錄化**皆完成。**整個 4.5 節除「等資料再校準 `margin-chasing` 觸發點」+ 4.5.2 的「歷史回補到 2020」（deferred，融資融券已補到約兩個月、暫不做全 6 年）外已全部完成。**
 
 ### 4.5.1 大盤濾網（市場狀態燈號）— 有 PLAN.md
 
@@ -151,24 +151,17 @@
 - `signal-factors.ts` 已是聚合層：import 兩 shared 檔的評分函式 → re-export；`run-signal-scan.ts` 只認 `signal-factors.ts`。
 - 兩 shared 檔各有一份重複的 `clip` / `rankScore`（合併時消除）。
 
-**步驟**：
+**步驟**（全部完成，2026-09-01，`feat/screening-retire-legacy` 分支）：
 
-- [ ] **Step 1 — 補齊 `signal-factors.ts` 的 re-export 面**：把 `dashboard.ts` 需要但目前沒 re-export 的（`resolveBreakoutConfig` 等）補上，使 `signal-factors.ts` 的 export = `breakout-shared` + `accumulation-shared` + 自身新增的全集。
-- [ ] **Step 2 — 所有 import 者改指向 `signal-factors`**：`lib/actions/dashboard.ts`、`calculate-breakout-strength.ts`、`calculate-accumulation-score.ts`、`check-intraday-breakout.ts` 的 `breakout-shared` / `accumulation-shared` import 全部換成 `signal-factors`（或 Step 4 的新 barrel 路徑）。改完後兩 shared 檔的 import 者只剩 `signal-factors.ts` 一個。`pnpm exec tsc --noEmit` + `pnpm build` 驗證。
-- [ ] **Step 3 — 舊三支 + 孤兒 runner 移進 `archive/`**：`calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts` / `_run-intraday-scan.ts` → `scripts/archive/`（專案慣例：停用留參考，不是 `rm`）。同步更新 CLAUDE.md「既有腳本」段 + README 路徑。
-- [ ] **Step 4 — 因子庫目錄化**：新建 `scripts/lib/signal-factors/`：
-  - `index.ts` — barrel（`export * from` 各檔；`run-signal-scan.ts` / `dashboard.ts` 都 import 這個）
-  - `breakout.ts` — 原 `breakout-shared.ts` 內容
-  - `accumulation.ts` — 原 `accumulation-shared.ts` 內容（去掉重複的 `clip` / `rankScore`，改從 `breakout.ts` 或共用 `util.ts` 拿）
-  - `institutional.ts` — `computeInstitutionalFlow` / `computeMarginSurgePercentile`
-  - `staging.ts` — `consecutiveAboveBand` / `computeBreakoutMarginMonotone`
-  - `config.ts` — `SignalScanConfig` / `DEFAULT_SIGNAL_CONFIG` / `resolveSignalConfig`
-  - 舊 `scripts/lib/signal-factors.ts` 單檔刪除（import 全改指向目錄）。
-- [ ] **Step 5 — 刪 `breakout-shared.ts` / `accumulation-shared.ts`**：內容已搬進 `signal-factors/`、無人 import → `git rm`。**這兩個是被吸收進新結構的函式庫，直接刪、不進 `archive/`**（留著只會有兩份同名函式）。
-- [ ] **Step 6 — 刪 `data/` 舊輸出資料夾**：`data/breakout-strength-results/` / `data/accumulation-score-results/` / `data/intraday-breakout-snapshots/` — 只有已 archive 的腳本會寫，無保留價值（先確認是否 gitignored）。
-- [ ] **Step 7 — 單測搬遷**：`scripts/lib/signal-factors.test.ts` 的 import 路徑跟著改；若 `breakout-shared` / `accumulation-shared` 原本有各自的測試，一併併進 `signal-factors/` 的測試。
-- **不動**：`scripts/lib/mis-quotes.ts`（`run-signal-scan.ts` realtime 路徑仍在用）、`scripts/lib/market-regime.ts`（獨立，只註解提到 shared 檔）、`scripts/lib/http.ts` / `types.ts`。
-- **驗收**：`pnpm exec tsc --noEmit` + `pnpm build` + `pnpm tsx --test scripts/lib/signal-factors/*.test.ts` 全綠；`grep -rl "breakout-shared\|accumulation-shared" --include="*.ts"` 只在 CLAUDE.md / docs 的歷史敘述出現、程式碼 0 命中。
+- [x] **Step 1 — 補齊因子庫 re-export 面**：`signal-factors/index.ts` barrel `export * from` 各子檔，`dashboard.ts` 需要的 `resolveBreakoutConfig` / `computeCandleShape` / `computeVolumeStrength` / `computeBase` 都在。
+- [x] **Step 2 — 所有 import 者改指向 `signal-factors/index`**：`lib/actions/dashboard.ts`（`breakout-shared` → `signal-factors/index`）、`run-signal-scan.ts`（`signal-factors` → `signal-factors/index`）。`tsc --noEmit` + `pnpm build` 綠。
+- [x] **Step 3 — 舊三支 + 孤兒 runner 直接刪（改成不進 `archive/`）**：`calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts` / `_run-intraday-scan.ts` → `git rm`。**評估後改成直接刪**：本體只是「串 shared 函式 + 寫 JSON」的 CLI 殼，評分邏輯已整併進 `signal-factors/`，設計理由在 `docs/PROGRESS.md`，`git show` 撈得回舊實作 → `archive/` 只會多一份要解釋的死碼。CLAUDE.md「既有腳本」段已更新。
+- [x] **Step 4 — 因子庫目錄化**：`scripts/lib/signal-factors/` = `index.ts`（barrel）+ `util.ts`（`clip` / `rankScore` 合併）+ `breakout.ts`（原 `breakout-shared.ts`）+ `accumulation.ts`（原 `accumulation-shared.ts`，`BASE_MIN_HISTORY_DAYS` 改從 `breakout.ts` import 消重）+ `institutional.ts` + `staging.ts` + `config.ts`。舊 `signal-factors.ts` 單檔刪除。
+- [x] **Step 5 — 刪 `breakout-shared.ts` / `accumulation-shared.ts`**：`git rm`（內容已搬進 `signal-factors/`、無人 import）。
+- [x] **Step 6 — 刪 `data/` 舊輸出資料夾**：`data/breakout-strength-results/` / `accumulation-score-results/` / `intraday-breakout-snapshots/` 已刪，`.gitignore` 三行一併移除（原本就 gitignored、未進版控）。
+- [x] **Step 7 — 單測搬遷**：`scripts/lib/signal-factors.test.ts` → `scripts/lib/signal-factors/factors.test.ts`（`git mv`），import 改 `./index`。31 案全綠。
+- **未動**（如計畫）：`scripts/lib/mis-quotes.ts` / `market-regime.ts` / `http.ts` / `types.ts`（`market-regime.ts` / `mis-quotes.ts` 的註解提及舊檔名處已順手更新）。
+- **驗收（全過）**：`pnpm exec tsc --noEmit` 乾淨；`pnpm build` 綠；`pnpm tsx --test scripts/lib/signal-factors/factors.test.ts` 31/31；`grep -rn "breakout-shared\|accumulation-shared" --include="*.ts"` 只剩 `signal-factors/` 內 4 處註解（歷史敘述），程式碼 0 命中。
 
 ## 5. 盤中提醒
 
@@ -184,7 +177,7 @@
 
 ### 5.2 提醒邏輯
 
-- [ ] 盤中即時報價來源：沿用 `check-intraday-breakout.ts` 用的 `mis.twse.com.tw` 端點（社群逆向工程、非官方）
+- [ ] 盤中即時報價來源：沿用 `scripts/lib/mis-quotes.ts`（`run-signal-scan.ts` realtime 路徑在用）的 `mis.twse.com.tw` 端點（社群逆向工程、非官方）
 - [ ] 對觀察清單逐檔判斷：
   - 未買入：出現「第一根突破」訊號 / 接近設定的目標買價 → 提醒「可考慮進場」
   - 已買入：跌破停損價 / 觸及停利價 / 單日大跌 → 提醒「注意風險」

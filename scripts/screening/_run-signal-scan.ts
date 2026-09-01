@@ -1,7 +1,6 @@
 // 被 lib/actions/signal-scan.ts 的 startSignalScan() spawn 的內部進入點（底線前綴 = 非手動入口）。
-// 比照 _run-intraday-scan.ts：
-//   逐批進度（phase: "fetching-quotes"）由 runSignalScan 內部的 MIS 抓取負責覆寫 progress.json；
-//   這支 runner 只在最外層覆寫 progress.json 的 done / error 終態。
+// 逐批進度（phase: "fetching-quotes"）由 runSignalScan 內部的 MIS 抓取負責覆寫 progress.json；
+// 這支 runner 只在最外層覆寫 progress.json 的 done / error 終態。
 //
 // 只跑 realtime（eod 模式由 Server Action 同步在 Next 進程內 import 跑，秒級，不需要背景任務）。
 import "dotenv/config";

@@ -2,7 +2,7 @@ import type { PrismaClient } from "../../generated/prisma/client";
 
 // 大盤濾網（市場狀態燈號）純函式。PLAN §2。
 //
-// 定位：純函式庫但允許查 DB（比照 breakout-shared.ts）。無 CLI。
+// 定位：純函式庫但允許查 DB（比照 signal-factors/breakout.ts）。無 CLI。
 // 輸出 bullish / neutral / bearish 三段標籤，供人工判斷「要不要進場」「部位大小」。
 // **不參與個股評分、不做 gate、不排除任何股票。**
 //
