@@ -112,6 +112,21 @@ export interface SignalResult {
     otherInstRatio: number | null; // = detail.otherInstRatio
     degraded: boolean; // dataDays < ceil(institutionalWindowDays * minInstitutionalDaysRatio)
   };
+  // PLAN 2 §3.1：這檔是因為在 watchlist 才豁免 gate 進 results（未過 gate / 未達觸發量比）。
+  // 前端據此標「觀察清單」提示，避免使用者誤以為它通過全部門檻。
+  fromWatchlist?: boolean;
+}
+
+// PLAN 2 §3.2：所有 watchlist 成員的即時報價（不只過 gate 的），供 watchlist 頁 PLAN 3 讀。
+// 與 SignalResult 分開：watchlist 頁需要「每一檔觀察股都有東西顯示」，即使它沒進 results。
+export interface WatchlistQuote {
+  code: string;
+  name: string;
+  close: number;
+  changePercent: number;
+  volume: number; // eod = 當日 DailyQuote.volume；realtime = 估全日量
+  priceSource: "eod" | "realtime" | "estimated";
+  refDate: string; // eod = 交易日；realtime = MIS 日期或今日
 }
 
 export interface SignalScanOutput {
@@ -130,9 +145,11 @@ export interface SignalScanOutput {
     failedCount?: number; // realtime MIS 批次失敗數
     estimatedCount?: number; // realtime 缺 z 用 h 代入的檔數
     skippedNoPriceCount?: number; // realtime z / h 都缺，跳過不評分
+    watchlistExempt?: number; // PLAN 2 §3.1：因在 watchlist 而豁免 gate / 觸發量比進 results 的檔數
   };
   warnings: string[];
   results: SignalResult[];
+  watchlistQuotes?: WatchlistQuote[]; // PLAN 2 §3.2：所有觀察股即時報價
 }
 
 export interface RunSignalScanOptions {
@@ -435,6 +452,13 @@ async function runEod(
   const totalStocks = allEntries.length;
   const codes = allEntries.map(([c]) => c);
 
+  // PLAN 2 §3.1：watchlist 成員豁免 gate（RS 分數本來就全市場算，豁免後帶得到 PR / 醞釀籌碼）
+  const watchlistCodes = new Set(
+    (await prisma.watchlistItem.findMany({ select: { stockCode: true } })).map(
+      (w) => w.stockCode,
+    ),
+  );
+
   // 2. relativeStrength：全市場一次算好百分位
   const marketHistoryByStock = new Map<string, { date: Date; close: number }[]>();
   for (const [code, raw] of allEntries) {
@@ -464,18 +488,27 @@ async function runEod(
   }
   const staged: Staged[] = [];
   let breakoutBelowVolume = 0;
+  let watchlistExempt = 0;
 
   for (const [code, raw] of allEntries) {
     const q = raw.quote;
+    const exempt = watchlistCodes.has(code);
+    // PLAN 2 §3.1：exempt 檔一律 push 進 staged，gate 全跳過（含 sharesOutstanding null——
+    // 下游 compute* 對缺值本來就有 degraded 處理）。
     // gate：市值 + 當日量 + 均量下限
-    if (q.sharesOutstanding === null) continue;
-    const marketCap = q.sharesOutstanding * q.close;
-    if (marketCap < config.gate.minMarketCap) continue;
-    if (q.volume < config.gate.minVolumeShares) continue;
+    if (!exempt && q.sharesOutstanding === null) continue;
+    if (!exempt) {
+      const marketCap = q.sharesOutstanding! * q.close;
+      if (marketCap < config.gate.minMarketCap) continue;
+      if (q.volume < config.gate.minVolumeShares) continue;
+    }
 
     const ind = raw.indicator;
     const volumeMa20 = ind?.volumeMa20 ?? null;
-    if (volumeMa20 === null || volumeMa20 <= 0 || volumeMa20 < config.gate.minAvgVolumeShares) {
+    if (
+      !exempt &&
+      (volumeMa20 === null || volumeMa20 <= 0 || volumeMa20 < config.gate.minAvgVolumeShares)
+    ) {
       continue;
     }
     const bollingerUpper = ind?.bollingerUpper ?? null;
@@ -496,6 +529,9 @@ async function runEod(
       stage = "pre-breakout";
     } else if (!aboveBand.latestAboveBand) {
       stage = "pre-breakout";
+    } else if (volumeMa20 === null || volumeMa20 <= 0) {
+      // exempt 檔沒有 volumeMa20（一般股票不會走到這，防呆）→ 無法算 breakout 分項，歸 pre-breakout
+      stage = "pre-breakout";
     } else if (aboveBand.consecutiveDays <= config.staging.extendedAfterDays) {
       stage = "breakout-day";
     } else {
@@ -504,14 +540,19 @@ async function runEod(
 
     let volumeRatio: number | null = null;
     if (stage !== "pre-breakout") {
-      volumeRatio = volumeMa20 > 0 ? q.volume / volumeMa20 : null;
-      // 觸發量比：只對 breakout 階段套用「進榜門檻」，沒過就不進 results
-      if (volumeRatio === null || volumeRatio < config.gate.triggerVolumeRatio) {
+      volumeRatio = volumeMa20 != null && volumeMa20 > 0 ? q.volume / volumeMa20 : null;
+      // 觸發量比：只對 breakout 階段套用「進榜門檻」，沒過就不進 results（exempt 檔豁免——
+      // 否則觀察股突破了但量沒到 2 倍又消失）
+      if (
+        !exempt &&
+        (volumeRatio === null || volumeRatio < config.gate.triggerVolumeRatio)
+      ) {
         breakoutBelowVolume += 1;
         continue;
       }
     }
 
+    if (exempt) watchlistExempt += 1;
     staged.push({
       code,
       name: q.name,
@@ -668,6 +709,7 @@ async function runEod(
         ),
         degraded,
         warnings: [], // pre-breakout 恆無 warnings（PLAN §4）
+        ...(watchlistCodes.has(s.code) ? { fromWatchlist: true } : {}),
       });
     });
   }
@@ -719,6 +761,7 @@ async function runEod(
       warnings: factors.warnings,
       volumeRatio: s.volumeRatio!,
       ...breakoutExtras(factors),
+      ...(watchlistCodes.has(s.code) ? { fromWatchlist: true } : {}),
     });
   }
 
@@ -731,7 +774,16 @@ async function runEod(
     breakoutDay: results.filter((r) => r.stage === "breakout-day").length,
     extended: results.filter((r) => r.stage === "extended").length,
     breakoutBelowVolume,
+    watchlistExempt,
   };
+
+  // PLAN 2 §3.2：所有 watchlist 成員的即時報價（eod = 一次批量查掃描日 DailyQuote）
+  const watchlistQuotes = await buildEodWatchlistQuotes(
+    prisma,
+    date,
+    dateStr,
+    [...watchlistCodes],
+  );
 
   const output: SignalScanOutput = {
     date: dateStr,
@@ -741,11 +793,44 @@ async function runEod(
     stats,
     warnings,
     results,
+    watchlistQuotes,
   };
 
   printSummary(output);
   writeResult(dateStr, output, config);
   return output;
+}
+
+/** PLAN 2 §3.2（eod）：一次查掃描日的 DailyQuote，缺該日 quote 的檔不放進 watchlistQuotes。 */
+async function buildEodWatchlistQuotes(
+  prisma: PrismaClient,
+  date: Date,
+  dateStr: string,
+  codes: string[],
+): Promise<WatchlistQuote[]> {
+  if (codes.length === 0) return [];
+  const rows = await prisma.dailyQuote.findMany({
+    where: { stockCode: { in: codes }, date },
+    select: {
+      stockCode: true,
+      close: true,
+      change: true,
+      volume: true,
+      stock: { select: { name: true } },
+    },
+  });
+  return rows.map((r) => {
+    const prevClose = r.close - r.change;
+    return {
+      code: r.stockCode,
+      name: r.stock.name,
+      close: r.close,
+      changePercent: prevClose > 0 ? (r.change / prevClose) * 100 : 0,
+      volume: Number(r.volume),
+      priceSource: "eod" as const,
+      refDate: dateStr,
+    };
+  });
 }
 
 // ============================================================================
@@ -814,6 +899,13 @@ async function runRealtime(
     select: { code: true, name: true, market: true, sharesOutstanding: true },
   });
   const stockByCode = new Map(stocks.map((s) => [s.code, s]));
+
+  // PLAN 2 §3.1：watchlist 成員豁免 gate（eod 路徑同）
+  const watchlistCodes = new Set(
+    (await prisma.watchlistItem.findMany({ select: { stockCode: true } })).map(
+      (w) => w.stockCode,
+    ),
+  );
   const totalBatches = Math.ceil(stocks.length / BATCH_SIZE);
   writeProgress({ phase: "fetching-quotes", fetchedBatches: 0, totalBatches, failedCount: 0 });
 
@@ -942,21 +1034,28 @@ async function runRealtime(
   }
   const staged: RtStaged[] = [];
   let breakoutBelowVolume = 0;
+  let watchlistExempt = 0;
 
   for (const row of rtRows) {
+    const exempt = watchlistCodes.has(row.code);
     const stock = stockByCode.get(row.code);
     const sharesOutstanding =
       stock?.sharesOutstanding !== null && stock?.sharesOutstanding !== undefined
         ? Number(stock.sharesOutstanding)
         : null;
-    if (sharesOutstanding === null) continue;
-    const marketCap = sharesOutstanding * row.close;
-    if (marketCap < config.gate.minMarketCap) continue;
-    if (row.estimatedFullDayVolume < config.gate.minVolumeShares) continue;
+    if (!exempt) {
+      if (sharesOutstanding === null) continue;
+      const marketCap = sharesOutstanding * row.close;
+      if (marketCap < config.gate.minMarketCap) continue;
+      if (row.estimatedFullDayVolume < config.gate.minVolumeShares) continue;
+    }
 
     const ind = prevIndByCode.get(row.code);
     const volumeMa20 = ind?.volumeMa20 ?? null;
-    if (volumeMa20 === null || volumeMa20 <= 0 || volumeMa20 < config.gate.minAvgVolumeShares) {
+    if (
+      !exempt &&
+      (volumeMa20 === null || volumeMa20 <= 0 || volumeMa20 < config.gate.minAvgVolumeShares)
+    ) {
       continue;
     }
     const bollingerUpper = ind?.bollingerUpper ?? null;
@@ -968,19 +1067,29 @@ async function runRealtime(
       stage = "pre-breakout";
     } else if (row.close <= bollingerUpper) {
       stage = "pre-breakout";
+    } else if (volumeMa20 === null || volumeMa20 <= 0) {
+      // exempt 檔沒有 T-1 volumeMa20（防呆）→ 無法算 breakout 分項，歸 pre-breakout
+      stage = "pre-breakout";
     } else {
       stage = "breakout-day"; // 先暫定，consecutiveDays 補算後可能升 extended
     }
 
     let volumeRatio: number | null = null;
     if (stage !== "pre-breakout") {
-      volumeRatio = volumeMa20 > 0 ? row.estimatedFullDayVolume / volumeMa20 : null;
-      if (volumeRatio === null || volumeRatio < config.gate.triggerVolumeRatio) {
+      volumeRatio =
+        volumeMa20 != null && volumeMa20 > 0
+          ? row.estimatedFullDayVolume / volumeMa20
+          : null;
+      if (
+        !exempt &&
+        (volumeRatio === null || volumeRatio < config.gate.triggerVolumeRatio)
+      ) {
         breakoutBelowVolume += 1;
         continue;
       }
     }
 
+    if (exempt) watchlistExempt += 1;
     staged.push({
       ...row,
       stage,
@@ -1142,6 +1251,7 @@ async function runRealtime(
         ),
         degraded,
         warnings: [], // pre-breakout 恆無 warnings（PLAN §4）
+        ...(watchlistCodes.has(s.code) ? { fromWatchlist: true } : {}),
       });
     });
   }
@@ -1201,6 +1311,7 @@ async function runRealtime(
       warnings: factors.warnings,
       volumeRatio: s.volumeRatio!,
       ...breakoutExtras(factors),
+      ...(watchlistCodes.has(s.code) ? { fromWatchlist: true } : {}),
     });
   }
 
@@ -1216,7 +1327,39 @@ async function runRealtime(
     failedCount,
     estimatedCount,
     skippedNoPriceCount,
+    watchlistExempt,
   };
+
+  // PLAN 2 §3.2：所有 watchlist 成員即時報價——realtime 直接查 misQuotes 記憶體 Map（零額外 API）
+  const watchlistQuotes: WatchlistQuote[] = [];
+  for (const code of watchlistCodes) {
+    const mis = misQuotes.get(code);
+    if (!mis) continue;
+    const stock = stockByCode.get(code);
+    let close: number;
+    let priceSource: WatchlistQuote["priceSource"];
+    if (mis.price !== null) {
+      close = mis.price;
+      priceSource = "realtime";
+    } else if (mis.high !== null) {
+      close = mis.high;
+      priceSource = "estimated";
+    } else {
+      continue; // z / h 皆缺 → 不放
+    }
+    watchlistQuotes.push({
+      code,
+      name: stock?.name ?? mis.name,
+      close,
+      changePercent:
+        mis.prevClose !== null && mis.prevClose > 0
+          ? ((close - mis.prevClose) / mis.prevClose) * 100
+          : 0,
+      volume: mis.cumulativeVolume / elapsedRatio, // 估全日量
+      priceSource,
+      refDate: mis.date ?? dateStr,
+    });
+  }
 
   const output: SignalScanOutput = {
     date: dateStr,
@@ -1227,6 +1370,7 @@ async function runRealtime(
     stats,
     warnings,
     results,
+    watchlistQuotes,
   };
 
   printSummary(output);
@@ -1458,6 +1602,7 @@ function printSummary(out: SignalScanOutput): void {
   console.log(
     `  醞釀中 ${out.stats.preBreakout} · 今日突破 ${out.stats.breakoutDay} · 已延伸 ${out.stats.extended}` +
       (out.stats.breakoutBelowVolume ? ` · 量不足未進榜 ${out.stats.breakoutBelowVolume}` : "") +
+      (out.stats.watchlistExempt ? ` · 觀察股豁免 ${out.stats.watchlistExempt}` : "") +
       (out.stats.estimatedCount ? ` · 估價 ${out.stats.estimatedCount}` : "") +
       (out.stats.skippedNoPriceCount ? ` · 無價跳過 ${out.stats.skippedNoPriceCount}` : ""),
   );

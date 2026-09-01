@@ -9,6 +9,7 @@ import {
 } from "../../scripts/lib/signal-factors/index";
 import { SPARK_WINDOW, type SparkPoint } from "../dashboard-spark";
 import { buildSparkSeries } from "../spark-series";
+import { resolveDataContext } from "../data-context";
 
 // 近 60 日走勢圖：每點 = 當日收盤「相對布林中軌的偏離比例」＝(close − bollingerMid) / bollingerMid，
 // 夾在 ±SPARK_CLIP。以布林帶寬正規化 → 盤整期貼近 0（線壓中間窄帶）、噴出時衝向邊界；
@@ -45,6 +46,9 @@ export async function getWatchlistPerformance(): Promise<WatchlistPerfRow[]> {
     orderBy: { addedAt: "desc" },
   });
   if (items.length === 0) return [];
+
+  // PLAN 2 §2.3：統一「截至」基準日（顯示用）。計算仍用各檔實際 quote.date（可能早於 asOfDate，維持現況容忍）。
+  const ctx = await resolveDataContext(prisma);
 
   const rows = await Promise.all(
     items.map(async (item): Promise<WatchlistPerfRow | null> => {
@@ -176,7 +180,8 @@ export async function getWatchlistPerformance(): Promise<WatchlistPerfRow[]> {
       return {
         stockCode: item.stockCode,
         name: item.stock.name,
-        refDate: refDate.toISOString().slice(0, 10),
+        // 顯示用統一基準日（PLAN 2 §2.3）；計算用的是上面 refDate = quote.date（該檔實際資料日）
+        refDate: ctx.asOfDate || refDate.toISOString().slice(0, 10),
         close: quote.close,
         changePercent,
         spark,

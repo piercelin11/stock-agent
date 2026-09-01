@@ -100,7 +100,14 @@ export function RegimeBanner({
     return (
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-border bg-card px-4 py-2.5 text-sm">
         <span className={cn("inline-block h-2.5 w-2.5 rounded-full", dot)} />
-        <span className="font-medium text-foreground">大盤：{zh}</span>
+        <span className="font-medium text-foreground">
+          大盤：{zh}
+          {regime.available && regime.date ? (
+            <span className="ml-1 font-normal text-muted-foreground/70">
+              · 截至 {regime.date}
+            </span>
+          ) : null}
+        </span>
         <span className="text-muted-foreground">{regime.advice}</span>
       </div>
     );
@@ -123,9 +130,14 @@ export function RegimeBanner({
               大盤：{zh}
             </span>
             {regime.available ? (
-              <span className="text-sm text-muted-foreground/70">
-                （基準 {regime.date}，score {regime.totalScore}）
-              </span>
+              <>
+                <span className="text-sm text-muted-foreground/70">
+                  （基準 {regime.date}，score {regime.totalScore}）
+                </span>
+                <span className="text-xs text-muted-foreground/50">
+                  截至 {regime.date} 收盤
+                </span>
+              </>
             ) : null}
           </div>
           <p className="mt-1 text-sm text-muted-foreground">{regime.advice}</p>
