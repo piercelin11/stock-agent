@@ -1,6 +1,6 @@
 import type { SignalScanView } from "../../lib/actions/signal-scan";
 import { SignalSparkPanel } from "./SignalSparkPanel";
-import { InstitutionalFlow } from "./InstitutionalFlow";
+import { InstitutionalFlowPanel } from "../signal/InstitutionalFlowPanel";
 import { BreakoutFactorBars } from "./BreakoutFactorBars";
 
 // 展開列內容（PLAN §3）。原 ScreeningPanel 內的 Detail function 搬進本檔（ScreeningPanel 已太長）。
@@ -38,7 +38,7 @@ export function SignalDetail({ row }: { row: Row }) {
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
             <SignalSparkPanel code={row.code} rising={rising} />
             {row.inst ? (
-              <InstitutionalFlow inst={row.inst} warnings={row.warnings} />
+              <InstitutionalFlowPanel inst={row.inst} warnings={row.warnings} />
             ) : (
               <div className="text-xs text-muted-foreground/70">無法人籌碼資料</div>
             )}

@@ -1,7 +1,8 @@
 import { cn } from "../../lib/cn";
-import type { SignalScanView } from "../../lib/actions/signal-scan";
+import { FACTOR_LABELS } from "./labels";
 
-// 展開列中欄：法人籌碼（UI.md 第一節）。
+// 法人籌碼區塊：screening 展開列中欄 + watchlist 卡片共用（PLAN §5）。
+// 原檔 components/screening/InstitutionalFlow.tsx，4.5.x watchlist 改版時搬進 components/signal/。
 //
 // 核心規則：diverging bar 的柱長用 inst.trustRatio / inst.foreignRatio
 // （近 5 日淨買超 ÷ volumeMa20），不是股數、不是分數——柱長才跟分數公式同一把尺。
@@ -10,14 +11,19 @@ import type { SignalScanView } from "../../lib/actions/signal-scan";
 // 小箭頭 ▲/▼ 依 inst.todayXxxDir（今日單日方向），與柱子（近 5 日累積）是兩回事；
 // 兩者不同號（近 5 日買、今日賣 = 翻臉）→ 柱子 opacity-50。
 
-type Row = SignalScanView["results"][number];
-type Inst = NonNullable<Row["inst"]>;
+// SignalResult.inst 與 WatchlistCardRow.inst 結構相同，這裡定 local 型別讓兩邊都能傳。
+export interface Inst {
+  trustRatio: number;
+  foreignRatio: number;
+  todayTrustDir: -1 | 0 | 1 | null;
+  todayForeignDir: -1 | 0 | 1 | null;
+}
 
 const CLIP_DIVISOR = 0.5; // 對齊 InstitutionalFlowConfig.clipDivisor
 
-type Tone = "success" | "warning" | "destructive" | "muted";
+export type Tone = "success" | "warning" | "destructive" | "muted";
 
-const TONE_CHIP: Record<Tone, string> = {
+export const TONE_CHIP: Record<Tone, string> = {
   success: "bg-success/10 text-success",
   warning: "bg-warning/10 text-warning",
   destructive: "bg-destructive/10 text-destructive",
@@ -25,10 +31,10 @@ const TONE_CHIP: Record<Tone, string> = {
 };
 
 /**
- * UI.md 1.4 chip 組合表。門檻（強/中/弱）首版拍板，註解標「待校準」。
- * 近 5 日流向強弱：ratio 合計 > 0.3 → 強、> 0 → 中、<= 0 → 弱。
+ * chip 組合表：近 5 日流向強弱 × 今日方向 × margin-chasing → 一句話結論。
+ * 門檻（強/中/弱）首版拍板，待校準。watchlist 卡片頂部的籌碼結論 chip 也用這支。
  */
-function resolveInstChip(inst: Inst, warnings: string[]): { text: string; tone: Tone } {
+export function resolveInstChip(inst: Inst, warnings: string[]): { text: string; tone: Tone } {
   const marginChasing = warnings.includes("margin-chasing");
   const ratioSum = inst.trustRatio + inst.foreignRatio;
 
@@ -132,12 +138,15 @@ function DivergingBar({
   );
 }
 
-export function InstitutionalFlow({
+export function InstitutionalFlowPanel({
   inst,
   warnings,
+  /** watchlist 卡片頂部已另有籌碼結論 chip → 傳 false 不重複顯示。screening 展開列預設 true。 */
+  showChip = true,
 }: {
   inst: Inst;
   warnings: string[];
+  showChip?: boolean;
 }) {
   const chip = resolveInstChip(inst, warnings);
   const todayUnknown = inst.todayTrustDir === null || inst.todayForeignDir === null;
@@ -145,15 +154,32 @@ export function InstitutionalFlow({
 
   return (
     <div className="space-y-2">
-      <div className="text-xs font-semibold text-muted-foreground/70">法人籌碼</div>
+      <div className="text-xs font-semibold text-muted-foreground/70">
+        {FACTOR_LABELS.institutional}
+      </div>
 
-      <span className={cn("inline-block rounded px-2 py-0.5 text-xs font-medium", TONE_CHIP[chip.tone])}>
-        {chip.text}
-      </span>
+      {showChip ? (
+        <span
+          className={cn(
+            "inline-block rounded px-2 py-0.5 text-xs font-medium",
+            TONE_CHIP[chip.tone],
+          )}
+        >
+          {chip.text}
+        </span>
+      ) : null}
 
       <div className="space-y-1.5 pt-1">
-        <DivergingBar label="投信" ratio={inst.trustRatio} todayDir={inst.todayTrustDir} />
-        <DivergingBar label="外資" ratio={inst.foreignRatio} todayDir={inst.todayForeignDir} />
+        <DivergingBar
+          label={FACTOR_LABELS.trust}
+          ratio={inst.trustRatio}
+          todayDir={inst.todayTrustDir}
+        />
+        <DivergingBar
+          label={FACTOR_LABELS.foreign}
+          ratio={inst.foreignRatio}
+          todayDir={inst.todayForeignDir}
+        />
       </div>
 
       <p className="text-xs text-muted-foreground/50">

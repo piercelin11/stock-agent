@@ -1,25 +1,13 @@
-# PLAN：股票資料品質修正——權證過濾誤殺 bug + 下市標記 `delistedAt`
+# PLAN：Watchlist 頁 UI 改版——卡片 gallery + 階段 tab + 盤中資料源
 
-源自 2026-09-01 的 8/31 行情覆蓋調查：DB 內 2,148 檔一般股票有 207 檔缺 8/31 行情。
-調查結論分四類（詳細過程與逐檔清單見 `docs/PROGRESS.md` 對應段落，完成本計劃時回寫）：
+觀察清單頁從「鬆散的三表快照表格 + 買入狀態 input」改成「卡片 gallery + 階段分頁」，
+視覺與資料對齊已完成的 screening 頁展開列。
 
-1. **權證過濾誤殺（bug，2 檔）**：`toSecurityType` 的「名稱含『購』/『售』→ warrant」判斷
-   排在「4 碼數字 → stock」之前，**2945 三商家購**（TWSE）與 **3085 新零售**（TPEx）
-   每天被三支 pipeline 腳本當權證跳過。兩檔 8/31 都有真實成交（三商家購收 40.00 /
-   量 41,569 股；新零售收 11.8 / 量 9,210 股）。現況：行情停在 8/27（FinMind 回補塞的）、
-   **融資融券兩檔完全空白**、法人斷續（2945 至 8/27、3085 至 7/8）。
-2. **早已下市的殭屍 Stock（約 168 檔）**：99 檔從無行情（2020 回補起點前下市），
-   約 69 檔最後行情停在 2020~2026 年中（下市/併購：康友-KY、中壽、新光金、京城銀…）。
-3. **當日零成交（約 29 檔，多為上櫃冷門股）**：官方 API 開高低收為 `--`，解析器跳過。
-   設計行為，不處理。
-4. **停牌/換股（4 檔）**：三商壽 2867（9/1 併玉山金永久下市）、中光電 5371（9/3 轉
-   中光電投控 3718）、巧新 1563（減資，9/7 復牌）、沛爾生醫 6949（1 拆 20，9/7 復牌）。
+**分支**：`feat/watchlist-card-gallery`（已從 `main` 開）。merge 時機等使用者發話。
 
-**決策**（已與使用者確認）：bug 修正＋回補；殭屍股與永久下市股用 `Stock.delistedAt`
-標記，**一律不刪資料**；復牌股不處理（pipeline 自動接回）；3718 掛牌後由
-`fill-daily-quotes` 既有機制自動建檔，5371 歷史不接。
-
-**分支**：`feat/stock-data-hygiene`（已從 `main` 開）。merge 時機等使用者發話。
+**需求來源**：使用者 2026-09-01 對話，附設計圖（4908 前鼎卡片：代號 / 漲跌% / 名稱 / 收盤 /
+stage pill / 籌碼結論 chip / 60 日走勢線圖 / 法人買賣 diverging bar / 底排「量增 x2.3 ·
+距年高 10% · 強度 PR90 · 突破 +9.5%」）。
 
 ---
 
@@ -27,99 +15,216 @@
 
 **動：**
 
-- 新檔 `scripts/lib/security-type.ts`：共用 `toSecurityType`。
-- `scripts/pipeline/fill-daily-quotes.ts` / `fill-institutional-trading.ts` /
-  `fill-margin-trading.ts`：刪各自的 `toSecurityType` 複製，改 import 共用版。
-- `prisma/schema.prisma`：`Stock` 加 `delistedAt DateTime?`＋migration。
-- 新檔 `scripts/backfill/mark-delisted.ts`：下市標記維護腳本（雙向：標記＋復活清除）。
-- `lib/actions/health.ts`：`getDbHealth` 的 `stockCount` 分母排除已下市。
-- `scripts/backfill/backfill-daily-quotes.ts` / `backfill-institutional-trading.ts`：
-  迴圈排除已下市（省 FinMind 配額）。
-- 一次性回補（`scripts/_temp/`，不進正式碼）：2945/3085 的行情缺口。
+- `lib/actions/watchlist.ts`：`listWatchlist()` 回傳型別重寫成卡片結構化資料；
+  非當日資料時走 MIS 盤中報價 fallback（**A 方案**：一進頁自動打、阻塞 render，無按鈕、無快取）。
+- `app/watchlist/page.tsx`：`<WatchlistTable>` → `<WatchlistGallery>`。
+- 新增 `components/signal/`（screening + watchlist 共用的訊號展示元件目錄）：
+  - `labels.ts`：標籤中文名 + stage 標籤/pill 顏色的**單一出處**（純常數，非元件）。
+  - `InstitutionalFlowPanel.tsx`：從 `components/screening/InstitutionalFlow.tsx` **原封搬來**
+    （改 import 路徑、stage/標籤常數改吃 `labels.ts`）。零客製 prop。
+  - `FactorList.tsx`：突破因子「label + 原始值」呈現（**無長條圖**，watchlist 卡片底排用）。
+  - `FreshnessBadge.tsx`：`fresh ? <LightningBoltIcon/> : <ClockIcon/>`（卡片左上角）。
+- 新增 `components/watchlist/WatchlistGallery.tsx`（"use client"：3 個 stage tab +
+  responsive grid 1/2/3/4 欄）、`components/watchlist/WatchlistCard.tsx`（單張卡，純展示）。
+- `components/screening/InstitutionalFlow.tsx`：**刪除**（內容搬到 `components/signal/`）。
+- `components/screening/SignalDetail.tsx`：import 路徑改 `../signal/`。`isPre` 分支邏輯不動。
+- `components/screening/BreakoutFactorBars.tsx`：標籤字串改 import `signal/labels.ts`（值不變）。
+- `components/screening/ScreeningPanel.tsx`：`STAGE_LABELS` / `STAGE_PILL_CLASS` 改 import
+  `signal/labels.ts`（值不變，只是搬家）。
+- `package.json`：`+ @radix-ui/react-icons`（`pnpm add`）。
 
 **不動：**
 
-- `run-signal-scan.ts` 候選池與 gate——殭屍股無當日行情，天然被排除，不加 `delistedAt`
-  條件（實作時驗證此假設，若候選撈取以 `Stock` 表為起點才順手加 where）。
-- 評分邏輯、前端頁面、`WatchlistItem`。
-- 不刪任何 `Stock` / `DailyQuote` / 子表資料。
-- `prisma/seed.ts`：seed 重跑可能復活殭屍股的問題，靠「重跑 `mark-delisted.ts`」解，
-  不改 seed 邏輯。
+- `scripts/screening/run-signal-scan.ts`：**完全不改**。醞釀中（pre-breakout）卡片本次
+  **不做法人籌碼區塊**（跟 screening 現況一致），使用者說要另想 UI、之後補規格。
+  因此不需要在 pre-breakout 的 `SignalResult` 補 `inst` 中繼值。
+- `prisma/schema.prisma`：不動。買入狀態欄位（`isPurchased` / `buyPrice` / `buyDate` /
+  `targetPrice` / `stopLossPrice` / `notes`）保留，只是 UI 不再提供 input。
+- `lib/actions/watchlist.ts` 的 `addToWatchlist` / `removeFromWatchlist` / `updateWatchlistItem`：
+  **保留不刪**（`updateWatchlistItem` 雖無 UI 呼叫，schema 欄位還在，YAGNI：不做移除 migration）。
+- `components/watchlist/WatchlistTable.tsx`：先留著，新版 gallery 驗證無誤後才 `git rm`。
 
 ---
 
-## 1. `toSecurityType` 抽共用 + 修判斷順序
+## 1. 觀察股的「階段」——即時重算，不是 source 欄位
 
-新檔 `scripts/lib/security-type.ts`，判斷順序改為：
+`WatchlistItem.source`（`"breakout"` / `"accumulation"` / `"manual"` / null）是「當初從哪個
+策略加入」的**靜態標記**，不等於「這檔現在處於哪個階段」。一檔用 `breakout` 加入的股票兩週後
+可能已是 `extended` 甚至跌回 `pre-breakout`。
 
+**tab 分類即時重算**，用 screening 頁同一套 `consecutiveAboveBand()`（`scripts/lib/signal-factors/staging.ts`）：
+
+| 連續站上布林上軌天數 | stage | tab 中文名 |
+|---|---|---|
+| `<= 0` | `pre-breakout` | 醞釀中 |
+| `1 ~ 2` | `breakout-day` | 首次突破 |
+| `> 2` | `extended` | 延續爆發 |
+
+`source` 欄位保留不動；加入清單時仍照舊記錄（`ScreeningPanel` 的 `stageToSource` 不改）。
+
+**預設 tab**：`breakout-day`（首次突破）。空 tab 顯示「此分類目前無觀察股」。
+
+---
+
+## 2. 資料源自動切換（A 方案）
+
+`listWatchlist()` 開頭查「DB 最新 `DailyQuote`（`securityType="stock"`）日期 == Asia/Taipei 今日？」
+（比照 `lib/actions/signal-scan.ts` 的 `getScanMode`）：
+
+- **相符**（`dataFresh: true`）→ 全部用 DB 資料，卡片左上角 **⚡ 閃電**（`LightningBoltIcon`）。
+- **不相符**（`dataFresh: false`）→ 對所有觀察股 code 打 `fetchAllMisQuotes`
+  （`scripts/lib/mis-quotes.ts`），拿 `close` / `volume` / `high`：
+  - 有成交價 → `priceSource: "realtime"`
+  - 缺成交價（`z` 為 `-`）→ 用 `high` 代入 → `priceSource: "estimated"`（卡片標「估」）
+  - `z` / `h` 都缺 → 該檔 `close` 用 DB 昨收，`priceSource: "eod"`（退化）
+  - **左上角一律 🕐 時鐘**（`ClockIcon`）——即使抓到即時，日期仍非今日交易日定案。
+    ⚡ 只給 `dataFresh: true`。
+
+**行為代價（已與使用者確認接受）**：
+
+- 一進頁 Server Component `await listWatchlist()` 阻塞直到 MIS 回來。
+- 觀察股 < 50 檔 = `fetchAllMisQuotes` 1 批（`BATCH_SIZE=120`）= 1 次 HTTP = 約 1~2 秒空白載入。
+- 每次進頁 / 重整 / `revalidatePath("/watchlist")` 都重打，**無快取**（不落 JSON、不加節流）。
+- `page.tsx` 已是 `force-dynamic`，不影響。
+
+**籌碼恆用 DB 最新一筆**（盤中拿不到當日即時籌碼）：
+
+- 沿用 `InstitutionalFlowPanel`（= 搬過來的 `InstitutionalFlow.tsx`）既有邏輯：
+  `todayTrustDir` / `todayForeignDir` 為 null 時，元件底部自動顯示
+  「尚未取得今日法人資料，以上為近日資料。」——**不加時鐘**（使用者確認沿用文字區塊）。
+
+---
+
+## 3. 卡片內容
+
+| 區塊 | breakout-day / extended | 醞釀中 (pre-breakout) |
+|---|---|---|
+| 左上 badge（`FreshnessBadge`） | ⚡ / 🕐 | ⚡ / 🕐 |
+| 代號（3xl）/ 漲跌%（漲紅跌綠）/ 名稱 / 收盤 | ✓ | ✓ |
+| stage pill（`labels.ts` 的 `STAGE_LABELS` + `STAGE_PILL_CLASS`） | 首次突破 / 延續爆發 | 醞釀中 |
+| 籌碼結論 chip（`InstitutionalFlowPanel` 的 `resolveInstChip` 結論；或抽出當獨立小工具） | ✓ | ✗ |
+| 60 日走勢 Sparkline（`components/ui/Sparkline` + `lib/spark-series` 的 `buildSparkSeries`） | ✓ | ✓ |
+| 法人籌碼區塊（`InstitutionalFlowPanel`：diverging bar + 結論 chip + 過期文字） | ✓ | **✗（本次不做，待補規格）** |
+| 底排因子（`FactorList`） | 量增 x2.3 · 距年高 10% · 強度 PR90 · 突破 +9.5% | 量增 x2.3 · K棒 · 力道 · 位階（三分數 0~100） |
+
+**底排因子呈現**（照設計圖，`FactorList` = label + 原始值，非長條圖）：
+
+- breakout 階段：`量增`=`x{volumeRatio}`；`距年高`=`{proximityLongPct}%`（原始值，`<= 0`）；
+  `強度`=`PR{n}`（見下方 §3.1）；`突破`=`{breakoutMarginPct >= 0 ? "+" : ""}{n}%`（原始值）。
+
+### 3.1 強度 PR 欄（方案 1：讀最近掃描結果，不現算全市場 RS）
+
+相對強度（PR）是「這檔近期漲幅在**全市場**的百分位」，單支股票算不出來（screening 頁能算是因為
+它本來就掃全市場 2000+ 檔排名）。watchlist <50 檔之間排名無意義。
+
+**做法**：`listWatchlist()` 讀 `data/signal-scan-results/` 最新一份 `{date}.json`（eod 結果；
+比照 `lib/actions/signal-scan.ts` 的 `getSignalScanResult` 讀檔套路，但**就地寫在 `watchlist.ts`
+內**——不動 `signal-scan.ts`）。組出 `{ scanDate: string, prByCode: Map<string, number> }`。
+
+每檔卡片：
+
+- 該檔在掃描結果裡 → 顯示 `PR{scores.relativeStrength}`。
+  - `scanDate !== refDate`（掃描結果比卡片資料舊，例：卡片今日盤中 / 掃描昨天 eod）
+    → `PR{n}` 旁加 **🕐** 小時鐘（`ClockIcon`），代表這個 PR 是舊的。
+  - `scanDate === refDate` → 純 `PR{n}`，無時鐘。
+- 該檔不在掃描結果裡（沒過 gate / 從沒跑過掃描 / 目錄空）→ 顯「—」。
+
+型別上 `WatchlistCardRow.factors` 多兩個欄位：`relativeStrength: number | null`（不在掃描結果 = null）、
+`relativeStrengthStale: boolean`（`scanDate !== refDate`）。
+- pre-breakout 階段：`量增` + K棒 / 力道 / 位階三分數（`candleScore` / `volumeScore` / `baseScore`，
+  0~100，`>=70` 綠 / `40~70` `text-foreground/80` / `<40` 灰，null 顯「—」+ degraded 加「不足」tag，
+  比照 `WatchlistPerfTable` 的 `ScoreItem`）。
+
+---
+
+## 4. `listWatchlist()` 新回傳型別
+
+```ts
+export interface WatchlistCardRow {
+  stockCode: string;
+  name: string;
+  addedAt: string;
+  source: string | null;
+
+  stage: "pre-breakout" | "breakout-day" | "extended"; // consecutiveAboveBand() 即時判定
+  dataFresh: boolean;                                   // DB 最新交易日 == 台北今日
+  priceSource: "eod" | "realtime" | "estimated";
+
+  close: number;
+  changePercent: number;
+  volumeRatio: number | null;                          // 今日 volume / volumeMa20
+  spark: SparkPoint[];                                 // 近 60 日相對布林中軌偏離（舊 → 新）
+
+  // 面向分數（0~100，缺資料為 null）——pre-breakout 底排用；breakout 卡片也可留著（YAGNI：先都算）
+  candleScore: number | null;
+  volumeScore: number | null;
+  baseScore: number | null;
+  degraded: string[];
+
+  // 法人 diverging bar 中繼值——只在 breakout-day / extended 組；pre-breakout = null
+  inst: {
+    trustRatio: number;
+    foreignRatio: number;
+    todayTrustDir: -1 | 0 | 1 | null;
+    todayForeignDir: -1 | 0 | 1 | null;
+  } | null;
+
+  // 底排突破因子原始值——只在 breakout-day / extended 組；pre-breakout = null
+  factors: {
+    proximityLongPct: number;         // 距一年高點 %（<= 0）
+    breakoutMarginPct: number;        // (close - bollingerUpper) / bollingerUpper * 100
+    relativeStrength: number | null;  // §3.1：最近掃描結果的 PR；不在結果裡 = null
+    relativeStrengthStale: boolean;   // §3.1：掃描結果日期 != 卡片資料日期
+  } | null;
+}
 ```
-00 開頭            → etf
-4 碼 + 1 碼英文    → preferred
-4 碼數字           → stock        ← 提前到「購/售」名稱判斷之前（修 bug 的核心）
-6 碼數字 或 名稱含「購」「售」 → warrant
-5 碼數字           → bond
-其餘               → other
-```
 
-安全性論證：台股權證代號一律 6 碼（上市數字 6 碼、上櫃 5 碼數字+P 等由「其餘」或
-5 碼規則接住——實作時抽 10 筆真實權證代號驗證），4 碼數字提前不會漏擋權證；
-名稱判斷降為 fallback，只攔非 4 碼、名稱帶購/售的衍生品。
+**計算共用**（都已存在，直接 import，不重寫）：
 
-三支 pipeline 腳本刪掉各自複製、改 import。`scripts/archive/` 內的複製不動（封存區）。
+- `consecutiveAboveBand`（`scripts/lib/signal-factors/staging.ts`）——階段判定。
+- `computeCandleShape` / `computeVolumeStrength` / `computeBase`（`scripts/lib/signal-factors/`）
+  ——三分數，比照 `lib/actions/dashboard.ts` 的 `getWatchlistPerformance` 用法。
+- `computeInstitutionalFlow`（`scripts/lib/signal-factors/institutional.ts`）——`inst` 中繼值，
+  比照 `run-signal-scan.ts` 的 `breakoutExtras()`。
+- `computeBreakoutMargin` / `computeProximityToHigh`（`scripts/lib/signal-factors/breakout.ts`）
+  ——`factors` 原始值。
+- `buildSparkSeries`（`lib/spark-series.ts`）+ `SPARK_WINDOW` / `SparkPoint`（`lib/dashboard-spark.ts`）
+  ——走勢圖序列。
+- `fetchAllMisQuotes`（`scripts/lib/mis-quotes.ts`）——非當日盤中報價。
 
-**單測**（併入 `scripts/lib/signal-factors/factors.test.ts` 旁新開
-`scripts/lib/security-type.test.ts`）：`2945 三商家購 → stock`、`3085 新零售 → stock`、
-6 碼權證 → warrant、名稱含「購」的 5 碼/其他碼 → warrant/bond 不誤放、
-`00` ETF、特別股、TAIEX（"TAIEX" → other，確認不影響既有特殊列）。
+**邊界轉換**（`"use server"` action 回傳前）：`Date` → ISO 字串、`Decimal` → number、
+`BigInt`（volume / *NetBuy）→ Number。比照既有 `watchlist.ts` / `dashboard.ts`。
 
-## 2. 回補 2945 / 3085
+**每檔查詢量**：延續 `getWatchlistPerformance` 現狀（每檔數次 `findFirst` / `findMany`），
+清單 < 50 檔可接受。MIS 抓取只在 `!dataFresh` 時觸發、一次抓全部 code。
 
-修完第 1 節後執行（順序固定）：
+---
 
-1. **行情**：`scripts/_temp/` 一次性腳本用 FinMind `TaiwanStockPrice` 補兩檔
-   2026-08-28 起的缺口（upsert `DailyQuote`，比照 `backfill-daily-quotes.ts` 寫法）。
-2. **技術指標**：`pnpm tsx scripts/pipeline/calculate-technical-indicators.ts 2945 3085`
-   （full 模式全歷史重算）。
-3. **融資融券**：`pnpm tsx scripts/pipeline/fill-margin-trading.ts --backfill=45`
-   （官方 API 兩邊都支援歷史日期；upsert 冪等，其他股票重寫無害；45 天讓
-   margin-chasing 的 40 天百分位母體夠用）。
-4. **法人**：2945 用 `fill-institutional-trading.ts --date=...` 逐日補 8/28 起缺口
-   （T86 支援歷史）；3085 的 TPEx 歷史缺口（7/9~今）用 FinMind 盡力補，補不齊接受
-   degraded（TPEx 在 FinMind 效果本來就有限）。
+## 5. 共用決策總結（使用者關切點）
 
-## 3. `Stock.delistedAt` + 標記腳本
+| 東西 | 共用方式 | 位置 |
+|---|---|---|
+| 標籤中文名（突破幅度 / 相對強度 / 投信 / 外資 / 法人籌碼 …）、stage 標籤 + pill 顏色 | 純常數檔，改一處全改。不引 i18n 框架（YAGNI） | `components/signal/labels.ts` |
+| 法人籌碼區塊（diverging bar + 結論 chip + 過期文字） | 同一個元件，零客製 prop | `components/signal/InstitutionalFlowPanel.tsx` |
+| 突破因子 | **不共用元件**（screening 長條圖 vs watchlist 純數字，硬包 `variant` 會過度複雜）。共用的是「算好的資料」+ `labels.ts` 標籤 | screening: `BreakoutFactorBars`（長條）／ watchlist: `signal/FactorList`（純數字） |
+| Sparkline / buildSparkSeries / signal-factors 計算 | 已是共用，直接用 | 既有位置 |
+| 新鮮度 badge（⚡ / 🕐） | 薄元件 | `components/signal/FreshnessBadge.tsx` |
 
-- schema：`delistedAt DateTime?`（null = 存續）。`pnpm prisma migrate dev`。
-- `scripts/backfill/mark-delisted.ts`（手動、低頻，比照 `update-shares-outstanding.ts`
-  定位，不進 daily pipeline）：
-  - **標記**：`securityType = stock` 且（最後 `DailyQuote` 日期距 DB 全市場最新交易日
-    **> 60 個日曆日**，或從無行情）→ `delistedAt` = 最後行情日；從無行情者設
-    `2020-01-01`（語意：回補起點前已下市）。60 天緩衝不會誤傷減資/分割型停牌
-    （巧新/沛爾約兩週）。
-  - **復活清除**：`delistedAt` 非 null 但最近 60 天內出現新 `DailyQuote` → 清回 null
-    （復牌、seed 誤標都靠這條自癒）。
-  - 輸出：本次標記/清除清單與總數。
-- 跑完首輪後抽查：三商壽 2867、中光電 5371 應被標記；巧新 1563、沛爾 6949 在
-  60 天規則下**不會**被標記（最後行情 8 月底）。
+**目錄理由**：`components/screening/` 綁定「選股頁」，但 watchlist 也要法人籌碼 + 因子展示。
+開 `components/signal/`（對應 `scripts/lib/signal-factors/`）語意乾淨——「凡呈現訊號因子的
+共用 UI 都在這」。screening 專屬的（`ScreeningPanel` / `SignalDetail` / `SignalSparkPanel` /
+`BreakoutFactorBars`）留在 `components/screening/`。
 
-## 4. 下游接上 `delistedAt`
+---
 
-- `getDbHealth`：`stockCount` 與四表覆蓋率分母改 `where: { securityType: "stock", delistedAt: null }`。
-  預期效果：分母從 2,148 → ~1,975（扣約 170 檔殭屍＋2 檔永久下市），覆蓋率從天花板
-  ~90% 回到誠實的 ~98%+。
-- `backfill-daily-quotes.ts` / `backfill-institutional-trading.ts`：撈股票清單時加
-  `delistedAt: null`，全量回補少打 ~170 檔 × N 次 FinMind。
-- 其他讀 `Stock` 的地方（`listWatchlist`、`getWatchlistPerformance`、seed）不動。
+## 6. 收尾
 
-## 5. 驗收
-
-1. `pnpm exec tsc --noEmit` 乾淨；新舊單測全過。
-2. `fill-daily-quotes.ts --date=2026-08-28`、`--date=2026-08-31` 重跑後，2945 兩日
-   `DailyQuote` 入庫（TWSE 歷史可補即為 bug 修好的直接證據）。
-3. 回補後 2945/3085：`DailyQuote` 補到最新交易日、`MarginTrading` 有近 45 日資料、
-   `TechnicalIndicator` 全歷史重算完成。
-4. `mark-delisted.ts` 首輪執行，標記數 ≈ 170（±5），抽查上述 4 檔行為正確。
-5. 首頁 Dashboard 資料狀態卡覆蓋率顯著上升（分母修正）。
-6. 收尾：`CLAUDE.md`（`toSecurityType` 共用檔、`delistedAt` 欄位語意、`mark-delisted.ts`
-   條目）、`docs/PROGRESS.md`（調查過程＋修正紀錄）、`README.md`（腳本清單）同步更新；
-   刪 `scripts/_temp/`。
+- `pnpm exec tsc --noEmit` 乾淨。
+- `curl http://localhost:3000/watchlist`（打使用者的 dev server）確認渲染；打不通就請使用者開。
+- 兩種資料源手動驗一遍：DB 有當日資料（⚡）／ 無當日資料（🕐 + MIS 阻塞載入）。
+  無當日資料的驗證時機 = 交易日盤中，或臨時把 `dataFresh` 判斷改成永遠 false 測一次再改回。
+- `git rm components/watchlist/WatchlistTable.tsx`（gallery 確認無誤後）。
+- 更新 `docs/PROGRESS.md`（新增「Watchlist 頁卡片 gallery 改版」段，記設計理由與實測）。
+- 更新 `CLAUDE.md` 的「前端」段 `/watchlist` 頁描述。
+- 更新 `docs/ROADMAP.md` 對應項目打勾（若有）。
+- README「目前功能」檢查是否需同步。

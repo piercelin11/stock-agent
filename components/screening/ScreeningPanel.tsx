@@ -15,6 +15,7 @@ import {
 import { addToWatchlist } from "../../lib/actions/watchlist";
 import { cn } from "../../lib/cn";
 import { Button } from "../ui/Button";
+import { STAGE_LABELS, STAGE_PILL_CLASS, STAGE_ORDER } from "../signal/labels";
 import { SignalDetail } from "./SignalDetail";
 
 // ROADMAP 4.5.3：三分頁（第一根突破 / 冷水區醞釀 / 盤中即時掃描）收斂成單頁 + 階段 filter。
@@ -27,21 +28,9 @@ type SortDir = "asc" | "desc";
 // tab 收斂成三階段（PLAN §1）：去掉「全部」，StageFilter 直接 = SignalStage。
 type StageFilter = SignalStage;
 
-// 順序固定：今日突破 → 已延伸 → 醞釀中；預設選中「今日突破」。
-const STAGE_TABS: SignalStage[] = ["breakout-day", "extended", "pre-breakout"];
-
-const STAGE_LABELS: Record<SignalStage, string> = {
-  "pre-breakout": "醞釀中",
-  "breakout-day": "今日突破",
-  extended: "已延伸",
-};
-
-// 狀態 pill 底色（PLAN §2，使用者已定；複用狀態語意 token）
-const STAGE_PILL_CLASS: Record<SignalStage, string> = {
-  "breakout-day": "bg-destructive/10 text-destructive",
-  extended: "bg-warning/10 text-warning",
-  "pre-breakout": "bg-muted text-muted-foreground",
-};
+// 順序固定：首次突破 → 延續爆發 → 醞釀中；預設選中「首次突破」。
+// STAGE_LABELS / STAGE_PILL_CLASS / STAGE_ORDER 已抽到 components/signal/labels.ts（screening + watchlist 共用）。
+const STAGE_TABS: SignalStage[] = STAGE_ORDER;
 
 // stage → WatchlistItem.source 映射（schema 的 source enum 不動）
 function stageToSource(stage: SignalStage): "breakout" | "accumulation" {
