@@ -35,6 +35,7 @@
 - `backfill-benchmark-quotes.ts`：用 FinMind API 回補回測用大盤基準標的（目前 0050）的 `DailyQuote`，只寫報價、不碰技術指標/籌碼。
 - `backfill-index-quotes.ts`：用 FinMind `TaiwanStockPrice?data_id=TAIEX` 回補加權指數日線至 `DailyQuote`（開頭自建 `Stock` 記錄 `code="TAIEX"`、`securityType="index"`）。只寫報價，給大盤濾網算 MA60/帶寬用，不進選股。
 - `update-shares-outstanding.ts`：從 MOPS 公開 CSV 更新各股票已發行普通股數（月頻手動執行；市值用「股數 × 收盤價」現算，不落地存欄位）。
+- `mark-delisted.ts`：維護 `Stock.delistedAt` 下市標記（月頻手動執行）——最後行情距 DB 最新交易日超過 60 天（或從無行情）標記為下市，復牌自動清除；覆蓋率分母與 FinMind 回補清單會排除已下市股票。
 
 ### 前端（`app/` + `lib/` + `components/`）
 
@@ -148,6 +149,9 @@ pnpm tsx scripts/backfill/backfill-index-quotes.ts
 
 # 更新已發行股數（月頻手動執行）
 pnpm tsx scripts/backfill/update-shares-outstanding.ts
+
+# 維護下市標記（月頻手動執行；標記 + 復牌清除雙向）
+pnpm tsx scripts/backfill/mark-delisted.ts
 ```
 
 ## 專案規劃

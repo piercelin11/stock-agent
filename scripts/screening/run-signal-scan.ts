@@ -757,7 +757,8 @@ async function runRealtime(
   }
 
   const stocks = await prisma.stock.findMany({
-    where: { securityType: "stock" },
+    // 排除已下市：MIS 對下市代號回空值本來就會被跳過，這裡只是省掉白打的 batch
+    where: { securityType: "stock", delistedAt: null },
     select: { code: true, name: true, market: true, sharesOutstanding: true },
   });
   const stockByCode = new Map(stocks.map((s) => [s.code, s]));

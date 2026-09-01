@@ -49,6 +49,10 @@ model Stock {
   sharesOutstanding          BigInt? // 已發行普通股數
   sharesOutstandingUpdatedAt DateTime?
 
+  // null = 存續；有值 = 判定已下市（值為最後行情日；從無行情者為 2020-01-01，表示回補起點前已下市）
+  // 由 scripts/backfill/mark-delisted.ts 維護（手動低頻），雙向：標記 + 復牌自動清除
+  delistedAt DateTime?
+
   dailyQuotes   DailyQuote[]
   tags          StockTag[]
   newsLinks     NewsStock[]

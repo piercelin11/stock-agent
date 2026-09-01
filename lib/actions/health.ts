@@ -6,7 +6,7 @@ export interface DbHealth {
   today: string; // 伺服器今日 YYYY-MM-DD（Asia/Taipei）
   latestQuoteDate: string | null;
   quoteFresh: boolean; // latestQuoteDate === today
-  stockCount: number; // securityType = "stock" 的檔數（分母）
+  stockCount: number; // securityType = "stock" 且存續（delistedAt 為 null）的檔數（分母）
   coverage: {
     quote: { count: number; pct: number };
     institutional: { count: number; pct: number };
@@ -36,7 +36,8 @@ export async function getDbHealth(): Promise<DbHealth> {
       orderBy: { date: "desc" },
       select: { date: true },
     }),
-    prisma.stock.count({ where: { securityType: "stock" } }),
+    // 分母排除已下市（delistedAt 非 null）：殭屍股永遠不會有當日資料，留在分母會把覆蓋率天花板壓在 ~90%
+    prisma.stock.count({ where: { securityType: "stock", delistedAt: null } }),
   ]);
 
   const latestQuoteDate = latestQuote?.date.toISOString().slice(0, 10) ?? null;

@@ -63,7 +63,7 @@ async function main() {
   }
 
   const stocks = await prisma.stock.findMany({
-    where: { securityType: "stock" },
+    where: { securityType: "stock", delistedAt: null }, // 排除已下市，省 FinMind 配額
     select: { code: true, market: true },
     orderBy: { code: "asc" },
     ...(LIMIT ? { take: LIMIT } : {}),
