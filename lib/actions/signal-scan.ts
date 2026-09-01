@@ -210,19 +210,45 @@ export async function getSignalSpark(code: string): Promise<SparkPoint[]> {
   return buildSparkSeries(quotes, midByDate);
 }
 
-export async function getSignalScanResult(): Promise<SignalScanView | null> {
+// ============================================================================
+// getLatestScanMeta —— ScreeningPanel 自動刷新輪詢用（PLAN 3 §4.1）
+// ============================================================================
+//
+// 輕量：只讀最新 realtime 掃描檔（{timestamp}.json）的 meta。ScreeningPanel 每 60 秒問一次，
+// 若回傳的 timestamp 比目前畫面 view.queriedAt 新 → 呼叫 getSignalScanResult() 重載表格
+// （資料來自 intraday-scan.ts / launchd 每 30 分、或使用者手動 realtime 掃描產出的新 {timestamp}.json）。
+//
+// **只認 realtime 檔**（不比 eod）：自動刷新是「盤中每半小時換上新掃描」的機制，只在 realtime
+// 情境有意義；eod 模式下 ScreeningPanel 根本不啟動這個輪詢（見 ScreeningPanel §4.2）。這裡把
+// 來源鎖死 realtime，避免「同一天既跑過盤後又跑過盤中、realtime 檔 queriedAt 剛好較新」時
+// 把正式的盤後結果蓋掉（2026-09-01 事故）。getSignalScanResult() 讀的也是最新 {timestamp}.json，一致。
+
+function readLatestRealtimeFile(): SignalScanOutput | null {
   if (!existsSync(RESULT_DIR)) return null;
   const files = readdirSync(RESULT_DIR)
     .filter((f) => /^\d{4}-\d{2}-\d{2}T.*\.json$/.test(f))
     .sort();
   const latest = files.at(-1);
   if (!latest) return null;
-
-  let parsed: SignalScanOutput;
   try {
-    parsed = JSON.parse(readFileSync(join(RESULT_DIR, latest), "utf8")) as SignalScanOutput;
+    return JSON.parse(readFileSync(join(RESULT_DIR, latest), "utf8")) as SignalScanOutput;
   } catch {
     return null;
   }
+}
+
+export async function getLatestScanMeta(): Promise<{
+  timestamp: string;
+  source: SignalSource;
+  scanDate: string;
+} | null> {
+  const rt = readLatestRealtimeFile();
+  if (!rt) return null;
+  return { timestamp: rt.queriedAt, source: rt.source, scanDate: rt.date };
+}
+
+export async function getSignalScanResult(): Promise<SignalScanView | null> {
+  const parsed = readLatestRealtimeFile();
+  if (!parsed) return null;
   return toView(parsed);
 }

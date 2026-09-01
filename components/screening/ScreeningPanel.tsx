@@ -7,6 +7,7 @@ import {
   getSignalScanProgress,
   getSignalScanResult,
   getScanMode,
+  getLatestScanMeta,
   type SignalScanView,
   type SignalScanProgress,
   type SignalStage,
@@ -179,6 +180,12 @@ export function ScreeningPanel() {
   const [progress, setProgress] = useState<SignalScanProgress | null>(null);
   const [scanBusy, setScanBusy] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 自動刷新輪詢用 ref：讓 interval callback 讀最新 view.queriedAt / scanBusy 而不必重建 interval。
+  const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const viewRef = useRef<SignalScanView | null>(null);
+  const scanBusyRef = useRef(false);
+  viewRef.current = view;
+  scanBusyRef.current = scanBusy;
 
   const [stageFilter, setStageFilter] = useState<StageFilter>("breakout-day");
   const [sortKey, setSortKey] = useState("rank");
@@ -241,6 +248,10 @@ export function ScreeningPanel() {
   // 掛載時若 progress.json 還在 running（切走又回來），接管輪詢。
   // 但 running 逾時（子進程死掉、或 CLI 手動跑留下的殘檔）→ 當它不存在，不接管。
   const STALE_MS = 90_000;
+  // done 態的 progress.json 會無限期殘留（上次 realtime 掃描的終態，直到下次掃描才被覆蓋）。
+  // 進頁撿 done 結果只在「盤中模式 + 這份 done 夠新」時才合理——否則盤後進頁會撿到幾小時前的
+  // realtime 殘檔顯示，每檔掛「昨」badge（realtime 路徑刻意不採當日法人）。2026-09-01 事故。
+  const DONE_STALE_MS = 30 * 60_000; // 30 分：對齊 launchd 盤中掃描間隔
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -252,7 +263,15 @@ export function ScreeningPanel() {
       if (isFresh) {
         setScanBusy(true);
         startPolling();
-      } else if (p?.status === "done" && !view) {
+        return;
+      }
+      // done 且無 view：僅在「done 夠新」（30 分內，對齊 launchd 盤中掃描間隔）時撿回顯示。
+      // 這擋掉「盤後進頁撿到幾小時前的 realtime 殘檔」——舊 realtime 掃描的 done 態會無限期殘留。
+      // 註：這裡不加 mode 守衛（mode 由 useEffect A 非同步設，此 effect 掛載即跑可能還是 null）；
+      //     DONE_STALE_MS 已足夠——盤後手動跑的 realtime 殘檔通常都超過 30 分。
+      const doneFresh =
+        p?.status === "done" && Date.now() - new Date(p.updatedAt).getTime() < DONE_STALE_MS;
+      if (p?.status === "done" && !view && doneFresh) {
         const res = await getSignalScanResult();
         if (!cancelled) setView(res);
       }
@@ -265,6 +284,40 @@ export function ScreeningPanel() {
   }, []);
 
   useEffect(() => stopPolling, [stopPolling]);
+
+  // ---- 自動刷新（PLAN 3 §4.2）----
+  // 每 60 秒問 getLatestScanMeta()（只看最新 realtime {timestamp}.json），若比目前畫面新 → 重載表格。
+  // 資料來源：intraday-scan.ts（launchd 每 30 分）或使用者手動 realtime 掃描產出的新 {timestamp}.json。
+  // 掛載即啟動、卸載清除。
+  //
+  // **只在畫面目前顯示 realtime 結果時才作用**（`v.source === "realtime"`）：自動刷新是「盤中每半小時
+  // 換上新掃描」的機制。畫面在 eod（盤後定案）結果時不該去撿 realtime 檔——2026-09-01 事故：同一天
+  // 既跑過盤後又跑過盤中，realtime 檔 queriedAt 剛好晚 2 分鐘，被自動刷新當「較新」拿來蓋掉正式盤後
+  // 結果，導致每檔掛「昨」badge（realtime 路徑刻意不採當日法人）。
+  // scanBusy（手動 realtime 掃描進行中）時也跳過，避免掃到一半被半成品覆蓋。
+  useEffect(() => {
+    autoRefreshRef.current = setInterval(async () => {
+      if (scanBusyRef.current) return;
+      const v = viewRef.current;
+      if (!v || v.source !== "realtime") return;
+      const meta = await getLatestScanMeta();
+      if (!meta || !meta.timestamp) return;
+      if (new Date(meta.timestamp).getTime() > new Date(v.queriedAt).getTime()) {
+        const res = await getSignalScanResult();
+        if (res) {
+          setView(res);
+          resetTableState();
+        }
+      }
+    }, 60_000);
+    return () => {
+      if (autoRefreshRef.current) {
+        clearInterval(autoRefreshRef.current);
+        autoRefreshRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function runEod() {
     setError(null);
@@ -431,6 +484,9 @@ export function ScreeningPanel() {
               <span className="ml-2 rounded bg-warning/10 px-1 text-xs text-warning">
                 估 {estimatedCount} 檔
               </span>
+            ) : null}
+            {view.source === "realtime" ? (
+              <span className="ml-2 text-xs text-muted-foreground/70">每分鐘自動更新</span>
             ) : null}
           </span>
         ) : scanBusy && progress?.status === "running" ? (
