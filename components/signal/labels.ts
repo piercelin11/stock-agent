@@ -30,6 +30,10 @@ export const FACTOR_LABELS = {
   institutional: "法人籌碼",
   trust: "投信",
   foreign: "外資",
+  // 醞釀階段法人籌碼區塊
+  institutionalTrade: "法人買賣",
+  trustBuyCalendar: "近20日投信買超日",
+  otherInstitution: "外資 / 自營商",
   // 突破因子（screening 展開列長條圖 + watchlist 卡片底排純數字共用這組名字）
   breakoutMargin: "突破幅度",
   relativeStrength: "相對強度",

@@ -12,6 +12,8 @@ import {
   resolveInstChip,
   TONE_CHIP,
 } from "../signal/InstitutionalFlowPanel";
+import { PreBreakoutInstitutional } from "../signal/PreBreakoutInstitutional";
+import { resolvePreBreakoutChip } from "../signal/pre-breakout-chip";
 import { STAGE_LABELS, STAGE_PILL_CLASS } from "../signal/labels";
 
 export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
@@ -25,7 +27,12 @@ export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
     });
   }
 
-  const instChip = row.inst ? resolveInstChip(row.inst, []) : null;
+  const chip =
+    row.stage === "pre-breakout"
+      ? resolvePreBreakoutChip(row.preInst)
+      : row.inst
+        ? resolveInstChip(row.inst, [])
+        : null;
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-background p-4">
@@ -49,14 +56,14 @@ export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
             >
               {STAGE_LABELS[row.stage]}
             </span>
-            {instChip ? (
+            {chip ? (
               <span
                 className={cn(
                   "rounded px-1.5 py-0.5 text-xs font-medium",
-                  TONE_CHIP[instChip.tone],
+                  TONE_CHIP[chip.tone],
                 )}
               >
-                {instChip.text}
+                {chip.text}
               </span>
             ) : null}
           </div>
@@ -79,8 +86,12 @@ export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
       {/* 走勢圖 */}
       <Sparkline points={row.spark} rising={rising} />
 
-      {/* 法人籌碼區塊（只 breakout 階段有 inst） */}
-      {row.inst ? (
+      {/* 法人籌碼區塊：breakout 階段 = diverging bar；醞釀階段 = 20 格日曆 + 百分位進度條 */}
+      {row.stage === "pre-breakout" ? (
+        row.preInst ? (
+          <PreBreakoutInstitutional preInst={row.preInst} />
+        ) : null
+      ) : row.inst ? (
         <InstitutionalFlowPanel inst={row.inst} warnings={[]} showChip={false} />
       ) : null}
 

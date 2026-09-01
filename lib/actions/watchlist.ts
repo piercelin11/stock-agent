@@ -13,6 +13,7 @@ import {
   computeInstitutionalFlow,
   consecutiveAboveBand,
   resolveBreakoutConfig,
+  resolveAccumulationConfig,
   DEFAULT_INSTITUTIONAL_FLOW_CONFIG,
 } from "../../scripts/lib/signal-factors/index";
 
@@ -37,7 +38,13 @@ const { score } = resolveBreakoutConfig();
 const BASE_MAX_WINDOW = score.baseMaxWindowDays; // 240
 const BASE_MIN_HISTORY = score.baseMinHistoryDays; // 40
 const RS_RESULT_DIR = join(process.cwd(), "data", "signal-scan-results");
-const INST_LOOKBACK = DEFAULT_INSTITUTIONAL_FLOW_CONFIG.lookbackDays; // 5
+
+// 醞釀階段（pre-breakout）法人籌碼區塊用（PLAN 醞釀中卡片法人籌碼區塊）
+const ACC = resolveAccumulationConfig().score;
+const PRE_INST_WINDOW = ACC.institutionalWindowDays; // 20
+const PRE_INST_MIN_DAYS = Math.ceil(
+  ACC.institutionalWindowDays * ACC.minInstitutionalDaysRatio,
+); // ceil(20 * 0.5) = 10
 
 export interface WatchlistCardRow {
   stockCode: string;
@@ -76,6 +83,23 @@ export interface WatchlistCardRow {
     relativeStrength: number | null; // §3.1：最近掃描結果的 PR；不在結果裡 = null
     relativeStrengthStale: boolean; // §3.1：掃描結果日期 != 卡片資料日期
   } | null;
+
+  // 醞釀階段法人籌碼區塊——只在 pre-breakout 組；breakout 階段 null
+  preInst: PreBreakoutInst | null;
+}
+
+export interface PreBreakoutInst {
+  // 20 格日曆：舊 → 新，長度可能 < 20（前面補「無資料」由前端處理）。true = 該日投信淨買超 > 0
+  buyDayFlags: boolean[];
+  buyDays: number; // buyDayFlags 中 true 的數量
+  consecutiveBuyDays: number; // 從最新往回連續買超天數
+  dataDays: number; // 20 日窗內實際有 InstitutionalTrading 的天數（= buyDayFlags.length）
+  // 掃描結果帶入（該檔不在最近 eod 掃描的 pre-breakout 名單 → null）
+  trustScore: number | null; // scores.trustScore（rankScore 加權合成，0~100）
+  otherInstScore: number | null; // scores.otherInstScore（rankScore(otherInstRatio)，0~100）
+  trustNetRatio: number | null; // detail.trustNetRatio 或 action 現算（sharesOutstanding null → null）
+  otherInstRatio: number | null; // detail.otherInstRatio
+  degraded: boolean; // dataDays < PRE_INST_MIN_DAYS
 }
 
 function isoDate(d: Date): string {
@@ -87,15 +111,38 @@ function taipeiTodayIso(): string {
 }
 
 // ============================================================================
-// §3.1 最近掃描結果的 RS 百分位（讀檔，不現算全市場）
+// 最近 eod 掃描結果讀檔（不現算全市場）——供「強度 PR」欄 + 醞釀階段法人分數共用
 // ============================================================================
 
-interface ScanRsResult {
+interface ScanResultRow {
   code: string;
-  scores?: { relativeStrength?: number };
+  stage?: string;
+  scores?: {
+    relativeStrength?: number;
+    trustScore?: number;
+    otherInstScore?: number;
+  };
+  detail?: {
+    trustNetRatio?: number | null;
+    otherInstRatio?: number | null;
+  };
 }
 
-function readLatestScanRs(): { scanDate: string; prByCode: Map<string, number> } | null {
+// 醞釀階段每檔從掃描結果拿的欄位（不在名單 → 該 code 無此 entry）
+interface ScanPreInst {
+  trustScore: number | null;
+  otherInstScore: number | null;
+  trustNetRatio: number | null;
+  otherInstRatio: number | null;
+}
+
+interface LatestScan {
+  scanDate: string;
+  prByCode: Map<string, number>; // stage 不限：relativeStrength（強度 PR 欄）
+  preInstByCode: Map<string, ScanPreInst>; // 只 pre-breakout：trustScore / otherInstScore / detail
+}
+
+function readLatestScan(): LatestScan | null {
   if (!existsSync(RS_RESULT_DIR)) return null;
   // 只讀 {YYYY-MM-DD}.json（eod 定案結果）；跳過 {timestamp}.json（realtime）與 progress.json
   const files = readdirSync(RS_RESULT_DIR)
@@ -107,15 +154,28 @@ function readLatestScanRs(): { scanDate: string; prByCode: Map<string, number> }
   try {
     const parsed = JSON.parse(readFileSync(join(RS_RESULT_DIR, latest), "utf8")) as {
       date?: string;
-      results?: ScanRsResult[];
+      results?: ScanResultRow[];
     };
     const scanDate = parsed.date ?? latest.replace(".json", "");
     const prByCode = new Map<string, number>();
+    const preInstByCode = new Map<string, ScanPreInst>();
     for (const r of parsed.results ?? []) {
       const rs = r.scores?.relativeStrength;
       if (typeof rs === "number") prByCode.set(r.code, rs);
+      if (r.stage === "pre-breakout") {
+        preInstByCode.set(r.code, {
+          trustScore:
+            typeof r.scores?.trustScore === "number" ? r.scores.trustScore : null,
+          otherInstScore:
+            typeof r.scores?.otherInstScore === "number" ? r.scores.otherInstScore : null,
+          trustNetRatio:
+            typeof r.detail?.trustNetRatio === "number" ? r.detail.trustNetRatio : null,
+          otherInstRatio:
+            typeof r.detail?.otherInstRatio === "number" ? r.detail.otherInstRatio : null,
+        });
+      }
     }
-    return { scanDate, prByCode };
+    return { scanDate, prByCode, preInstByCode };
   } catch {
     return null;
   }
@@ -127,7 +187,9 @@ function readLatestScanRs(): { scanDate: string; prByCode: Map<string, number> }
 
 export async function listWatchlist(): Promise<WatchlistCardRow[]> {
   const items = await prisma.watchlistItem.findMany({
-    include: { stock: { select: { name: true, market: true } } },
+    include: {
+      stock: { select: { name: true, market: true, sharesOutstanding: true } },
+    },
     orderBy: { addedAt: "desc" },
   });
   if (items.length === 0) return [];
@@ -158,16 +220,20 @@ export async function listWatchlist(): Promise<WatchlistCardRow[]> {
     }
   }
 
-  const scanRs = readLatestScanRs();
+  const scan = readLatestScan();
 
   const rows = await Promise.all(
-    items.map((item) => buildCardRow(item, dataFresh, misQuotes, elapsedRatio, scanRs)),
+    items.map((item) => buildCardRow(item, dataFresh, misQuotes, elapsedRatio, scan)),
   );
   return rows.filter((r): r is WatchlistCardRow => r !== null);
 }
 
 type WatchlistItemWithStock = Awaited<
-  ReturnType<typeof prisma.watchlistItem.findMany<{ include: { stock: { select: { name: true; market: true } } } }>>
+  ReturnType<
+    typeof prisma.watchlistItem.findMany<{
+      include: { stock: { select: { name: true; market: true; sharesOutstanding: true } } };
+    }>
+  >
 >[number];
 
 async function buildCardRow(
@@ -175,7 +241,7 @@ async function buildCardRow(
   dataFresh: boolean,
   misQuotes: Map<string, MisQuote> | null,
   elapsedRatio: number,
-  scanRs: { scanDate: string; prByCode: Map<string, number> } | null,
+  scan: LatestScan | null,
 ): Promise<WatchlistCardRow | null> {
   const code = item.stockCode;
 
@@ -207,11 +273,12 @@ async function buildCardRow(
       orderBy: { date: "desc" },
       select: { date: true, foreignNetBuy: true, investmentTrustNetBuy: true, dealerNetBuy: true },
     }),
-    // 近 INST_LOOKBACK 日投信/外資淨買超（新到舊）——法人 diverging bar 用
+    // 近 PRE_INST_WINDOW(20) 日投信/外資淨買超（新到舊）——breakout diverging bar 取前 5 筆；
+    // pre-breakout 的 20 格日曆用全部。
     prisma.institutionalTrading.findMany({
       where: { stockCode: code },
       orderBy: { date: "desc" },
-      take: INST_LOOKBACK,
+      take: PRE_INST_WINDOW,
       select: { foreignNetBuy: true, investmentTrustNetBuy: true },
     }),
   ]);
@@ -314,8 +381,48 @@ async function buildCardRow(
   // ---- breakout 階段：inst + factors ----
   let inst: WatchlistCardRow["inst"] = null;
   let factors: WatchlistCardRow["factors"] = null;
+  let preInst: WatchlistCardRow["preInst"] = null;
 
-  if (stage !== "pre-breakout") {
+  if (stage === "pre-breakout") {
+    // 20 格日曆：投信 20 日淨買超序列（新到舊），前端 reverse 成舊→新
+    const trustSeriesNewToOld = instWindow.map((r) =>
+      Number(r.investmentTrustNetBuy ?? 0),
+    );
+    const dataDays = trustSeriesNewToOld.length;
+    const buyDayFlags = trustSeriesNewToOld.map((v) => v > 0);
+    const buyDays = buyDayFlags.filter(Boolean).length;
+    let consecutiveBuyDays = 0;
+    for (const flag of buyDayFlags) {
+      // buyDayFlags 是新→舊，從最新往回數連續買超
+      if (flag) consecutiveBuyDays += 1;
+      else break;
+    }
+
+    // 分數 / detail：優先讀最近 eod 掃描結果（rankScore 是全市場百分位，watchlist 算不出）
+    const fromScan = scan?.preInstByCode.get(code) ?? null;
+
+    // trustNetRatio：掃描結果有就用；沒有則 action 用 20 日序列 ÷ sharesOutstanding 現算
+    let trustNetRatio: number | null = fromScan?.trustNetRatio ?? null;
+    if (trustNetRatio === null && dataDays >= PRE_INST_MIN_DAYS) {
+      const shares = item.stock.sharesOutstanding;
+      if (shares != null && Number(shares) > 0) {
+        const netSum = trustSeriesNewToOld.reduce((s, v) => s + v, 0);
+        trustNetRatio = netSum / Number(shares);
+      }
+    }
+
+    preInst = {
+      buyDayFlags: buyDayFlags.reverse(), // 舊 → 新
+      buyDays,
+      consecutiveBuyDays,
+      dataDays,
+      trustScore: fromScan?.trustScore ?? null,
+      otherInstScore: fromScan?.otherInstScore ?? null,
+      trustNetRatio,
+      otherInstRatio: fromScan?.otherInstRatio ?? null,
+      degraded: dataDays < PRE_INST_MIN_DAYS,
+    };
+  } else {
     const bollingerUpper = indicatorWindow[0]?.bollingerUpper ?? null;
 
     // 法人 diverging bar
@@ -357,12 +464,12 @@ async function buildCardRow(
         ? ((close - bollingerUpper) / bollingerUpper) * 100
         : 0;
 
-    const pr = scanRs?.prByCode.get(code);
+    const pr = scan?.prByCode.get(code);
     factors = {
       proximityLongPct: prox.longPct,
       breakoutMarginPct,
       relativeStrength: typeof pr === "number" ? pr : null,
-      relativeStrengthStale: scanRs != null && scanRs.scanDate !== refDate,
+      relativeStrengthStale: scan != null && scan.scanDate !== refDate,
     };
   }
 
@@ -385,6 +492,7 @@ async function buildCardRow(
     degraded,
     inst,
     factors,
+    preInst,
   };
 }
 
