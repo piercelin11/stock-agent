@@ -2,13 +2,8 @@
 
 import { prisma } from "../prisma";
 import { revalidatePath } from "next/cache";
-import { readLatestScan, type LatestScan } from "../latest-scan";
-import { resolveDataContext } from "../data-context";
-import { Market } from "../../generated/prisma/client";
+import { resolveDataContext, type DataContext, type DataMode } from "../data-context";
 import {
-  computeCandleShape,
-  computeVolumeStrength,
-  computeBase,
   computeProximityToHigh,
   computeInstitutionalFlow,
   consecutiveAboveBand,
@@ -19,24 +14,22 @@ import {
 
 // 與 run-signal-scan.ts 的 SignalStage 同義；此處不 import 該模組（避免把整個掃描管線拉進 bundle）。
 export type SignalStage = "pre-breakout" | "breakout-day" | "extended";
-import {
-  fetchAllMisQuotes,
-  computeElapsedRatio,
-  type MisQuote,
-} from "../../scripts/lib/mis-quotes";
 import { SPARK_WINDOW, type SparkPoint } from "../dashboard-spark";
 import { buildSparkSeries } from "../spark-series";
 
-// ROADMAP 4.5.x：watchlist 頁改成卡片 gallery（PLAN docs/PLAN.md）。
-// listWatchlist() 回傳從「三表鬆散快照 + 買入狀態」改成「卡片結構化資料」：
+// ROADMAP 4.5.x：watchlist 頁卡片 gallery。
+// PLAN 3 §3：資料源從「A 方案：一進頁自動打 MIS」改成「三分支，接 resolveDataContext()」——
 //   - stage：consecutiveAboveBand() 即時判定（不是 WatchlistItem.source 靜態欄位）
-//   - 資料源 A 方案：DB 最新交易日 == 台北今日 → 用 DB（⚡）；否則自動打 MIS 盤中報價（🕐），阻塞 render
-//   - 強度 PR：讀 data/signal-scan-results 最新 eod 結果的 relativeStrength（PLAN §3.1）
+//   - ctx.mode === "eod"      → 讀 DB 當日（⚡）。與改版前相同。
+//   - ctx.mode === "intraday" → 讀最新 realtime 掃描 JSON 的 watchlistQuotes + resultByCode（🕐）。
+//                               分項不需前端現算（豁免 gate 後觀察股都在 results[]）。
+//   - ctx.mode === "stale"    → 讀 DB 昨收（🕐）+ 卡片標「收盤定案 {latestEodDate}」。
+//   **進頁不再打 MIS**——盤中即時報價統一由 intraday-scan.ts（launchd 每 30 分）產出。
+//   強度 PR / 醞釀籌碼：統一走 ctx.latestScan（preferRealtime）的 prByCode / preInstByCode / resultByCode。
 // 買入狀態欄位（isPurchased / buyPrice / ...）schema 保留，UI 不再顯示，updateWatchlistItem 仍留著。
 
 const { score } = resolveBreakoutConfig();
-const BASE_MAX_WINDOW = score.baseMaxWindowDays; // 240
-const BASE_MIN_HISTORY = score.baseMinHistoryDays; // 40
+const BASE_MAX_WINDOW = score.baseMaxWindowDays; // 240（布林指標歷史撈取窗，供階段判定 / 走勢圖）
 
 // 醞釀階段（pre-breakout）法人籌碼區塊用（PLAN 醞釀中卡片法人籌碼區塊）
 const ACC = resolveAccumulationConfig().score;
@@ -52,20 +45,16 @@ export interface WatchlistCardRow {
   source: string | null;
 
   stage: SignalStage; // consecutiveAboveBand() 即時判定
-  dataFresh: boolean; // DB 最新交易日 == 台北今日 → ⚡ / else 🕐
-  priceSource: "eod" | "realtime" | "estimated";
-  refDate: string; // 卡片實際採用的資料日期（DB 用 quote.date；MIS 用其回傳日期或今日）
+  mode: DataMode; // resolveDataContext().mode——卡片自己組「收盤定案」字串（§3.4）
+  dataFresh: boolean; // 僅 mode === "eod" 為 true → ⚡ / intraday·stale 皆 false → 🕐
+  priceSource: "eod" | "realtime" | "estimated"; // intraday 用 realtime/estimated；eod·stale 一律 eod
+  latestEodDate: string; // DB 最新一般股票交易日（stale 卡片顯示「收盤定案 {date}」）
+  refDate: string; // 卡片實際採用的資料日期（DB 用 quote.date；intraday 用 watchlistQuote.refDate）
 
   close: number;
   changePercent: number;
-  volumeRatio: number | null; // 今日（或盤中估全日）volume / volumeMa20
+  volumeRatio: number | null; // 今日（或盤中估全日）volume / volumeMa20——醞釀中「量增」欄仍用
   spark: SparkPoint[]; // 近 60 日相對布林中軌偏離（舊 → 新）
-
-  // 面向分數（0~100，缺資料為 null）——pre-breakout 底排用；breakout 卡片也算著（無害）
-  candleScore: number | null;
-  volumeScore: number | null;
-  baseScore: number | null;
-  degraded: string[];
 
   // 法人 diverging bar 中繼值——只在 breakout-day / extended 組；pre-breakout = null
   inst: {
@@ -105,10 +94,6 @@ function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-function taipeiTodayIso(): string {
-  return new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
-}
-
 // 最近掃描結果讀檔（供「強度 PR」欄 + 醞釀階段法人分數）已搬到 lib/latest-scan.ts（PLAN 2 §1）。
 
 // ============================================================================
@@ -124,34 +109,12 @@ export async function listWatchlist(): Promise<WatchlistCardRow[]> {
   });
   if (items.length === 0) return [];
 
-  // 資料源判斷：收斂到 resolveDataContext（PLAN 2 §2.3）。
-  // 本份不改盤中資料來源（仍是 !dataFresh 就進頁打 MIS，見下）——那是 PLAN 3 §5。
-  // 這裡只是「把日期判斷換成 helper」，行為等價（dataFresh == ctx.mode === "eod"）。
+  // 資料脈絡單一真相來源（PLAN 2 §2 / PLAN 3 §3）。
+  // ctx.mode ∈ { eod, intraday, stale }；ctx.latestScan = readLatestScan({ preferRealtime: true })。
+  // **進頁不打 MIS**——盤中即時報價由 intraday-scan.ts（launchd 每 30 分）寫進掃描 JSON，這裡讀 JSON。
   const ctx = await resolveDataContext(prisma);
-  const dataFresh = ctx.mode === "eod";
 
-  // 非當日 → 打 MIS 盤中報價（一次抓全部觀察股；< 50 檔 = 1 批）
-  let misQuotes: Map<string, MisQuote> | null = null;
-  let elapsedRatio = 1;
-  if (!dataFresh) {
-    const stocks = items.map((it) => ({
-      code: it.stockCode,
-      market: it.stock.market === Market.TPEx ? Market.TPEx : Market.TWSE,
-    }));
-    try {
-      const res = await fetchAllMisQuotes(stocks);
-      misQuotes = res.quotes;
-      elapsedRatio = computeElapsedRatio(new Date()).clipped;
-    } catch {
-      misQuotes = null; // 抓取整體失敗 → 全部退回 DB 昨收
-    }
-  }
-
-  const scan = readLatestScan(); // 預設：只讀 eod 定案 {YYYY-MM-DD}.json
-
-  const rows = await Promise.all(
-    items.map((item) => buildCardRow(item, dataFresh, misQuotes, elapsedRatio, scan)),
-  );
+  const rows = await Promise.all(items.map((item) => buildCardRow(item, ctx)));
   return rows.filter((r): r is WatchlistCardRow => r !== null);
 }
 
@@ -165,12 +128,11 @@ type WatchlistItemWithStock = Awaited<
 
 async function buildCardRow(
   item: WatchlistItemWithStock,
-  dataFresh: boolean,
-  misQuotes: Map<string, MisQuote> | null,
-  elapsedRatio: number,
-  scan: LatestScan | null,
+  ctx: DataContext,
 ): Promise<WatchlistCardRow | null> {
   const code = item.stockCode;
+  const dataFresh = ctx.mode === "eod";
+  const scan = ctx.latestScan; // readLatestScan({ preferRealtime: true })——PR / 醞釀籌碼 / 盤中報價 統一來源
 
   const dbQuote = await prisma.dailyQuote.findFirst({
     where: { stockCode: code },
@@ -181,12 +143,12 @@ async function buildCardRow(
 
   const [indicatorWindow, quoteWindow, institutional, instWindow] = await Promise.all([
     // 布林指標歷史（新到舊）：index 0 = 最新。bollingerUpper → 階段判定 / 突破幅度；
-    // bollingerBandwidth → computeBase；bollingerMid → 走勢圖正規化
+    // bollingerMid → 走勢圖正規化；volumeMa20 → volumeRatio
     prisma.technicalIndicator.findMany({
       where: { stockCode: code },
       orderBy: { date: "desc" },
       take: BASE_MAX_WINDOW + 1,
-      select: { date: true, bollingerUpper: true, bollingerBandwidth: true, bollingerMid: true, volumeMa20: true },
+      select: { date: true, bollingerUpper: true, bollingerMid: true, volumeMa20: true },
     }),
     // 近 SPARK_WINDOW 筆收盤（走勢圖 + proximity 母體）
     prisma.dailyQuote.findMany({
@@ -210,43 +172,34 @@ async function buildCardRow(
     }),
   ]);
 
-  const degraded: string[] = [];
+  // ---- 決定 close / volume / changePercent / priceSource / refDate（三分支，PLAN 3 §3）----
+  //   eod    → DB 當日
+  //   intraday → ctx.latestScan.watchlistQuotesByCode（intraday-scan.ts 產出的即時報價）；
+  //              該 code 不在（MIS 沒抓到 / z·h 皆缺）→ 個別退回 DB 昨收，不影響其他檔
+  //   stale  → DB 昨收
+  const wq =
+    ctx.mode === "intraday" ? scan?.watchlistQuotesByCode.get(code) ?? null : null;
 
-  // ---- 決定 close / volume / changePercent / priceSource / refDate ----
-  const mis = misQuotes?.get(code);
   let close: number;
-  let effectiveVolume: number; // 今日成交量（DB）或盤中估全日量（MIS）
+  let effectiveVolume: number; // 當日成交量（DB）或盤中估全日量（watchlistQuote.volume）
   let changePercent: number;
   let priceSource: WatchlistCardRow["priceSource"];
   let refDate: string;
 
-  if (dataFresh) {
-    close = dbQuote.close;
-    effectiveVolume = Number(dbQuote.volume);
-    const prevClose = dbQuote.close - dbQuote.change;
-    changePercent = prevClose > 0 ? (dbQuote.change / prevClose) * 100 : 0;
-    priceSource = "eod";
-    refDate = isoDate(dbQuote.date);
-  } else if (mis && (mis.price !== null || mis.high !== null)) {
-    if (mis.price !== null) {
-      close = mis.price;
-      priceSource = "realtime";
-    } else {
-      close = mis.high!;
-      priceSource = "estimated";
-    }
-    effectiveVolume = elapsedRatio > 0 ? mis.cumulativeVolume / elapsedRatio : mis.cumulativeVolume;
-    changePercent =
-      mis.prevClose !== null && mis.prevClose > 0
-        ? ((close - mis.prevClose) / mis.prevClose) * 100
-        : 0;
-    refDate = mis.date ?? taipeiTodayIso();
+  const dbPrevClose = dbQuote.close - dbQuote.change;
+  const dbChangePercent = dbPrevClose > 0 ? (dbQuote.change / dbPrevClose) * 100 : 0;
+
+  if (wq) {
+    close = wq.close;
+    effectiveVolume = wq.volume; // 已是估全日量（run-signal-scan.ts §3.2 產出）
+    changePercent = wq.changePercent;
+    priceSource = wq.priceSource; // "realtime" | "estimated"
+    refDate = wq.refDate;
   } else {
-    // 非當日、且 MIS 沒抓到（或 z/h 皆缺）→ 退回 DB 昨收
+    // eod / stale / intraday 個別 fallback：一律 DB 昨收
     close = dbQuote.close;
     effectiveVolume = Number(dbQuote.volume);
-    const prevClose = dbQuote.close - dbQuote.change;
-    changePercent = prevClose > 0 ? (dbQuote.change / prevClose) * 100 : 0;
+    changePercent = dbChangePercent;
     priceSource = "eod";
     refDate = isoDate(dbQuote.date);
   }
@@ -272,38 +225,11 @@ async function buildCardRow(
   for (const ind of indicatorWindow) midByDate.set(ind.date.getTime(), ind.bollingerMid);
   const spark = buildSparkSeries(quoteWindow.slice(0, SPARK_WINDOW), midByDate);
 
-  // ---- volumeRatio ----
+  // ---- volumeRatio（醞釀中「量增」欄 + breakout 底排都用）----
+  // 一定要現算：需要「當前 volume」（DB 當日量 or 盤中估全日量）÷ T-1 volumeMa20。
   const volumeMa20 = indicatorWindow[0]?.volumeMa20 ?? null;
   const volumeRatio =
     volumeMa20 != null && volumeMa20 > 0 ? effectiveVolume / volumeMa20 : null;
-
-  // ---- K 棒 / 力道 / 位階 ----
-  const candleInput = dataFresh
-    ? { open: dbQuote.open, high: dbQuote.high, low: dbQuote.low, close }
-    : mis
-      ? { open: mis.open, high: mis.high, low: mis.low, close }
-      : { open: dbQuote.open, high: dbQuote.high, low: dbQuote.low, close };
-  const candleResult = computeCandleShape(candleInput);
-  if (candleResult.degraded) degraded.push("candleShape");
-  const candleScore = candleResult.degraded ? null : candleResult.score;
-
-  let volumeScore: number | null = null;
-  if (volumeRatio != null) {
-    volumeScore = computeVolumeStrength(volumeRatio, score.curves.volumeStrength);
-  } else {
-    degraded.push("volume");
-  }
-
-  const latestBandwidth = indicatorWindow[0]?.bollingerBandwidth ?? null;
-  const bandwidthHistory = indicatorWindow.slice(1).map((i) => i.bollingerBandwidth);
-  const baseResult = computeBase(
-    latestBandwidth,
-    bandwidthHistory,
-    BASE_MIN_HISTORY,
-    score.curves.base,
-  );
-  if (baseResult.degraded) degraded.push("base");
-  const baseScore = baseResult.degraded ? null : baseResult.score;
 
   // ---- breakout 階段：inst + factors ----
   let inst: WatchlistCardRow["inst"] = null;
@@ -406,17 +332,15 @@ async function buildCardRow(
     addedAt: isoDate(item.addedAt),
     source: item.source,
     stage,
+    mode: ctx.mode,
     dataFresh,
     priceSource,
+    latestEodDate: ctx.latestEodDate,
     refDate,
     close,
     changePercent,
     volumeRatio,
     spark,
-    candleScore,
-    volumeScore,
-    baseScore,
-    degraded,
     inst,
     factors,
     preInst,

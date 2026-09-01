@@ -37,6 +37,11 @@ screening 頁自動刷新、watchlist 頁改讀掃描 JSON 不再進頁打 MIS�
 
 **動：**
 
+- `lib/data-context.ts`：**執行中追加（原列「不動」）**——把 `intraday` 時段上界從 09:00–13:30
+  延到 09:00–17:00，並依「是否已收盤」套不同 staleness（盤中 35 分 / 收盤後 4 小時）。理由：
+  13:30 launchd 最後一次掃描產出的是「當天定案盤中值」（估全日量已 = 實際全日量、收盤即時價已定），
+  14:00 卻掉回昨收體驗倒退。詳見 §3.6。**launchd plist 與 `intraday-scan.ts` 的時段判斷不動**
+  （收盤後不需要再跑掃描，改的只是「頁面顯示哪份」）。
 - `lib/actions/signal-scan.ts`：新增 `getLatestScanMeta()`——輕量 action，回
   `{ timestamp: string; source: SignalSource; scanDate: string } | null`（讀
   `readLatestScan({ preferRealtime: true })` 只取三個欄位）。給 `ScreeningPanel` 輪詢比對用。
@@ -58,8 +63,10 @@ screening 頁自動刷新、watchlist 頁改讀掃描 JSON 不再進頁打 MIS�
 - `scripts/screening/_run-signal-scan.ts`：不動（screening 頁 realtime 手動掃描仍用它）。
 - `scripts/lib/*`、`scripts/pipeline/daily-pipeline.ts`、`com.piercelin.dailypipeline.plist`：不動。
 - `prisma/schema.prisma`：不動。盤中掃描結果只寫 JSON。
-- `lib/data-context.ts` / `lib/latest-scan.ts`：**不動**（PLAN 2 已按本份需求寫好 `intraday`
-  分支與 `preferRealtime`）。
+- `lib/latest-scan.ts`：**不動**（PLAN 2 已按本份需求寫好 `preferRealtime` + `resultByCode` /
+  `watchlistQuotesByCode`）。
+- `lib/data-context.ts`：PLAN 2 已寫好三態骨架，本份原列「不動」，執行中因 §3.6 追加了
+  「收盤後 intraday 延伸」的小改（見上「動」段）。
 - `lib/actions/dashboard.ts`：不動——dashboard 的「觀察類股今日表現」是「帶量帶價第一根視角」
   的盤後分析，維持純讀 DB（`getWatchlistPerformance` 現況）。盤中即時性由 watchlist 頁負責，
   dashboard 不追。
@@ -187,10 +194,18 @@ cat logs/intraday_scan_stdout.log
 
 `resolveDataContext(prisma)` 回的 `ctx.mode` 決定：
 
+**實作時的需求調整（2026-09-01）**：醞釀中卡片的 **K棒 / 力道 / 位階三個「單檔現算」分數**
+（`candleScore` / `volumeScore` / `baseScore` + 相關 `degraded`）從 `WatchlistCardRow` 與
+`FactorList` pre-breakout 分支**整個移除**。那三個正是「盤中要現算還是讀 JSON」岔路的來源；
+拿掉後三個模式一律不現算它們，`buildCardRow` 也不再有「單檔現算 vs 讀 `resultByCode`」的分歧
+——`stage` 一律 `consecutiveAboveBand()` 現算、`volumeRatio` 一律現算（需要當前 volume）、
+PR / 醞釀籌碼一律讀 `ctx.latestScan`。醞釀中卡片底排只留「量增」。突破卡片
+（`breakout-day` / `extended`）不動。
+
 ### 3.1 `mode === "eod"`（DB 有當日資料）
 
-現況邏輯——`buildCardRow` 用該檔最新 `DailyQuote`（`dbQuote`），`dataFresh = true`（⚡）。
-`priceSource = "eod"`，`refDate = quote.date`。**與現在完全相同。**
+`buildCardRow` 用該檔最新 `DailyQuote`（`dbQuote`），`dataFresh = true`（⚡）。
+`priceSource = "eod"`，`refDate = quote.date`。**與改版前輸出相同。**
 
 ### 3.2 `mode === "intraday"`（盤中 + 有夠新掃描 JSON）
 
@@ -199,48 +214,69 @@ cat logs/intraday_scan_stdout.log
     / `refDate` 直接取。
   - 該 code 不在 `watchlistQuotesByCode`（MIS 沒抓到 / z·h 皆缺）→ **退回該檔 `dbQuote` 昨收**
     （priceSource `"eod"`、`refDate` = dbQuote.date），視為個別 fallback，不影響其他檔。
-- **分項**：`ctx.latestScan.resultByCode.get(code)`——
-  - 有（觀察股在掃描 results[]，因 PLAN 2 豁免 gate，通常都有）→ 直接拿 `stage` / `scores` /
-    `volumeRatio` / `inst` / `factors` / `preInst` / `degraded`。**不需前端現算。**
-  - 沒有（掃描當下該股已下市 / MIS 全缺跳過 / 掃描還沒跑過觀察股）→ 前端現算 K棒/力道/位階
-    （現況 `buildCardRow` 已有這段 `computeCandleShape` / `computeVolumeStrength` / `computeBase`），
-    `stage` 用 `consecutiveAboveBand()` 現算（現況已有），`inst` / `factors` / `preInst` 走現況
-    的「讀 eod 掃描結果」或 null。
-- **強度 PR / 醞釀籌碼**：`resultByCode` 的 `scores.relativeStrength` / `preInst`（PLAN 2 豁免 gate
-  後這些對觀察股都有值了）。現況「讀最近 eod 掃描」的 `readLatestScan()`（無 preferRealtime）
-  改成統一走 `ctx.latestScan`。
-- **freshness**：`dataFresh = false`（🕐——盤中即時，非今日交易日定案）。這與現況「抓到即時仍 🕐」一致。
+- **volumeRatio**：一律現算 = `effectiveVolume`（上面的估全日量）÷ T-1 `volumeMa20`。
+- **stage**：`consecutiveAboveBand()` 現算（[0] 用當下 close、歷史筆用 DB `quoteWindow` 真實收盤，
+  上軌是 T-1 的，可接受）。
+- **強度 PR / 醞釀籌碼**：`ctx.latestScan` 的 `prByCode`（`relativeStrength`）/ `preInstByCode`
+  （`trustScore` / `otherInstScore` / detail）。PLAN 2 豁免 gate 後這些對觀察股都有值。
+  `preferRealtime: true` 讀取，眼下就是剛跑完的 intraday 掃描結果。
+- **freshness**：`dataFresh = false`（🕐——盤中即時，非今日交易日定案）。
+- **卡片日期字串**：`盤中 {refDate}`。
 
 ### 3.3 `mode === "stale"`（盤外 / 無夠新 JSON）
 
 - **報價**：該檔 `dbQuote` 昨收。`priceSource = "eod"`，`refDate = dbQuote.date`。
-- **分項**：`ctx.latestScan`（`preferRealtime` 可能仍讀到今早最後一次掃描，也可能是昨天 eod）——
-  - `resultByCode` 有 → 用（但 `refDate` 與掃描日期不符時，PR / 籌碼標「🕐」，現況已有
-    `relativeStrengthStale` 這類欄位）。
-  - 沒有 → 前端現算（同 §3.2 的 fallback）。
-- **freshness**：`dataFresh = false`（🕐）。**卡片標「收盤定案 {ctx.latestEodDate}」**——這是本份
-  對使用者的明確化：盤外看到的是收盤價，不是即時。
+- **volumeRatio / stage / PR / 醞釀籌碼**：同 §3.2（volumeRatio 用 DB 當日量現算；
+  PR / 籌碼讀 `ctx.latestScan`——`preferRealtime` 可能讀到今早最後一次掃描或昨天 eod，
+  `relativeStrengthStale` = `scan.scanDate !== refDate` 時卡片 PR 旁加 🕐）。
+- **freshness**：`dataFresh = false`（🕐）。**卡片標「收盤定案 {ctx.latestEodDate}」**——盤外看到的
+  是收盤價、不是即時，本份對使用者的明確化。
 
 ### 3.4 `WatchlistCardRow` 型別 / `FreshnessBadge` 語意
 
+- **移除欄位**：`candleScore` / `volumeScore` / `baseScore` / `degraded`（見本節開頭的需求調整）。
 - `dataFresh: boolean`：僅 `mode === "eod"` 為 true（⚡）。`intraday` / `stale` 皆 false（🕐）。
-  **與現況一致**（現況也是「只有 DB 當日交易日才 ⚡」）。
-- `priceSource`：多一個實質狀態但 enum 不變（`"eod"` / `"realtime"` / `"estimated"`）。
-  `intraday` 用 `"realtime"` / `"estimated"`；`stale` 一律 `"eod"`。
-- 新增（optional）`asOfLabel?: string`：`stale` 時 = `"收盤定案 {latestEodDate}"`，其他 mode
-  不帶。`WatchlistCard` 有此欄就在 `refDate` 附近顯示。或直接複用現有 `refDate` 顯示 + 一個
-  `mode` 欄位讓卡片自己組字串——擇一，傾向後者（`WatchlistCardRow` 加 `mode: DataMode`）。
-- `buildCardRow` 的簽章從 `(item, dataFresh, misQuotes, elapsedRatio, scan)` 改成
-  `(item, ctx, scanResult?)`——`ctx` 帶 mode / latestScan，不再傳 misQuotes（MIS 不在這裡打了）。
+- `priceSource`：enum 不變（`"eod"` / `"realtime"` / `"estimated"`）。`intraday` 用
+  `"realtime"` / `"estimated"`；`eod` / `stale` 一律 `"eod"`。
+- 新增 `mode: DataMode` + `latestEodDate: string`：`WatchlistCard` 據此自組日期字串
+  （`stale` → `收盤定案 {latestEodDate}`、`intraday` → `盤中 {refDate}`、`eod` → `{refDate}`）。
+- `buildCardRow` 簽章從 `(item, dataFresh, misQuotes, elapsedRatio, scan)` 改成 `(item, ctx)`
+  ——`ctx: DataContext` 帶 `mode` / `latestScan` / `latestEodDate`，不再傳 misQuotes。
 
 ### 3.5 移除的東西
 
-- `listWatchlist` 開頭的 `fetchAllMisQuotes` 呼叫 + `computeElapsedRatio` + `misQuotes` / `elapsedRatio`
-  參數傳遞。
+- `listWatchlist` 開頭的 `fetchAllMisQuotes` 呼叫 + `computeElapsedRatio` + `misQuotes` /
+  `elapsedRatio` 參數傳遞。
 - `import { fetchAllMisQuotes, computeElapsedRatio, type MisQuote } from "../../scripts/lib/mis-quotes"`
-  ——若 `watchlist.ts` 其他地方沒用到 mis-quotes 就整行刪。
-- `buildCardRow` 內所有 `mis`（MisQuote）分支：`mis && (mis.price !== null || mis.high !== null)` 那段
-  改成讀 `ctx.latestScan.watchlistQuotesByCode`。
+  整行刪（`watchlist.ts` 其他地方沒用到）。
+- `buildCardRow` 內所有 `mis`（MisQuote）分支 → 讀 `ctx.latestScan.watchlistQuotesByCode`。
+- `computeCandleShape` / `computeBase` import + K棒/力道/位階現算段 + `BASE_MIN_HISTORY` /
+  `taipeiTodayIso` 常數/helper（隨三分數移除一併清掉）。`FactorList.tsx` 的 `ScoreCell` /
+  `scoreClass` 移除，pre-breakout 分支只留一個「量增」`Cell`。
+
+### 3.6 收盤後 intraday 延伸（`lib/data-context.ts` 執行中追加）
+
+**問題**：`intraday` 分支原本只在台北 09:00–13:30 成立。13:30 launchd 最後一次掃描產出的
+JSON 是「當天定案盤中值」——`elapsedRatio` 已到 1.0、估全日量 = 實際全日量、收盤即時價已定，
+是當天最準的一份。但 14:06（超過 35 分 staleness）就掉回 `stale`（DB 昨收），13:00 看即時、
+14:00 看昨收，體驗倒退。
+
+**改法**（只動 `lib/data-context.ts`）：
+- `intraday` 時段上界 09:00–13:30 → **09:00–17:00**（`SESSION_END_MIN = 17*60`）。
+- staleness 依「是否已收盤」分兩段：
+  - 盤中（≤13:30，`MARKET_CLOSE_MIN`）→ `INTRADAY_STALE_MS`（35 分，launchd 每 30 分跑 + 緩衝）。
+  - 收盤後（13:30–17:00）→ `CLOSED_STALE_MS`（4 小時）——讓 13:30 那份 JSON 撐到 ~17:30，
+    足夠銜接 17:00 pipeline 跑完切 `eod`。
+- `isTaipeiTradingHours()`（回 boolean）改成 `taipeiSessionMinutes()`（回分鐘數 / null），
+  用分鐘數判斷套哪個上限。
+
+**不動**：`com.piercelin.intradayscan.plist`（維持 09:00–13:30 那 10 個觸發點——收盤後不需
+再跑掃描）、`intraday-scan.ts` 內部的 09:00–13:30 skip 判斷（那是「要不要跑掃描」，正確）。
+改的只是「頁面該顯示哪份資料」。
+
+**一天狀態**：`stale`（半夜）→ `intraday`（09:00 起，盤中每半小時更新）→ `intraday`
+（13:30–17:00 顯示定案盤中值）→ `eod`（17:00 pipeline 跑完）。純邏輯模擬 10 案全過
+（scratchpad，不入 repo）。
 
 ---
 
@@ -250,29 +286,55 @@ cat logs/intraday_scan_stdout.log
 
 ```ts
 // lib/actions/signal-scan.ts
+// 最終版：只讀最新 realtime {timestamp}.json（不用 readLatestScan / preferRealtime 去比 eod）。
+// getSignalScanResult() 共用同一個 readLatestRealtimeFile()。
+function readLatestRealtimeFile(): SignalScanOutput | null { /* readdir {timestamp}.json 取最新 */ }
+
 export async function getLatestScanMeta(): Promise<{
   timestamp: string;
   source: SignalSource;
   scanDate: string;
 } | null> {
-  const s = readLatestScan({ preferRealtime: true });
-  if (!s) return null;
-  return { timestamp: s.timestamp, source: s.source, scanDate: s.scanDate };
+  const rt = readLatestRealtimeFile();
+  if (!rt) return null;
+  return { timestamp: rt.queriedAt, source: rt.source, scanDate: rt.date };
 }
 ```
+
+理由：自動刷新是「盤中每半小時換上新掃描」的機制，只在 realtime 情境有意義。用
+`preferRealtime` 去比 eod 檔的 `queriedAt`，會在「同一天既跑過盤後又跑過盤中、realtime 檔
+`queriedAt` 剛好較新」時把正式盤後結果蓋掉（2026-09-01 事故，見 §4.3）。
 
 ### 4.2 `ScreeningPanel` 輪詢
 
 - 新 `useEffect`：`setInterval(async () => { ... }, 60_000)`，掛載啟動、卸載 `clearInterval`。
-- 每次：`const meta = await getLatestScanMeta()`。若 `meta && view && new Date(meta.timestamp) > new Date(view.queriedAt)`
-  → `const res = await getSignalScanResult(); setView(res); resetTableState();`（比照現況 realtime
-  掃完的處理）。
-- **不與手動掃描的 `pollRef` 衝突**：手動 realtime 掃描進行中（`scanBusy === true`）時，自動刷新
-  輪詢跳過（`if (scanBusy) return;`）——避免掃到一半被半成品覆蓋。
-- **eod 模式頁面也開輪詢無害**：eod 模式下 `getLatestScanMeta()` 回的是 eod 檔或早上的 realtime 檔，
-  `timestamp` 不會比剛跑完的 eod `view.queriedAt` 新 → 不觸發重載。
-- UI 提示：表格上方「查詢時間」旁，自動刷新啟用時加一個小字「每分鐘自動更新」（僅 realtime /
-  intraday 語境；eod 不顯示）。
+  interval callback 讀 `viewRef` / `scanBusyRef`（`useRef` 鏡射 state），不因 state 變動重建 interval。
+- 每次：跳過條件 `scanBusyRef.current`（手動掃描進行中）**或 `viewRef.current.source !== "realtime"`**
+  （畫面在盤後結果時不該撿 realtime 檔）。否則 `const meta = await getLatestScanMeta()`，若
+  `new Date(meta.timestamp) > new Date(v.queriedAt)` → `getSignalScanResult()` → `setView` +
+  `resetTableState()`。
+- UI 提示：`view.source === "realtime"` 時「查詢時間」旁顯示「每分鐘自動更新」。
+
+### 4.3 進頁載入邏輯修正（「昨」badge 事故，2026-09-01）
+
+**問題**：`ScreeningPanel` 掛載時的 useEffect（原本給「realtime 背景掃描切走又回來接管」用）有一段
+`p?.status === "done" && !view → getSignalScanResult() → setView`。`progress.json` 的 `done` 態
+**會無限期殘留**（上次 realtime 掃描終態，直到下次掃描才覆蓋）。盤後進頁時：`getScanMode()` 回
+`eod`（`resolveDataContext()` 判斷正確），但**它只改「跑掃描」按鈕的文案，不碰 `view`**；而這段
+掛載 useEffect 卻讀到幾小時前手動 `--source=realtime` 留下的 `done`，撿回那份 realtime 殘檔顯示
+→ 表格每檔 `inst.todayTrustDir === null` → 前端掛「昨」badge（realtime 路徑刻意不採當日法人）。
+
+**根因**：`done` 分支只看 `status === "done" && !view`，沒有 staleness 檢查（`STALE_MS` 只擋
+`running` 殘檔），也沒問「現在是不是 realtime 模式」。「統一入口」`resolveDataContext()` 統一的是
+「用哪份**資料**」，沒統一「選股頁進頁時把 `view` 設成哪份**掃描結果**」——那條路 PLAN 3 只有
+`getScanMode()`（決定按鈕行為）接了，掛載 useEffect 沒接。
+
+**最小修法**（本份）：`done` 分支加 staleness——`DONE_STALE_MS = 30 * 60_000`（對齊 launchd 盤中
+掃描間隔）。`p.status === "done" && !view && (now - updatedAt) < DONE_STALE_MS` 才撿。盤後手動跑的
+realtime 殘檔通常都超過 30 分 → 不撿 → 「昨」消失。盤中 launchd 每 30 分產出、`done` 一直夠新 →
+維持接管行為。
+（不加 `mode` 守衛：`mode` 由另一個 useEffect 非同步設，掛載即跑時可能還是 null；`DONE_STALE_MS`
+已足夠。徹底解法是 PLAN 4——移除 toggle + 背景任務，選股頁進頁一律走 `resolveDataContext()`。）
 
 ---
 
@@ -319,11 +381,18 @@ export async function getLatestScanMeta(): Promise<{
 
 ---
 
-## 6. 三份 PLAN 完成後
+## 6. 本份 merge 後
 
-本份 merge 後，「資料源統一 + 盤中即時性」這條線收尾。回覆使用者時確認：
+「資料源統一 + 盤中即時性」的第一輪收尾。已達成：
 - daily-pipeline 冷進程穩定性（PLAN 1）
 - 資料脈絡判斷收斂到 `resolveDataContext()` 單一 helper（PLAN 2）
 - 6226 PR / 醞釀籌碼空白已解（PLAN 2 豁免 gate）
-- 盤中每 30 分自動掃描、screening / watchlist 頁不再各自打 MIS（PLAN 3）
-並提醒可規劃下一輪內容（對照 `docs/ROADMAP.md`）。
+- 盤中每 30 分 launchd 自動掃描、watchlist 頁改讀 JSON 不再進頁打 MIS（PLAN 3）
+- 收盤後 intraday 延伸到 17:00（§3.6）、自動刷新只認 realtime 檔（§4.1）、進頁 done 殘檔
+  加 staleness 擋「昨」badge（§4.3）
+
+**留給 PLAN 4**：選股頁 `ScreeningPanel` 仍有 toggle（盤後/盤中）+ realtime 背景任務
+（`_run-signal-scan.ts` spawn + `progress.json` 輪詢 + 進頁接管）這套 ROADMAP 4.5.3 時代的
+設計。launchd 每 30 分自動產出 JSON 之後，這套已過時——前端不需要自己 spawn 掃描 + 顧進度。
+PLAN 4 移除 toggle、移除背景任務，讓選股頁進頁一律走 `resolveDataContext()`（跟 watchlist 同
+心智模型），「昨」bug 的完整解法也在 PLAN 4（本份 §4.3 只是 staleness 擋掉）。

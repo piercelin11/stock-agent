@@ -75,7 +75,14 @@ export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
             {row.priceSource === "estimated" ? (
               <span className="rounded bg-warning/10 px-1 text-xs text-warning">估</span>
             ) : null}
-            <span className="text-xs text-muted-foreground/50">{row.refDate}</span>
+            {/* §3.4：stale（盤外）= 收盤定案價，明確告知非即時；intraday = 盤中即時，只顯示日期 */}
+            <span className="text-xs text-muted-foreground/50">
+              {row.mode === "stale"
+                ? `收盤定案 ${row.latestEodDate || row.refDate}`
+                : row.mode === "intraday"
+                  ? `盤中 ${row.refDate}`
+                  : row.refDate}
+            </span>
           </div>
         </div>
         <Button variant="danger" onClick={remove} disabled={isPending}>
