@@ -1,3 +1,5 @@
+import { cn } from "../../lib/cn";
+
 export function Card({
   title,
   children,
@@ -6,9 +8,11 @@ export function Card({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900 p-5">
+    <div className="rounded-lg border border-border bg-card p-5">
       {title ? (
-        <h2 className="mb-3 text-base font-semibold text-slate-500">{title}</h2>
+        <h2 className="mb-3 text-base font-semibold text-muted-foreground/70">
+          {title}
+        </h2>
       ) : null}
       {children}
     </div>
@@ -27,7 +31,9 @@ export function FieldLabel({
   className?: string;
 }) {
   return (
-    <span className={`text-sm text-slate-400 ${className}`}>{children}</span>
+    <span className={cn("text-sm text-muted-foreground", className)}>
+      {children}
+    </span>
   );
 }
 
@@ -35,7 +41,7 @@ export function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div>
       <FieldLabel>{label}</FieldLabel>
-      <div className="mt-1 text-3xl font-semibold tabular-nums text-slate-100">
+      <div className="mt-1 text-3xl font-semibold tabular-nums text-card-foreground">
         {value}
       </div>
     </div>

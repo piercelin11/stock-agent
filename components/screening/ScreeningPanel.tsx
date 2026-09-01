@@ -13,6 +13,7 @@ import {
   type SignalSource,
 } from "../../lib/actions/signal-scan";
 import { addToWatchlist } from "../../lib/actions/watchlist";
+import { cn } from "../../lib/cn";
 import { Button } from "../ui/Button";
 
 // ROADMAP 4.5.3：三分頁（第一根突破 / 冷水區醞釀 / 盤中即時掃描）收斂成單頁 + 階段 filter。
@@ -46,7 +47,7 @@ type Row = SignalScanView["results"][number];
 
 function changePercentCell(v: number): React.ReactNode {
   return (
-    <span className={v > 0 ? "text-rose-400" : v < 0 ? "text-emerald-400" : ""}>{v.toFixed(2)}</span>
+    <span className={v > 0 ? "text-up" : v < 0 ? "text-down" : ""}>{v.toFixed(2)}</span>
   );
 }
 
@@ -70,11 +71,11 @@ const columns: Column[] = [
       <span>
         {r.close.toFixed(2)}
         {r.priceSource === "estimated" ? (
-          <span className="ml-1 rounded bg-amber-500/20 px-1 text-xs text-amber-400">估</span>
+          <span className="ml-1 rounded bg-warning/10 px-1 text-xs text-warning">估</span>
         ) : null}
         {r.warnings.includes("margin-chasing") ? (
           <span
-            className="ml-1 rounded bg-rose-500/20 px-1 text-xs text-rose-400"
+            className="ml-1 rounded bg-destructive/10 px-1 text-xs text-destructive"
             title="margin-chasing：突破當日法人淨賣超 + 本檔融資近期暴增"
           >
             追
@@ -341,20 +342,21 @@ export function ScreeningPanel() {
       {/* 模式切換 + 掃描按鈕 */}
       <div className="flex flex-wrap items-center gap-4">
         {mode === null ? (
-          <span className="text-sm text-slate-500">判斷掃描模式中…</span>
+          <span className="text-sm text-muted-foreground/70">判斷掃描模式中…</span>
         ) : (
           <>
-            <div className="inline-flex overflow-hidden rounded-lg border border-slate-800 text-sm">
+            <div className="inline-flex overflow-hidden rounded-lg border border-border text-sm">
               {(["eod", "realtime"] as SignalSource[]).map((m) => (
                 <button
                   key={m}
                   onClick={() => setChosenMode(m)}
                   disabled={scanBusy || isPending}
-                  className={`px-3 py-1.5 ${
+                  className={cn(
+                    "px-3 py-1.5 disabled:opacity-50",
                     chosenMode === m
-                      ? "bg-blue-600 text-white"
-                      : "bg-slate-900 text-slate-400 hover:text-slate-200"
-                  } disabled:opacity-50`}
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-card text-muted-foreground hover:text-foreground",
+                  )}
                 >
                   {m === "eod" ? "盤後定案" : "盤中即時"}
                 </button>
@@ -370,7 +372,7 @@ export function ScreeningPanel() {
         )}
 
         {view ? (
-          <span className="text-sm text-slate-400">
+          <span className="text-sm text-muted-foreground">
             {view.source === "eod" ? "交易日" : "查詢時間"}：
             {view.source === "eod"
               ? view.date
@@ -379,25 +381,25 @@ export function ScreeningPanel() {
             全市場 {view.stats.totalStocks} · 過 gate {view.stats.passedGate} · 醞釀{" "}
             {view.stats.preBreakout} · 突破 {view.stats.breakoutDay} · 延伸 {view.stats.extended}
             {estimatedCount > 0 ? (
-              <span className="ml-2 rounded bg-amber-500/20 px-1 text-xs text-amber-400">
+              <span className="ml-2 rounded bg-warning/10 px-1 text-xs text-warning">
                 估 {estimatedCount} 檔
               </span>
             ) : null}
           </span>
         ) : scanBusy && progress?.status === "running" ? (
-          <span className="text-sm text-slate-400">
+          <span className="text-sm text-muted-foreground">
             {progress.phase === "scoring"
               ? "評分中…"
               : `抓取即時報價中… ${progress.fetchedBatches}/${progress.totalBatches || "?"} 批`}
           </span>
         ) : scanBusy ? (
-          <span className="text-sm text-slate-400">啟動中…</span>
+          <span className="text-sm text-muted-foreground">啟動中…</span>
         ) : null}
       </div>
 
       {/* 選了盤後但今天還沒有盤後資料 → 會 fallback 盤中 */}
       {eodFallbackToRealtime ? (
-        <div className="rounded border border-amber-800 bg-amber-950/40 p-3 text-sm text-amber-300">
+        <div className="rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
           今天尚無盤後資料（daily-pipeline 未跑或非交易日），按「跑掃描」會改跑盤中即時掃描。
           {mode?.latestEodDate ? `最新盤後資料日：${mode.latestEodDate}。` : null}
         </div>
@@ -405,7 +407,7 @@ export function ScreeningPanel() {
 
       {/* realtime 常駐警語 */}
       {isRealtime ? (
-        <div className="rounded border border-slate-800 bg-slate-800/50 p-3 text-sm text-slate-400">
+        <div className="rounded border border-border bg-muted/50 p-3 text-sm text-muted-foreground">
           盤中即時掃描：對 <code>mis.twse.com.tw</code> 即時報價跑全市場快照，約需 20–30 秒。
           收盤價 / 量 / OHLC / 布林上軌為即時或估計值，<strong>與盤後結果不可直接比較</strong>。
           缺成交價的檔以盤中最高價代入（列尾標「估」）。可切走再回來看進度。
@@ -414,9 +416,9 @@ export function ScreeningPanel() {
 
       {/* realtime 進度條 */}
       {scanBusy && progress?.status === "running" && progress.totalBatches > 0 ? (
-        <div className="h-2 w-full overflow-hidden rounded bg-slate-800">
+        <div className="h-2 w-full overflow-hidden rounded bg-muted">
           <div
-            className="h-full bg-blue-500 transition-all"
+            className="h-full bg-primary transition-all"
             style={{
               width: `${Math.min(
                 100,
@@ -428,13 +430,13 @@ export function ScreeningPanel() {
       ) : null}
 
       {error ? (
-        <div className="rounded border border-rose-800 bg-rose-950/40 p-3 text-sm text-rose-300">
+        <div className="rounded border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
           {error}
         </div>
       ) : null}
 
       {view && view.warnings.length > 0 ? (
-        <div className="rounded border border-amber-800 bg-amber-950/40 p-3 text-sm text-amber-300">
+        <div className="rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
           <ul className="list-disc pl-5">
             {view.warnings.map((w, i) => (
               <li key={i}>{w}</li>
@@ -444,11 +446,11 @@ export function ScreeningPanel() {
       ) : null}
 
       {view?.isNonTradingDay ? (
-        <div className="rounded border border-amber-800 bg-amber-950/40 p-3 text-sm text-amber-300">
+        <div className="rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
           最新交易日尚無資料，請先跑 daily-pipeline。
         </div>
       ) : view && allRows.length === 0 ? (
-        <div className="rounded border border-slate-800 bg-slate-800/50 p-3 text-sm text-slate-400">
+        <div className="rounded border border-border bg-muted/50 p-3 text-sm text-muted-foreground">
           無符合條件的候選股。
         </div>
       ) : null}
@@ -456,7 +458,7 @@ export function ScreeningPanel() {
       {allRows.length > 0 ? (
         <>
           {/* 階段 filter */}
-          <div className="flex gap-1 border-b border-slate-800">
+          <div className="flex gap-1 border-b border-border">
             {(Object.keys(STAGE_FILTER_LABELS) as StageFilter[]).map((f) => {
               const count =
                 f === "all" ? allRows.length : allRows.filter((r) => r.stage === f).length;
@@ -467,11 +469,12 @@ export function ScreeningPanel() {
                     setStageFilter(f);
                     setExpandedCode(null);
                   }}
-                  className={`px-4 py-2 text-sm font-medium ${
+                  className={cn(
+                    "px-4 py-2 text-sm font-medium",
                     stageFilter === f
-                      ? "border-b-2 border-blue-500 text-slate-100"
-                      : "text-slate-500 hover:text-slate-300"
-                  }`}
+                      ? "border-b-2 border-primary text-foreground"
+                      : "text-muted-foreground/70 hover:text-foreground",
+                  )}
                 >
                   {STAGE_FILTER_LABELS[f]}（{count}）
                 </button>
@@ -480,7 +483,7 @@ export function ScreeningPanel() {
           </div>
 
           {stageFilter === "all" ? (
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-muted-foreground/70">
               「全部」檢視：排名為各階段內名次，不同階段分數語意不同、不可直接比較（預設依總分降冪）。
             </p>
           ) : null}
@@ -493,12 +496,12 @@ export function ScreeningPanel() {
             >
               加入觀察清單（{selected.size}）
             </Button>
-            {addMsg ? <span className="text-sm text-slate-400">{addMsg}</span> : null}
+            {addMsg ? <span className="text-sm text-muted-foreground">{addMsg}</span> : null}
           </div>
 
-          <div className="overflow-x-auto rounded-lg border border-slate-800">
+          <div className="overflow-x-auto rounded-lg border border-border">
             <table className="w-full text-sm">
-              <thead className="bg-slate-800/50 text-slate-400">
+              <thead className="bg-muted/50 text-muted-foreground">
                 <tr>
                   <th className="w-10 px-3 py-2"></th>
                   {columns.map((c) => (
@@ -554,9 +557,11 @@ function RowGroup({
   return (
     <>
       <tr
-        className={`border-t border-slate-800 hover:bg-slate-800/50 ${
-          isSelected ? "bg-blue-950/40" : ""
-        } ${row.priceSource === "estimated" ? "text-slate-400" : ""}`}
+        className={cn(
+          "border-t border-border hover:bg-muted/50",
+          isSelected && "bg-primary/10",
+          row.priceSource === "estimated" && "text-muted-foreground",
+        )}
       >
         <td className="px-3 py-2">
           <input
@@ -579,7 +584,7 @@ function RowGroup({
         ))}
       </tr>
       {isExpanded ? (
-        <tr className="bg-slate-800/50">
+        <tr className="bg-muted/50">
           <td colSpan={columns.length + 1} className="px-6 py-3">
             <Detail row={row} />
           </td>
@@ -594,24 +599,24 @@ function Detail({ row }: { row: Row }) {
   return (
     <div className="space-y-3">
       {row.warnings.includes("margin-chasing") ? (
-        <div className="rounded border border-rose-800 bg-rose-950/30 p-2 text-xs text-rose-300">
+        <div className="rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
           ⚠ margin-chasing：突破當日三大法人（投信＋外資）淨賣超，且本檔融資餘額近期增速排在自己歷史前
           20%——散戶追價、法人可能在派發。系統僅標記，未調整分數，請自行判斷是否排除。
         </div>
       ) : null}
       {row.priceSource === "estimated" ? (
-        <div className="rounded border border-amber-800 bg-amber-950/30 p-2 text-xs text-amber-300">
+        <div className="rounded border border-warning/30 bg-warning/10 p-2 text-xs text-warning">
           此檔盤中無成交價，突破判定基於盤中最高價（保守），K 棒形態項為佔位分。
         </div>
       ) : null}
       <div>
-        <div className="mb-1 text-xs font-semibold text-slate-500">
+        <div className="mb-1 text-xs font-semibold text-muted-foreground/70">
           {isPre ? "評分明細（醞釀分項）" : "評分明細（突破 8 分項）"}
         </div>
         <div className="grid grid-cols-2 gap-x-8 gap-y-1 sm:grid-cols-4">
           {scoreEntries(row.scores).map(([k, v]) => (
             <div key={k} className="flex justify-between">
-              <span className="text-slate-500">{k}</span>
+              <span className="text-muted-foreground/70">{k}</span>
               <span className="tabular-nums">{v?.toFixed(1) ?? "—"}</span>
             </div>
           ))}
@@ -619,11 +624,11 @@ function Detail({ row }: { row: Row }) {
       </div>
       {isPre && row.detail ? (
         <div>
-          <div className="mb-1 text-xs font-semibold text-slate-500">原始指標</div>
+          <div className="mb-1 text-xs font-semibold text-muted-foreground/70">原始指標</div>
           <div className="grid grid-cols-2 gap-x-8 gap-y-1 sm:grid-cols-3">
             {scoreEntries(row.detail).map(([k, v]) => (
               <div key={k} className="flex justify-between">
-                <span className="text-slate-500">{k}</span>
+                <span className="text-muted-foreground/70">{k}</span>
                 <span className="tabular-nums">
                   {v === null ? "—" : Number.isInteger(v) ? v : v.toFixed(3)}
                 </span>

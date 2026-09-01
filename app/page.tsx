@@ -9,9 +9,9 @@ import { getMarketRegime } from "../lib/actions/market-regime";
 export const dynamic = "force-dynamic";
 
 function coverageClass(pct: number): string {
-  if (pct < 50) return "text-rose-400";
-  if (pct < 90) return "text-amber-400";
-  return "text-slate-100";
+  if (pct < 50) return "text-destructive";
+  if (pct < 90) return "text-warning";
+  return "text-foreground";
 }
 
 export default async function Page() {
@@ -29,7 +29,7 @@ export default async function Page() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-semibold text-slate-100">Dashboard</h1>
+      <h1 className="text-2xl font-semibold text-foreground">Dashboard</h1>
 
       <RegimeBanner regime={regime} />
 
@@ -40,15 +40,15 @@ export default async function Page() {
             <div className="mt-2 flex items-center gap-2 text-base">
               <span
                 className={`inline-block h-2.5 w-2.5 rounded-full ${
-                  health.quoteFresh ? "bg-emerald-500" : "bg-rose-500"
+                  health.quoteFresh ? "bg-success" : "bg-destructive"
                 }`}
               />
               {health.quoteFresh ? (
-                <span className="text-slate-100">
+                <span className="text-foreground">
                   已更新（{health.latestQuoteDate}）
                 </span>
               ) : (
-                <span className="text-slate-300">
+                <span className="text-foreground/80">
                   未更新（DB 最新 {health.latestQuoteDate ?? "無"}，今日{" "}
                   {health.today}）
                 </span>
@@ -68,10 +68,10 @@ export default async function Page() {
             <div className="mt-2 space-y-1 text-base">
               {covRows.map((row) => (
                 <div key={row.label} className="flex justify-between gap-4">
-                  <span className="text-slate-400">{row.label}</span>
+                  <span className="text-muted-foreground">{row.label}</span>
                   <span className={`tabular-nums ${coverageClass(row.pct)}`}>
                     {row.pct}%{" "}
-                    <span className="text-sm text-slate-500">
+                    <span className="text-sm text-muted-foreground/70">
                       ({row.count} / {health.stockCount})
                     </span>
                   </span>

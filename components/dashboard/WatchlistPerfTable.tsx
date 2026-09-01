@@ -4,12 +4,19 @@ import {
   type WatchlistPerfRow,
 } from "../../lib/actions/dashboard";
 import { SPARK_CLIP, type SparkPoint } from "../../lib/dashboard-spark";
+import { cn } from "../../lib/cn";
+
+// Sparkline 內 SVG 的 stroke / <line stroke> 是硬編 HEX（Server Component 不能 getComputedStyle）。
+// 這三個常數對應 globals.css 的 --up / --down / --muted-foreground，改色需同步 globals.css。
+const SPARK_UP = "#fb7185"; // --up (rose-400)
+const SPARK_DOWN = "#34d399"; // --down (emerald-400)
+const SPARK_BASELINE = "#475569"; // 對應 --muted-foreground 附近的中性灰（基準虛線）
 
 function scoreClass(v: number | null): string {
-  if (v === null) return "text-slate-500";
-  if (v >= 70) return "text-emerald-400";
-  if (v >= 40) return "text-slate-200";
-  return "text-slate-500";
+  if (v === null) return "text-muted-foreground/70";
+  if (v >= 70) return "text-success";
+  if (v >= 40) return "text-foreground/80";
+  return "text-muted-foreground/70";
 }
 
 function ScoreItem({
@@ -23,19 +30,19 @@ function ScoreItem({
 }) {
   return (
     <div className="flex flex-col gap-0.5">
-      <FieldLabel className="text-slate-500">{label}</FieldLabel>
+      <FieldLabel className="text-muted-foreground/70">{label}</FieldLabel>
       {value === null ? (
-        <span className="text-base text-slate-500">
+        <span className="text-base text-muted-foreground/70">
           —
           {degraded ? (
-            <span className="ml-1 rounded bg-slate-800 px-1 py-0.5 text-xs text-slate-400">
+            <span className="ml-1 rounded bg-muted px-1 py-0.5 text-xs text-muted-foreground">
               不足
             </span>
           ) : null}
         </span>
       ) : (
         <span
-          className={`text-lg font-semibold tabular-nums ${scoreClass(value)}`}
+          className={cn("text-lg font-semibold tabular-nums", scoreClass(value))}
         >
           {value.toFixed(0)}
         </span>
@@ -73,11 +80,11 @@ function Sparkline({
     })
     .filter((c): c is { x: number; y: number } => c !== null);
 
-  const stroke = rising ? "#fb7185" /* rose-400 */ : "#34d399"; /* emerald-400 */
+  const stroke = rising ? SPARK_UP : SPARK_DOWN;
 
   if (coords.length < 2) {
     return (
-      <div className="flex h-22 w-50 items-center justify-center rounded bg-slate-800/40 text-sm text-slate-600">
+      <div className="flex h-22 w-50 items-center justify-center rounded bg-muted/40 text-sm text-muted-foreground/50">
         資料不足
       </div>
     );
@@ -108,7 +115,7 @@ function Sparkline({
         y1={H / 2}
         x2={W}
         y2={H / 2}
-        stroke="#475569"
+        stroke={SPARK_BASELINE}
         strokeWidth="1"
         strokeDasharray="3 3"
       />
@@ -128,56 +135,56 @@ function Sparkline({
 function Card({ row }: { row: WatchlistPerfRow }) {
   const cp = row.changePercent;
   const rising = cp >= 0;
-  const cpClass = rising ? "text-rose-400" : "text-emerald-400";
+  const cpClass = rising ? "text-up" : "text-down";
 
   const instClass =
     row.instTotalNet === null
-      ? "text-slate-500"
+      ? "text-muted-foreground/70"
       : row.instTotalNet > 0
-        ? "text-rose-400"
+        ? "text-up"
         : row.instTotalNet < 0
-          ? "text-emerald-400"
-          : "text-slate-300";
+          ? "text-down"
+          : "text-foreground/80";
   const trustClass =
     row.trustNet === null
-      ? "text-slate-500"
+      ? "text-muted-foreground/70"
       : row.trustNet > 0
-        ? "text-rose-400"
+        ? "text-up"
         : row.trustNet < 0
-          ? "text-emerald-400"
-          : "text-slate-400";
+          ? "text-down"
+          : "text-muted-foreground";
 
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-950 p-4">
+    <div className="rounded-lg border border-border bg-background p-4">
       <div className="flex gap-4">
         <Sparkline points={row.spark} rising={rising} />
 
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
-            <span className="text-3xl font-semibold tracking-tight text-slate-100">
+            <span className="text-3xl font-semibold tracking-tight text-foreground">
               {row.stockCode}
             </span>
-            <span className={`text-base font-medium tabular-nums ${cpClass}`}>
+            <span className={cn("text-base font-medium tabular-nums", cpClass)}>
               {rising ? "+" : ""}
               {cp.toFixed(2)}%
             </span>
             {row.aboveBollingerUpper ? (
-              <span className="rounded bg-blue-950/60 px-1.5 py-0.5 text-xs text-blue-300">
+              <span className="rounded bg-primary/10 px-1.5 py-0.5 text-xs text-primary">
                 突破
               </span>
             ) : null}
           </div>
-          <div className="flex items-baseline gap-2 text-sm text-slate-400">
+          <div className="flex items-baseline gap-2 text-sm text-muted-foreground">
             <span className="truncate">{row.name}</span>
-            <span className="tabular-nums text-slate-500">
+            <span className="tabular-nums text-muted-foreground/70">
               {row.close.toFixed(2)}
             </span>
-            <span className="text-xs text-slate-600">{row.refDate}</span>
+            <span className="text-xs text-muted-foreground/50">{row.refDate}</span>
           </div>
         </div>
       </div>
 
-      <div className="mt-3 flex items-end justify-between border-t border-slate-800 pt-3">
+      <div className="mt-3 flex items-end justify-between border-t border-border pt-3">
         <ScoreItem
           label="K 棒"
           value={row.candleScore}
@@ -194,14 +201,14 @@ function Card({ row }: { row: WatchlistPerfRow }) {
           degraded={row.degraded.includes("base")}
         />
         <div className="flex flex-col items-end gap-0.5">
-          <FieldLabel className="text-slate-500">籌碼（張）</FieldLabel>
-          <span className={`text-base tabular-nums ${instClass}`}>
+          <FieldLabel className="text-muted-foreground/70">籌碼（張）</FieldLabel>
+          <span className={cn("text-base tabular-nums", instClass)}>
             合計{" "}
             {row.instTotalNet === null
               ? "—"
               : `${row.instTotalNet > 0 ? "+" : ""}${row.instTotalNet}`}
           </span>
-          <span className={`text-sm tabular-nums ${trustClass}`}>
+          <span className={cn("text-sm tabular-nums", trustClass)}>
             投信{" "}
             {row.trustNet === null
               ? "—"
@@ -218,7 +225,7 @@ export async function WatchlistPerfTable() {
 
   if (rows.length === 0) {
     return (
-      <div className="text-base text-slate-400">
+      <div className="text-base text-muted-foreground">
         觀察清單為空，先到 Screening 加入標的。
       </div>
     );

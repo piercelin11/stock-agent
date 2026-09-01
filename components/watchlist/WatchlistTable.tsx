@@ -70,19 +70,19 @@ function WatchlistCard({ row }: { row: WatchlistRow }) {
   };
 
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900 p-5">
+    <div className="rounded-lg border border-border bg-card p-5">
       {/* 標頭 */}
       <div className="flex flex-wrap items-baseline gap-3">
-        <span className="text-lg font-semibold text-slate-100">
+        <span className="text-lg font-semibold text-foreground">
           {row.stockCode}
         </span>
-        <span className="text-slate-300">{row.name}</span>
+        <span className="text-foreground/80">{row.name}</span>
         {row.source ? (
-          <span className="rounded bg-slate-800 px-2 py-0.5 text-xs text-slate-400">
+          <span className="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
             {row.source}
           </span>
         ) : null}
-        <span className="text-xs text-slate-400">加入於 {row.addedAt}</span>
+        <span className="text-xs text-muted-foreground">加入於 {row.addedAt}</span>
         <div className="ml-auto">
           <Button variant="danger" onClick={remove} disabled={isPending}>
             移除
@@ -102,9 +102,9 @@ function WatchlistCard({ row }: { row: WatchlistRow }) {
                   <span
                     className={
                       cp && cp > 0
-                        ? "text-rose-400"
+                        ? "text-up"
                         : cp && cp < 0
-                          ? "text-emerald-400"
+                          ? "text-down"
                           : ""
                     }
                   >
@@ -115,7 +115,7 @@ function WatchlistCard({ row }: { row: WatchlistRow }) {
               <Field label="量（張）" value={lots(row.quote.volume)} />
             </>
           ) : (
-            <span className="text-xs text-slate-400">無資料</span>
+            <span className="text-xs text-muted-foreground">無資料</span>
           )}
         </SnapshotBlock>
 
@@ -139,7 +139,7 @@ function WatchlistCard({ row }: { row: WatchlistRow }) {
               />
             </>
           ) : (
-            <span className="text-xs text-slate-400">無資料</span>
+            <span className="text-xs text-muted-foreground">無資料</span>
           )}
         </SnapshotBlock>
 
@@ -160,13 +160,13 @@ function WatchlistCard({ row }: { row: WatchlistRow }) {
               />
             </>
           ) : (
-            <span className="text-xs text-slate-400">無資料</span>
+            <span className="text-xs text-muted-foreground">無資料</span>
           )}
         </SnapshotBlock>
       </div>
 
       {/* 買入狀態區 */}
-      <div className="mt-4 border-t border-slate-800 pt-4">
+      <div className="mt-4 border-t border-border pt-4">
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -249,9 +249,9 @@ function WatchlistCard({ row }: { row: WatchlistRow }) {
         </div>
 
         <div className="mt-3">
-          <label className="text-xs text-slate-400">備註</label>
+          <label className="text-xs text-muted-foreground">備註</label>
           <textarea
-            className="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100"
+            className="mt-1 w-full rounded border border-input bg-transparent px-2 py-1 text-sm text-foreground"
             rows={2}
             value={notes}
             disabled={isPending}
@@ -279,10 +279,10 @@ function SnapshotBlock({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded border border-slate-800 bg-slate-800/50 p-3">
+    <div className="rounded border border-border bg-muted/50 p-3">
       <div className="mb-2 flex items-baseline justify-between">
-        <span className="text-xs font-semibold text-slate-500">{title}</span>
-        <span className="text-xs text-slate-400">{date ?? "—"}</span>
+        <span className="text-xs font-semibold text-muted-foreground/70">{title}</span>
+        <span className="text-xs text-muted-foreground">{date ?? "—"}</span>
       </div>
       <div className="space-y-1">{children}</div>
     </div>
@@ -298,7 +298,7 @@ function Field({
 }) {
   return (
     <div className="flex justify-between text-sm">
-      <span className="text-slate-500">{label}</span>
+      <span className="text-muted-foreground/70">{label}</span>
       <span className="tabular-nums">{value}</span>
     </div>
   );
@@ -321,11 +321,11 @@ function InputField({
 }) {
   return (
     <div>
-      <label className="text-xs text-slate-400">{label}</label>
+      <label className="text-xs text-muted-foreground">{label}</label>
       <input
         type={type}
         inputMode={type === "text" ? "decimal" : undefined}
-        className="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100 tabular-nums"
+        className="mt-1 w-full rounded border border-input bg-transparent px-2 py-1 text-sm text-foreground tabular-nums"
         value={value}
         disabled={disabled}
         onChange={(e) => onChange(e.target.value)}

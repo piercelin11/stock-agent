@@ -337,6 +337,37 @@
 
 ---
 
+**前端顏色統一管理（角色化 semantic token）（2026-09-01）**：把散在前端各檔的 Tailwind 色階 class（`text-slate-400` / `bg-blue-600` / `text-rose-400`…）收斂成 `app/globals.css` 一處定義的**角色化** semantic token。純 class 字串 / 顏色常數替換，零邏輯 / 版面 / 元件結構改動。分支 `feat/color-tokens`。
+
+- **動機 + 走過的彎路**：漲跌色 / 號誌色 / 狀態色在舊寫法下全靠色相硬記（`rose-400` 到底是「漲」還是「風險」還是「號誌偏空」要看上下文猜），且同一個灰階值散在 11 檔、要整體微調得逐檔改。**第一版（已推翻）**做成「把 `slate-950` 改叫 `--color-bg`、`slate-900` 改叫 `--color-surface`」——23 個 token，其中 10 個灰階（`fg` / `fg-muted` / `fg-subtle` / `fg-faint` / `fg-ghost`）就是 slate scale 一對一改名。使用者指出這不是語意化、只是換皮，要真的照 `../quick-talk` 的角色模型。**第二版（本次採用）**改成角色 token。
+- **`../quick-talk` 角色模型的三個核心**（研究其 `globals.css` + `components/ui/{button,card,badge,input}.tsx` 得出）：
+  1. **token 是「角色」不是「深淺級數」**：只有 `background`/`foreground`/`card`/`muted`/`primary`/`destructive`… 這些用途名，**沒有** `fg-subtle`/`fg-faint`/`fg-ghost` 這種「弱、更弱、最弱」階梯。要更淡的字用透明度修飾子（`text-foreground/80`、`text-muted-foreground/70`）在 base 角色上打折。
+  2. **每個「底色」配一個 `-foreground`**，成對用：卡片 = `bg-card text-card-foreground`、主按鈕 = `bg-primary text-primary-foreground`。元件不需要知道「卡片上的字該用哪階灰」。
+  3. **按鈕分級靠角色組合 + 透明度**：`primary` 實心、`secondary` = `bg-muted` + `hover:bg-muted/70`、`destructive` = `bg-destructive/10` + `hover:bg-destructive/20`（淡底無邊框）。不需要為 hover 另立 token。
+- **套件**：`pnpm add clsx tailwind-merge class-variance-authority`（`clsx@^2.1.1` / `tailwind-merge@^3.6.0`；cva 讓 `Button` 走 quick-talk 式 variant 定義，PLAN §0 原本說不裝、使用者拍板要裝）。`lib/cn.ts` = 4 行標配 `twMerge(clsx(inputs))`（放 `lib/` 不放 `scripts/lib/`）。
+- **`@theme inline` 語法**：`:root` 用不帶前綴的名字（`--background` / `--muted-foreground` …），`@theme inline` 寫 `--color-background: var(--background)`（比照 quick-talk，不用同名自我參照）。curl dev server 抓編譯後 CSS 確認 `.bg-background` / `.text-muted-foreground` / `.text-foreground\/80`（透明度）/ `.hover\:bg-primary\/90`（hover 變體）/ `.border-destructive\/30` 全部正確生成。
+- **token 清單（14 個，角色化）**：
+  - 背景/前景（成對）：`--background`(#020617)、`--foreground`(#f1f5f9)、`--card`(#0f172a)、`--card-foreground`(=fg)、`--muted`(#1e293b)、`--muted-foreground`(#94a3b8)、`--border`(#1e293b)、`--input`(#334155)、`--ring`(#3b82f6)。
+  - 主色（成對）：`--primary`(#2563eb)、`--primary-foreground`(#fff)。
+  - 台股漲跌（專屬獨立）：`--up`(#fb7185)、`--down`(#34d399)。
+  - 狀態語意（各一 base，字/邊框/底用透明度變體）：`--destructive`(#fb7185)、`--warning`(#fbbf24)、`--success`(#34d399)。
+- **五階 slate 文字 → 兩 base + 透明度**：`slate-100`→`text-foreground`；`slate-300/200`→`text-foreground/80`；`slate-400`→`text-muted-foreground`；`slate-500`→`text-muted-foreground/70`；`slate-600`→`text-muted-foreground/50`。
+- **大盤號誌燈直接複用狀態色**（`RegimeBanner` `DOT_CLASS`）：偏多=`bg-success`、中性=`bg-warning`、偏空=`bg-destructive`、無資料=`bg-muted-foreground/50`。台股漲跌色（`--up`/`--down`）語意不同、不複用。
+- **提示框統一**：舊 `border-X-800 bg-X-950/40 text-X-300`（slate/amber/rose 各一組）→ 一律 `border-X/30 bg-X/10 text-X`。
+- **涉及 13 檔**：`app/globals.css`（token）、`lib/cn.ts`（新）、`components/ui/{Card,Button}.tsx`、`app/layout.tsx`、`app/page.tsx`、`app/{screening,watchlist}/page.tsx`、`components/screening/ScreeningPanel.tsx`（最大宗 30 處）、`components/dashboard/{RegimeBanner,WatchlistPerfTable,PipelineRunner}.tsx`、`components/watchlist/WatchlistTable.tsx`。
+- **`Button.tsx` 改用 `cva`**：`variant` 維度（`primary`/`secondary`/`danger`），無 `size`（要加再擴）。`primary` = `bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50`；`secondary` = `border border-border bg-muted text-foreground/80 hover:bg-muted/70`；`danger` = `bg-destructive/10 text-destructive hover:bg-destructive/20`。
+- **`Sparkline` SVG 硬編 HEX**：Server Component 不能 `getComputedStyle` → 檔頂 `const SPARK_UP = "#fb7185"` / `SPARK_DOWN = "#34d399"` / `SPARK_BASELINE = "#475569"` + 註解「對應 `--up` / `--down` / 中性灰」。grep 收尾唯一允許的 HEX 例外。
+- **驗證**：`pnpm exec tsc --noEmit` 乾淨、`pnpm build` 通過（三頁 `ƒ Dynamic`）、`curl` 三頁 200、`grep -rE "(text|bg|border|ring|divide)-(slate|blue|rose|emerald|amber|red|green|yellow|zinc|gray)-[0-9]" app/ components/` 回空。編譯後 CSS 抽驗 30 個 utility（含 `/10` `/30` `/50` `/70` `/80` 透明度、`hover:` 變體）全部生成。
+- **8 項「配色會變」的簡化**（已事先逐項向使用者說明並取得同意）：
+  1. Button primary disabled：灰底灰字（`bg-slate-700`）→ 半透明藍（`opacity-50`）。
+  2. Button danger：rose 邊框 + 深底 + 深 hover → 淡紅底 10% 無邊框 + hover 20%（quick-talk `destructive` 標準）。
+  3. Button secondary hover：`800→700` 變深 → `bg-muted`→`/70` 透明度變化（解掉第一版那個「hover 消失」回歸）。
+  4. input / textarea 底：實心 `bg-slate-800` → `bg-transparent` + `border-input`（露出卡片色）。
+  5. 「突破」pill 文字：`text-blue-300`（亮藍）→ `text-primary`（blue-600 深藍，跟主按鈕同色）。
+  6. success 色階：燈號 `emerald-500` / 跌 `emerald-400` 原本差一階 → 統一 `--success` = `#34d399`（跟 `--down` 同值），燈號綠亮一階。
+  7. 五階 slate 文字 → 兩 base + 三檔透明度，中間階對比略有位移（多數肉眼難分）。
+  8. 提示框統一成 `border-X/30 bg-X/10 text-X`，底色比舊的 `bg-X-950/40` 更淡、更一致。
+
 尚未開始/明確不做：估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯（`topic_alignment` 因子固定中性分）、AnalysisResult 產出流程（Phase D）、`screening/`（統一入口 `run-signal-scan.ts`；舊三支已於 4.5.4 退役刪除）與 `backfill/` 各支皆為獨立手動執行（不在 `daily-pipeline.ts` 內）、`run-signal-scan.ts` 的階段權重 / 法人因子曲線校準（首版全拍腦袋，靠肉眼看單日排名 + 實盤觀察調）、**整個回測系統**（3.0～3.7 已從 `main` 移除、擱置，見上方；程式碼在 `feat/backtest-ui-3.6-3.7` 分支，OOM 待修）。`archive/` 的 `calculate-screen-score.ts` / `run-screener.ts` / `fetch-candidate-details.ts` / `top20-gainers.js` 已停用不維護。
 
 （每次進度更新，麻煩幫我一併更新這個區塊。）

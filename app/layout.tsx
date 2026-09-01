@@ -22,8 +22,8 @@ export default function RootLayout({
     <html lang="zh-Hant">
       <body>
         <div className="flex min-h-screen">
-          <aside className="w-52 shrink-0 border-r border-slate-800 bg-slate-900 px-4 py-6">
-            <div className="mb-6 text-sm font-semibold tracking-wide text-slate-500">
+          <aside className="w-52 shrink-0 border-r border-border bg-card px-4 py-6">
+            <div className="mb-6 text-sm font-semibold tracking-wide text-muted-foreground/70">
               STOCK AGENT
             </div>
             <nav className="flex flex-col gap-1">
@@ -31,7 +31,7 @@ export default function RootLayout({
                 <Link
                   key={link.href}
                   href={link.href}
-                  className="rounded px-3 py-2 text-sm text-slate-300 hover:bg-slate-800"
+                  className="rounded px-3 py-2 text-sm text-foreground/80 hover:bg-muted"
                 >
                   {link.label}
                 </Link>
