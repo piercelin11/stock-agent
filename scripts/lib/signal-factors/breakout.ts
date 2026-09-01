@@ -583,16 +583,32 @@ export function computeProximityScale(referenceClose: number, closesInWindow: nu
   return clip(((r - 0.7) / 0.3) * 100, 0, 100);
 }
 
+/** 收盤距窗內最高點的 % 距離（<= 0；referenceClose 若為窗內新高則 0）。 */
+function proximityPct(referenceClose: number, closesInWindow: number[]): number {
+  if (closesInWindow.length === 0) return 0;
+  const high = Math.max(...closesInWindow, referenceClose);
+  if (high <= 0) return 0;
+  return ((referenceClose - high) / high) * 100;
+}
+
 export function computeProximityToHigh(
   referenceClose: number,
   closeHistory: (number | null)[], // 往前最多 240 筆，新到舊排序，不含 referenceClose 本身
   shortWindowDays: number,
   longWindowDays: number,
-): { score: number; degraded: boolean } {
+): {
+  score: number;
+  degraded: boolean;
+  // PLAN §4.3：短/長窗分數與原始 % 分開回（合成公式 shortScore*0.5 + longScore*0.5 不動）。
+  shortScore: number;
+  longScore: number;
+  shortPct: number;
+  longPct: number;
+} {
   const validCloses = closeHistory.filter((v): v is number => v !== null && !Number.isNaN(v));
 
   if (validCloses.length < shortWindowDays) {
-    return { score: 50, degraded: true };
+    return { score: 50, degraded: true, shortScore: 50, longScore: 50, shortPct: 0, longPct: 0 };
   }
 
   const shortWindow = validCloses.slice(0, shortWindowDays);
@@ -602,7 +618,14 @@ export function computeProximityToHigh(
   const shortScore = computeProximityScale(referenceClose, shortWindow);
   const longScore = computeProximityScale(referenceClose, longWindow);
 
-  return { score: shortScore * 0.5 + longScore * 0.5, degraded };
+  return {
+    score: shortScore * 0.5 + longScore * 0.5,
+    degraded,
+    shortScore,
+    longScore,
+    shortPct: proximityPct(referenceClose, shortWindow),
+    longPct: proximityPct(referenceClose, longWindow),
+  };
 }
 
 // ---- 3f. relativeStrength：全市場先算好，候選股查百分位 ----

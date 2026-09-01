@@ -1,253 +1,357 @@
-# PLAN：前端顏色統一管理（semantic token 化）
+# PLAN：Screening 頁表格 UI 改版
 
-把散在 11 個前端檔、約 134 行的 Tailwind 色階 class（`text-slate-400`、`bg-blue-600`、
-`text-rose-400`…）收斂成 **`app/globals.css` 一處定義的 semantic token**（值用 HEX，方便
-VS Code 原生色盤微調）。元件只寫語意 class（`text-fg-subtle`、`bg-primary`、`text-up`、
-`text-warning`…），不再出現色階數字。漲跌色 / 號誌色 / 狀態色各有獨立 token，語意不再靠
-色相硬記。
-
-參考專案 `../quick-talk` 的 shadcn 模式，但**不引入 shadcn**——只借「CSS 變數 token +
-Tailwind v4 `@theme inline` + `cn()` helper」三樣。維持全站寫死 dark，不引入 light mode。
+`/screening` 結果表格重畫：tab 收斂成三階段、欄位比照設計圖、展開列改成「線圖 / 法人籌碼 /
+突破因子」三欄。法人籌碼與突破因子的呈現規格（長條長度對齊公式量尺、chip 組合表、數字語意）
+定義在 `docs/UI.md`，**本計劃完成後 `docs/UI.md` 併入 `docs/PROGRESS.md` 對應段落後刪除**
+（規格已落實成程式碼 + PROGRESS 紀錄，不再需要獨立規格檔）。
 
 這份是單一任務的實作規格書，做完即被下一份 PLAN 取代；穩定知識回寫 `CLAUDE.md`，
 過程紀錄回寫 `docs/PROGRESS.md`。
 
-**分支**：`feat/color-tokens`（已從 `main` 開）。merge 時機等使用者發話。
+**分支**：`feat/screening-ui`（已從 `main` 開）。merge 時機等使用者發話。
 
 ---
 
 ## 0. 邊界
 
-### 做的事
+**動：**
 
-1. `pnpm add clsx tailwind-merge`（runtime 依賴，quick-talk 同版本區間）。
-2. 新增 `lib/cn.ts`（quick-talk 的 4 行標配：`twMerge(clsx(...))`）。
-3. 改寫 `app/globals.css`：定義 ~23 個 HEX token + `@theme inline` 接成 Tailwind utility。
-4. 逐檔把 raw 色階 class 換成 semantic class（11 個檔，對照表見 §2）。
-5. 順手把「本來就有條件三元拼 class」的地方換成 `cn()`（不強求全面鋪，見 §3）。
-6. 更新 `CLAUDE.md` 前端段配色規範 + 套件清單、`docs/PROGRESS.md` 記錄、`docs/ROADMAP.md` 視情況打勾。
+- `components/screening/ScreeningPanel.tsx`：tab、欄位、排序邏輯、`RowGroup`。
+- `components/screening/`：新增展開列子元件 3 支（`SignalDetail` / `InstitutionalFlow` / `BreakoutFactorBars`）。
+- `components/ui/Sparkline.tsx`：新檔，從 `WatchlistPerfTable.tsx` 抽出的純 SVG 走勢圖。
+- `lib/spark-series.ts`：新檔，`buildSparkSeries()` 純函式（`dashboard.ts` 現有 inline 邏輯抽出）。
+- `lib/actions/signal-scan.ts`：新增 `getSignalSpark(code)` action、`SignalScanView` 型別隨後端擴充。
+- `scripts/screening/run-signal-scan.ts`：`SignalResult` 加欄位（`volumeRatio` / `inst` / `factors`），只在
+  breakout-day / extended 有值。**不動評分邏輯、不動階段判定、不動 gate。**
+- `scripts/lib/signal-factors/institutional.ts`：`computeInstitutionalFlow` 回傳擴充（多回已算好的中繼值）。
+- `scripts/lib/signal-factors/breakout.ts`：`computeProximityToHigh` 回傳擴充（短/長窗分數與原始 % 分開回）。
+- `scripts/lib/signal-factors/factors.test.ts`：補新回傳值的 assertion。
+- `components/dashboard/WatchlistPerfTable.tsx` / `lib/actions/dashboard.ts`：改 import（用抽出的
+  `Sparkline` / `buildSparkSeries`），行為不變。
 
-### 不做的事
+**不動：**
 
-- **不裝 `class-variance-authority`**：`Button.tsx` 只有單一 `variant` 維度，現有
-  `Record<Variant, string>` 寫法就是 cva 的手寫版，夠用。日後 Button 要加 `size` 維度再說。
-- **不引入 light mode**：`:root` 只放一份 dark 值。未來要主題切換另開 PLAN。
-- **不引入 shadcn / `components.json` / registry**：UI 元件只有 Card / Button 兩個，不值得。
-- **不改任何邏輯 / 版面 / 元件結構**：純 class 字串與顏色常數替換。
+- 任何評分公式、權重、曲線、gate 門檻、階段判定（`consecutiveAboveBand`）。
+- Prisma schema、migration。
+- `SignalScanOutput` 的 `stats` / `warnings` 結構。
+- realtime 背景任務機制（spawn / progress.json / 輪詢）。
+- `docs/UI.md` 的規格內容本身（照它實作；本計劃收尾才刪檔）。
 
 ---
 
-## 1. 套件與 `lib/cn.ts`
+## 1. Tab（第 1 點需求）
+
+- 移除「全部」tab。
+- 剩三個，順序固定：**今日突破 → 已延伸 → 醞釀中**（`breakout-day` / `extended` / `pre-breakout`）。
+- 預設選中「今日突破」。
+- `StageFilter` 型別去掉 `"all"`，直接 = `SignalStage`。
+- 連帶清掉只為「全部」存在的邏輯：
+  - `sortedRows` 裡 `sortKey === "rank"` 時的 `b.totalScore - a.totalScore` 次要排序。
+  - 「全部檢視：排名為各階段內名次…不可直接比較」提示段。
+  - `toggleSort` 裡 `key === "totalScore"` 預設降冪的特例可留（純表格排序偏好，無害）。
+- 每個 tab 內單一階段，`rank` 是該階段內名次，預設 `sortKey="rank"` / `sortDir="asc"`。
+- tab count badge 維持（`（12）`）。
+
+---
+
+## 2. 表格欄位（第 2 點需求，比照設計圖）
+
+由左到右（checkbox 欄不算）：
+
+| 欄位 | key | 內容 | 資料來源 | 對齊 |
+|---|---|---|---|---|
+| 排名 | `rank` | `r.rank` | 既有 | 右 |
+| 代號 | `code` | `r.code` | 既有 | 左 |
+| 名稱 | `name` | `r.name` | 既有 | 左 |
+| 價格 | `close` | `r.close.toFixed(2)`；`priceSource==="estimated"` 尾隨琥珀「估」badge（`bg-warning/10 text-warning`） | 既有 | 右 |
+| 漲跌% | `changePercent` | `r.changePercent.toFixed(2)`（**百分比**，不是點數），漲紅跌綠（`text-up`/`text-down`）；設計圖 `+5.55` 讀作 `+5.55%` | 既有 | 右 |
+| 狀態 | `stage` | 階段中文 pill，底色分級（見下） | `r.stage` | 左 |
+| 量增 | `volumeRatio` | `x{r.volumeRatio.toFixed(1)}`（如 `x2.5`）；**醞釀中階段顯示 `—`**（該欄後端為 `undefined`） | **新增**（見 §4） | 右 |
+| 籌碼 | `inst` | 一句話結論 chip（UI.md 1.4 組合表）＋ 盤中沿用昨日籌碼時附「昨」小 badge | **新增**（見 §4）；醞釀中顯示 `—` | 左 |
+| 總分 | `totalScore` | `r.totalScore.toFixed(1)` | 既有 | 右 |
+
+- 移除舊「收盤/即時」欄名 → 改叫「價格」。
+- 移除舊「降級項目」獨立欄。`degraded` 資訊移到展開列（維持現有展開列裡的呈現）。
+- 舊「追」badge（`warnings.includes("margin-chasing")`）：從「價格」欄移出，改掛在「籌碼」chip 上
+  （UI.md 1.4：marginChasing 情境的 chip 本身就是紅色「融資追價警示」）。展開列紅框提示維持。
+- `estimated` 列淡色（`text-muted-foreground`）維持。
+
+### 狀態 pill 底色（使用者已定）
+
+| stage | 文字 | class |
+|---|---|---|
+| `breakout-day` | 今日突破 | `bg-destructive/10 text-destructive` |
+| `extended` | 已延伸 | `bg-warning/10 text-warning` |
+| `pre-breakout` | 醞釀中 | `bg-muted text-muted-foreground` |
+
+複用狀態語意 token（同大盤號誌燈那組），符合 CLAUDE.md「元件不直接寫色階數字」。
+
+### 排序
+
+- 每欄仍可點擊排序（`toggleSort`）。
+- `inst`（籌碼）欄不可排序（chip 是分類不是量）——`Column` 加 `sortable?: boolean`，`false` 時 th 不掛 onClick、不顯箭頭。
+- `volumeRatio` 欄排序：醞釀中 tab 全 `—`，該 tab 下點它無效果（值都 undefined），可接受。
+
+---
+
+## 3. 展開列（第 3 點需求）
+
+`RowGroup` 展開時渲染 `<SignalDetail row={r} />`（原 `Detail` function 搬進新檔
+`components/screening/SignalDetail.tsx`，`ScreeningPanel.tsx` 已 640 行）。
+
+### 3.0 依 stage 分支（第 F 點：醞釀中只有線圖）
 
 ```
-pnpm add clsx tailwind-merge
+SignalDetail:
+  頂部：margin-chasing 紅框（若 warnings 含）、estimated 琥珀框（若 estimated）—— 維持現有
+  if stage === "pre-breakout":
+     只渲染 <SignalSparkPanel code={row.code} />（左側線圖）
+     不渲染法人 / 突破因子
+     不渲染舊「評分明細 / 原始指標」網格   ← 使用者要「只有左側線圖」
+  else (breakout-day / extended):
+     三欄 grid（設計圖：左線圖 / 中法人 / 右突破因子）
+       左： <SignalSparkPanel code={row.code} />
+       中： <InstitutionalFlow inst={row.inst} warnings={row.warnings} />
+       右： <BreakoutFactorBars factors={row.factors} rs={row.scores.relativeStrength} />
 ```
 
-- `clsx` — 條件拼 class
-- `tailwind-merge` — 解 class 衝突（元件內建 class vs 外部傳入 `className`，後者能覆蓋前者同類）
+版面：桌機 `grid-cols-1 lg:grid-cols-3 gap-6`，窄螢幕直向堆疊。設計圖三欄在一張深色卡內
+（`rounded-lg border border-border bg-card p-4`）。
 
-`lib/cn.ts`（放 `lib/`：CLAUDE.md 對 `lib/` = Next/React 世界共用碼、`scripts/lib/` = 純 Node 的分工）：
+### 3.1 左欄：近 60 交易日線圖（`SignalSparkPanel`）
+
+- **按需撈**（第 D 點使用者確認）：`SignalSparkPanel` 是 client 子元件，`useEffect` 依 `code`
+  呼叫 `getSignalSpark(code)`；載入中顯示 `資料載入中…`（同 `Sparkline` 的「資料不足」框樣式），
+  回來後渲染 `<Sparkline points={points} rising={...} />`。
+- `rising` 取該檔當日漲跌方向：`row.changePercent >= 0`。傳進 `SignalSparkPanel` 或一起放進
+  spark 回傳。傾向前者（action 只回 `SparkPoint[]`，方向前端已有）。
+- 切換展開列時元件卸載重撈。**不做跨列快取**（YAGNI；展開通常一次看一檔）。
+
+#### `components/ui/Sparkline.tsx`（新檔，抽出）
+
+- 從 `WatchlistPerfTable.tsx` 搬 `Sparkline` function + `SPARK_UP` / `SPARK_DOWN` /
+  `SPARK_BASELINE` HEX 常數，全部 `export`。
+- props 不變：`{ points: SparkPoint[]; rising: boolean }`。
+- `SParkPoint` 型別、`SPARK_CLIP`、`SPARK_WINDOW` **留在 `lib/dashboard-spark.ts` 不動**，
+  `Sparkline.tsx` 從那 import（改動面最小；`dashboard-spark.ts` 名字雖帶 dashboard，實為
+  spark 共用常數檔，暫不改名以免波及）。
+- `WatchlistPerfTable.tsx` 改成 `import { Sparkline } from "../ui/Sparkline"`，刪除本地定義與常數。
+- 純 SVG、無 DB、無互動 → 放 `components/ui/` 合理（與 `Card.tsx` / `Button.tsx` 同層，兩個使用者）。
+
+#### `lib/spark-series.ts`（新檔，抽出）
+
+- `dashboard.ts` 的 `getWatchlistPerformance` 裡「把每天 close 對到同日 bollingerMid 算 dev 夾
+  ±SPARK_CLIP」那段 inline map，抽成純函式：
+
+  ```ts
+  export function buildSparkSeries(
+    quoteWindow: { date: Date; close: number }[],   // 舊到新或新到舊，實作對齊現況
+    midByDate: Map<number, number | null>,          // date.getTime() -> bollingerMid
+  ): SparkPoint[]
+  ```
+
+- `dashboard.ts` 改呼叫它，行為必須完全等價（比對現有輸出）。
+- 新 action `getSignalSpark` 也用它。兩個使用者 → 抽出不違反 YAGNI。
+
+#### `getSignalSpark(code)` action（`lib/actions/signal-scan.ts`）
 
 ```ts
-import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
-
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
+export async function getSignalSpark(code: string): Promise<SparkPoint[]> {
+  // 撈該 code 近 SPARK_WINDOW 筆 DailyQuote（date desc, close）
+  // 撈該 code 近 SPARK_WINDOW 筆 TechnicalIndicator（date desc, bollingerMid）
+  // buildSparkSeries(...) → SparkPoint[]
+  // 查不到 → 回 []
 }
 ```
 
+- 只讀 DB、回可序列化陣列。`SparkPoint.dev` 是 `number | null`，可直接序列化。
+- realtime / eod 都用同一支（都是讀 DB 歷史，跟當下報價源無關）。
+
+### 3.2 中欄：法人籌碼（`InstitutionalFlow`，依 UI.md 第一節）
+
+props：`{ inst: SignalResult["inst"]; warnings: string[] }`（`inst` 必有值，因為只有 breakout 階段渲染此欄）。
+
+- **頂部 chip**：純函式 `resolveInstChip(inst, warnings)` →
+  `{ text: string; tone: "success" | "warning" | "destructive" | "muted" }`，同檔（只此元件用）。
+  依 UI.md 1.4 組合表逐條件：
+  - 近5日流向方向 = `sign(inst.trustRatio * trustWeight + inst.foreignRatio * foreignWeight)` 或更簡單
+    用兩者 ratio 合計正負 + 強弱門檻（實作時對齊 UI.md 1.4「強/中/弱」——門檻可先取
+    ratio 合計 > 0.3 為「強」、> 0 為「中」、<= 0 為「弱」，首版拍板、註解標「待校準」）。
+  - 今日方向 = `inst.todayTrustDir` + `inst.todayForeignDir` 合計正負；任一為 `null` → 「今日未定」情境（灰）。
+  - `warnings.includes("margin-chasing")` → marginChasing 分支。
+  - `inst` 標記資料不足（後端 degraded）→「籌碼資料不足」灰 chip。
+  - 對照表輸出對應文字與顏色（`tone` → `bg-{tone}/10 text-{tone}`）。
+- **投信 / 外資 各一列 diverging bar**：
+  - 容器寬度代表 `±clipDivisor`（±0.5 = ±50%）。中線在正中。
+  - 買超（ratio > 0）：綠條從中線往右，寬度 = `min(|ratio|, 0.5) / 0.5 * 50%`。
+  - 賣超（ratio < 0）：紅條從中線往左，同公式。
+  - **柱長用 `inst.trustRatio` / `inst.foreignRatio`（近5日淨買超÷volumeMa20），不是股數、不是分數**
+    （UI.md 1.2 / 1.3 的核心規則）。
+  - 右側文字：`{(ratio*100).toFixed(0)}%`，帶正負號。
+  - 小箭頭 ▲/▼：依 `inst.todayTrustDir` / `inst.todayForeignDir`（**今日單日**方向，與柱子近5日累積是兩回事）。
+    買=綠▲、賣=紅▼、`null`（盤中無當日）= 不顯箭頭。
+  - **柱子與箭頭不同號時**（近5日買、今日賣 = 翻臉）：柱子 `opacity-50`（UI.md 1.3）。
+- **融資追價警示列**：只在 `warnings.includes("margin-chasing")` 時渲染，
+  紅底文字（`border-destructive/30 bg-destructive/10 text-destructive`），文案例：
+  「融資 5 日增速排自己歷史前 20%，且今日法人翻空」。不觸發時**完全不佔版位**（UI.md 1.3）。
+- **盤中沿用昨日籌碼提示**：`inst` 為「今日資料 null」情境時（`todayTrustDir === null`），
+  區塊底部一行灰紅字「尚未取得今日法人資料，以下為近日資料」（對應設計圖中欄紅字 + 表格「昨」badge）。
+
+顏色：綠/琥珀/紅 = `success` / `warning` / `destructive` token（UI.md 1.3 註「顏色：綠=高分無警示／
+琥珀=封頂但無融資警示／紅=封頂且有融資警示或直接同步撤出」）。台股漲跌色（`up`/`down`）語意不同、不複用。
+
+### 3.3 右欄：突破因子（`BreakoutFactorBars`，依 UI.md 第二節）
+
+props：`{ factors: SignalResult["factors"]; rs: number }`（`rs` = `row.scores.relativeStrength`，本身即百分位分數）。
+
+4 列，每列固定 4 欄（標籤 / 長條 / 分數 / 原始值灰字）：
+
+| 列標籤 | 長條寬度（0~100 內部分數） | 分數數字 | 原始值灰字 |
+|---|---|---|---|
+| 突破幅度 | `factors.breakoutMarginScore` | 同左，粗體 | `{breakoutMarginPct >= 0 ? "+" : ""}{breakoutMarginPct.toFixed(1)}%` |
+| 相對強度 | `rs`（`scores.relativeStrength`） | 同左 | `{rs.toFixed(0)} 分位` |
+| 距 60 日高點 | `factors.proximityShortScore` | 同左 | `{proximityShortPct.toFixed(1)}%`（距高點負距離，例 `-8.4%`） |
+| 距一年高點 | `factors.proximityLongScore` | 同左 | `{proximityLongPct.toFixed(1)}%` |
+
+- 長條顏色分級（UI.md 2.3）：`>=70` 綠（`bg-success`）／`40~69` 琥珀（`bg-warning`）／`<40` 紅（`bg-destructive`）。
+  抽 helper `barTone(score)` 同檔。
+- 長條軌道 `bg-muted`，填充寬度 `${score}%`。
+- 原始值 `text-muted-foreground/70`，不參與長條寬度（UI.md 2.2 核心規則）。
+- **不放位階（base）因子**（使用者已定；UI.md 2.1 說 base 獨立呈現但設計圖右欄無 base）。
+- `factors` 內某項為 degraded（後端已標 `row.degraded`）時，該列分數字後加「不足」小 tag，
+  灰字顯示可得的原始值或 `—`。
+
 ---
 
-## 2. `app/globals.css` — token 定義
+## 4. 後端擴充（第 C / E 點：只補回傳值，不動評分）
 
-目前只有 8 行（`@import` + `color-scheme: dark` + body 兩 class）。改成：
+### 4.1 `SignalResult` 新欄位
 
-```css
-@import "tailwindcss";
-
-/* ── semantic color tokens：全站顏色的單一出處。值用 HEX 方便 VS Code 原生色盤微調。 ──
-   維持全站寫死 dark（只一份 :root 值）。分五組：表面/文字階層、主色、台股漲跌、
-   狀態語意、大盤號誌色。漲跌（--up/--down）與號誌（--regime-*）、狀態（--warning/
-   --danger）刻意語意分離——色相可能相近但用途不同，不可互相複用。 */
-:root {
-  color-scheme: dark;
-
-  /* 表面 / 文字階層（原 slate-*）*/
-  --color-bg: #020617;            /* slate-950  頁底 */
-  --color-surface: #0f172a;       /* slate-900  卡片 / 側欄 */
-  --color-surface-2: #1e293b;     /* slate-800  hover 底 / 內層區塊 / badge 底 */
-  --color-border: #1e293b;        /* slate-800  分隔線 / 邊框 */
-  --color-border-strong: #334155; /* slate-700  input 邊框 */
-  --color-fg: #f1f5f9;            /* slate-100  主文字 */
-  --color-fg-muted: #cbd5e1;      /* slate-300  次要文字 */
-  --color-fg-subtle: #94a3b8;     /* slate-400  說明文字 / 欄位 label */
-  --color-fg-faint: #64748b;      /* slate-500  更弱說明 / 表頭 */
-  --color-fg-ghost: #475569;      /* slate-600  最弱 / dashed 基準線 / 無資料圓點 */
-
-  /* 主色：按鈕 / 選中列 / tab 底線（原 blue-*）*/
-  --color-primary: #2563eb;       /* blue-600 */
-  --color-primary-hover: #3b82f6; /* blue-500 */
-  --color-on-primary: #ffffff;
-
-  /* 台股漲跌：漲紅跌綠，深色底提亮一階（原 rose-400 / emerald-400）*/
-  --color-up: #fb7185;            /* rose-400 */
-  --color-down: #34d399;          /* emerald-400 */
-
-  /* 狀態語意 */
-  --color-warning: #fbbf24;       /* amber-400  「估」badge / fallback 提示框 */
-  --color-warning-border: #92400e;/* amber-800 */
-  --color-danger: #fb7185;        /* rose-400   錯誤 /「追」風險 badge / 失敗訊息 */
-  --color-danger-border: #9f1239; /* rose-800 */
-  --color-danger-fg: #fda4af;     /* rose-300   錯誤框 / 提示框內文字 */
-  --color-success: #10b981;       /* emerald-500  燈號「已更新」/ 高分 / 完成訊息 */
-
-  /* 大盤號誌色（RegimeBanner；通用號誌語意，跟個股漲跌色不同區塊不混淆）*/
-  --color-regime-bull: #10b981;   /* emerald-500 */
-  --color-regime-neutral: #f59e0b;/* amber-500 */
-  --color-regime-bear: #f43f5e;   /* rose-500 */
-}
-
-/* ── 把 CSS 變數接成 Tailwind utility：bg-bg / text-fg-subtle / border-border …
-   Tailwind v4 慣用寫法（quick-talk globals.css 同款）。@theme inline 只宣告「生成
-   對應 utility」，實際值仍讀 :root。 */
-@theme inline {
-  --color-bg: var(--color-bg);
-  --color-surface: var(--color-surface);
-  --color-surface-2: var(--color-surface-2);
-  --color-border: var(--color-border);
-  --color-border-strong: var(--color-border-strong);
-  --color-fg: var(--color-fg);
-  --color-fg-muted: var(--color-fg-muted);
-  --color-fg-subtle: var(--color-fg-subtle);
-  --color-fg-faint: var(--color-fg-faint);
-  --color-fg-ghost: var(--color-fg-ghost);
-  --color-primary: var(--color-primary);
-  --color-primary-hover: var(--color-primary-hover);
-  --color-on-primary: var(--color-on-primary);
-  --color-up: var(--color-up);
-  --color-down: var(--color-down);
-  --color-warning: var(--color-warning);
-  --color-warning-border: var(--color-warning-border);
-  --color-danger: var(--color-danger);
-  --color-danger-border: var(--color-danger-border);
-  --color-danger-fg: var(--color-danger-fg);
-  --color-success: var(--color-success);
-  --color-regime-bull: var(--color-regime-bull);
-  --color-regime-neutral: var(--color-regime-neutral);
-  --color-regime-bear: var(--color-regime-bear);
-}
-
-body {
-  @apply bg-bg text-fg antialiased;
+```ts
+export interface SignalResult {
+  // ...既有欄位不動...
+  volumeRatio?: number;   // 觸發量比。breakout-day / extended 有值；pre-breakout undefined
+  inst?: {
+    trustRatio: number;              // 近 lookbackDays 日投信淨買超 ÷ volumeMa20
+    foreignRatio: number;            // 同上，外資
+    todayTrustDir: -1 | 0 | 1 | null;   // 今日投信淨買超方向（null = 盤中無當日資料）
+    todayForeignDir: -1 | 0 | 1 | null;
+  };
+  factors?: {
+    breakoutMarginScore: number;     // = scores.breakoutMargin（重述，方便前端一次拿齊）
+    breakoutMarginPct: number;       // (close - bollingerUpper) / bollingerUpper * 100
+    proximityShortScore: number;     // computeProximityToHigh 短窗分數
+    proximityLongScore: number;      // 長窗分數
+    proximityShortPct: number;       // 收盤距短窗高點的 % 距離（<= 0）
+    proximityLongPct: number;        // 距長窗高點的 % 距離
+  };
 }
 ```
 
-> **先驗證這個語法**（見 §5 步驟 1）。若 Tailwind v4 對 `@theme inline` 同名自我參照
-> 報錯，改為：`:root` 用 `--app-bg` 等前綴，`@theme inline` 寫 `--color-bg: var(--app-bg)`。
+- 三個都 optional，只在 breakout-day / extended 的 push 裡帶。pre-breakout 的 push 不帶（維持
+  現有 `scores` / `detail` 結構——雖然展開列不再顯示，`data/signal-scan-results/*.json` 落地仍保留供除錯）。
+- `relativeStrength` 原始百分位不另立欄：`scores.relativeStrength` 本身就是（`rankScore` 輸出），前端直接用。
 
-透明度修飾子（`/40` `/50` `/20` `/15`）Tailwind v4 對 `@theme` 生成的 color utility
-一樣支援（`bg-surface-2/50`、`bg-warning/15`）。
+### 4.2 `computeInstitutionalFlow` 回傳擴充（`institutional.ts`）
 
-### 替換對照表
+現回 `{ score, degraded, marginChasing }`，加：
 
-| 現在（raw class） | 換成（semantic） | 語意 |
-|---|---|---|
-| `bg-slate-950` | `bg-bg`（log `<pre>` 底也是） | 頁底 |
-| `bg-slate-900` | `bg-surface` | 卡片 / 側欄 |
-| `bg-slate-800`, `bg-slate-800/50`, `bg-slate-800/40` | `bg-surface-2`（保留 `/50` 等修飾） | hover 底 / 內層 |
-| `bg-slate-700`, `bg-slate-600` | `bg-surface-2` | badge / tag 底 |
-| `border-slate-800`, `divide-slate-800` | `border-border`, `divide-border` | |
-| `border-slate-700` | `border-border-strong` | input / textarea 邊框 |
-| `text-slate-100` | `text-fg` | 主文字 |
-| `text-slate-300`, `text-slate-200` | `text-fg-muted` | 次要文字 |
-| `text-slate-400` | `text-fg-subtle` | 說明 / label（`FieldLabel` 內建） |
-| `text-slate-500` | `text-fg-faint` | 更弱說明 / 表頭 |
-| `text-slate-600` | `text-fg-ghost` | 最弱 |
-| `bg-blue-600` | `bg-primary` | 主按鈕 / 選中 |
-| `bg-blue-500`, `hover:bg-blue-500` | `bg-primary-hover`, `hover:bg-primary-hover` | |
-| `border-blue-500` | `border-primary-hover` | tab 底線 |
-| `bg-blue-950/40`, `bg-blue-950/60` | `bg-primary/15`（選中列淡底 / 突破 pill；微調透明度到視覺接近） | |
-| `text-blue-300` | `text-primary-hover` | 突破 pill 文字 |
-| `text-white`（primary 按鈕上） | `text-on-primary` | |
-| `text-rose-400`（漲跌%正、籌碼正） | `text-up` | 漲 |
-| `text-emerald-400`（漲跌%負、籌碼負） | `text-down` | 跌 |
-| `text-amber-400`, `text-amber-300` | `text-warning` | 「估」/ 提示 |
-| `border-amber-800` | `border-warning-border` | |
-| `bg-amber-500/20`, `bg-amber-950/40`, `bg-amber-950/30`, `bg-amber-500` | `bg-warning/15`（badge / 提示框底），純 `bg-amber-500` → `bg-warning` | |
-| `text-rose-300` | `text-danger-fg` | 錯誤框內文字 |
-| `text-rose-400`（「追」badge、danger 按鈕、失敗訊息） | `text-danger` | 風險 / 錯誤 |
-| `border-rose-800` | `border-danger-border` | |
-| `border-rose-500/40` | `border-danger/40` | bearish 卡片邊框 |
-| `bg-rose-500/20`, `bg-rose-950`, `bg-rose-950/40`, `bg-rose-950/30` | `bg-danger/15` | |
-| `bg-emerald-500`（Dashboard 燈號「已更新」） | `bg-success` | |
-| `bg-emerald-500`（RegimeBanner bull 圓點）, `bg-amber-500`（neutral 圓點）, `bg-rose-500`（bear 圓點） | `bg-regime-bull` / `bg-regime-neutral` / `bg-regime-bear` | 逐處分辨，與燈號的 emerald 語意不同 |
-| `bg-slate-600`（RegimeBanner 無資料 / fallback 圓點） | `bg-fg-ghost` | |
-| `text-emerald-400`（WatchlistPerfTable `scoreClass` ≥70、PipelineRunner「完成」） | `text-success` | 「好 / 完成」語意 |
+```ts
+): {
+  score: number;
+  degraded: boolean;
+  marginChasing: boolean;
+  trustRatio: number;    // trustSum / volumeMa20（volumeMa20 缺 → 0）
+  foreignRatio: number;  // foreignSum / volumeMa20
+  todayTrustDir: -1 | 0 | 1 | null;   // sign(todayTrustNetBuy)；null 傳入 → null
+  todayForeignDir: -1 | 0 | 1 | null;
+}
+```
 
-### 檔案清單（依建議順序：粗到細，一次 1–2 檔 + `git diff` 檢查）
+- `trustSum` / `foreignSum` 函式內已算（`toFlowScore` 裡的 `series.reduce`）——提出來共用，不重算。
+- volumeMa20 缺值早退分支：`trustRatio` / `foreignRatio` 回 `0`，`todayXxxDir` 照常算。
+- 純計算擴充，**score / degraded / marginChasing 邏輯一字不改**。
 
-1. `app/globals.css` — §2（先單獨驗證，見 §5 步驟 1）
-2. `lib/cn.ts` — §1（新檔）
-3. `app/layout.tsx` — 側欄 3 處
-4. `components/ui/Card.tsx` — `Card` / `FieldLabel` / `Stat`（`FieldLabel` 是全站次級文字單一出處）
-5. `components/ui/Button.tsx` — `styles` Record 三 variant 全換。`danger` → `border-danger-border bg-surface text-danger hover:bg-danger/15`；`primary` disabled → `disabled:bg-surface-2 disabled:text-fg-subtle`
-6. `components/screening/ScreeningPanel.tsx` — 最大宗：表格、`changePercentCell`、「估」/「追」badge、5 個提示框、進度條、tab、mode toggle、選中列
-7. `components/dashboard/RegimeBanner.tsx` — `DOT_CLASS` map（→ regime-* 三色）、`dotClass` fallback、`DimensionRow`、strip / banner 兩 variant、`isBearish` 邊框
-8. `components/dashboard/WatchlistPerfTable.tsx` — `scoreClass`、`instClass`/`trustClass`、`Card`、`ScoreItem`。**⚠ `Sparkline` 內 SVG 的 `stroke` / `<line stroke>` 是硬編 HEX 字串**（`#fb7185` / `#34d399` / `#475569`），非 class → 在檔頂宣告 `const SPARK_UP = "#fb7185"` / `SPARK_DOWN` / `SPARK_BASELINE` 常數 + 註解「對應 `--color-up` / `--color-down` / `--color-fg-ghost`，改色需同步 globals.css」（此元件是 Server Component，不能 `getComputedStyle`）
-9. `components/dashboard/PipelineRunner.tsx` — 按鈕、`FieldLabel` 覆蓋色、log `<pre>` 底色
-10. `components/watchlist/WatchlistTable.tsx` — 卡片、`SnapshotBlock`、`Field`、`InputField`、漲跌色、`textarea`/`input` 邊框
-11. `app/page.tsx` — `coverageClass`（rose→danger、amber→warning、slate-100→fg）、燈號圓點、覆蓋率列
-12. `app/screening/page.tsx` — 標題、說明文字
-13. `app/watchlist/page.tsx` — 標題、說明、空清單框、`<Link>`
+### 4.3 `computeProximityToHigh` 回傳擴充（`breakout.ts`）
 
----
+現回 `{ score, degraded }`，加 `shortScore` / `longScore`（函式內已分開算）＋
+`shortPct` / `longPct`（收盤距各窗最高點的 % 距離）：
 
-## 3. `cn()` 導入範圍
+```ts
+): { score: number; degraded: boolean;
+     shortScore: number; longScore: number;
+     shortPct: number; longPct: number } {
+```
 
-本輪主軸是 class 替換，`cn()` 只在**已經有條件三元拼 class** 的地方順手換（可讀性提升），
-不強求全面鋪。明確候選：
+- `shortPct = (referenceClose - max(shortWindow)) / max(shortWindow) * 100`（`computeProximityScale`
+  內部已有 max 計算，提出來或就地重算一行）。`longPct` 同理。
+- degraded 早退分支（`validCloses.length < shortWindowDays`）：`shortScore=longScore=50`、
+  `shortPct=longPct=0`。
+- **合成公式 `shortScore*0.5 + longScore*0.5` 不動。**
 
-- `components/ui/Button.tsx`：`` `... ${styles[variant]} ${className}` `` → `cn("...base...", styles[variant], className)`
-- `components/ui/Card.tsx` `FieldLabel`：`` `text-sm text-fg-subtle ${className}` `` → `cn("text-sm text-fg-subtle", className)`
-- `components/screening/ScreeningPanel.tsx`：`RowGroup`（`isSelected` + `priceSource` 兩段三元）、tab 按鈕、mode toggle 按鈕
-- `components/dashboard/WatchlistPerfTable.tsx` `ScoreItem` 的 `scoreClass` 拼接、`PipelineRunner` `FieldLabel` 覆蓋
+### 4.4 `run-signal-scan.ts` 組裝
 
-其餘純靜態 class 字串不動。
+- `computeBreakoutFactors` 的 `BreakoutFactorOutput` 加透傳 `inst` / `factors` 子物件
+  （從 `computeInstitutionalFlow` / `computeProximityToHigh` 的新回傳值組），或直接在
+  breakout-day / extended 的 `results.push` 處組裝（傾向後者，`computeBreakoutFactors` 只多回
+  raw 值、組裝在呼叫端）。
+- `volumeRatio`：push 時帶 `s.volumeRatio`（`staged` 已有，breakout 階段必有值）。
+- realtime 路徑（`runRealtime`）同步帶這些欄位；`todayTrustDir` / `todayForeignDir` realtime 恆
+  `null`（當日法人拿不到），`volumeRatio` realtime 有（即時量比）。
+
+### 4.5 `factors.test.ts`
+
+- `computeInstitutionalFlow`：補 assert 新回傳的 `trustRatio` / `foreignRatio`（用已知輸入手算對比）、
+  `todayTrustDir` 對 `null` / 正 / 負 / 0 四種輸入。
+- `computeProximityToHigh`：補 assert `shortScore + longScore` 與舊 `score * 2` 一致（等價性）、
+  degraded 分支的新欄位預設值。
 
 ---
 
-## 4. 文件回寫
+## 5. `SignalScanView` / action 邊界（`lib/actions/signal-scan.ts`）
 
-- **`CLAUDE.md`「前端」段**：把「配色基準 = Tailwind slate 系（`bg-slate-900`…）；`Button` primary = `bg-blue-600`…台股漲跌色…（漲 `text-rose-400` / 跌 `text-emerald-400`）」整段改寫為：
-  > 配色 = `app/globals.css` 的 semantic token（`bg-surface` / `text-fg-subtle` / `text-fg-faint` / `border-border` / `bg-primary` / `text-up` / `text-down` / `text-warning` / `text-danger` / `bg-regime-{bull,neutral,bear}`…），值為 HEX、**單一出處**；元件不直接寫 `slate-*` / `blue-*` / `rose-*` 等色階。台股漲跌用 `--color-up`/`--color-down`（漲紅跌綠），跟號誌色 `--color-regime-*`、狀態色 `--color-warning`/`--color-danger` **語意分離不共用**。`cn()`（`lib/cn.ts`）= `clsx` + `tailwind-merge`，用於條件拼 class / 讓外部 `className` 能覆蓋元件內建色。
-- **`CLAUDE.md`「前端」技術棧行**：套件清單補 `clsx` / `tailwind-merge`。
-- **`docs/PROGRESS.md`**：新增一段（日期 2026-09-01）記動機、token 清單、涉及 13 檔、`cn` 導入範圍、`@theme inline` 語法驗證結果、Sparkline SVG 常數處理。
-- **`docs/ROADMAP.md`**：檢查有無相關 todo，有則打勾；無則不動（本任務非 ROADMAP 條目）。
-
----
-
-## 5. 驗證
-
-1. **token 語法先驗**：只做 §1（裝套件 + `lib/cn.ts`）+ §2（`globals.css`），跑
-   `pnpm exec tsc --noEmit`（應乾淨）+ `curl -s http://localhost:3000/ -o /dev/null -w "%{http_code}\n"`
-   （打使用者的 dev server；不通就請使用者開，或改 `pnpm build` 靜態驗）。確認頁面仍是深色、
-   `@theme inline` 自我參照不報錯。**報錯 → 切 `--app-*` 前綴 fallback 方案。**
-2. **逐檔驗**：每改 1–2 檔，`git diff` 目視 + `pnpm exec tsc --noEmit`。
-3. **視覺回歸**：全改完 `curl` 三頁（`/`、`/screening`、`/watchlist`）確認 200；請使用者肉眼比對截圖，重點：
-   - 側欄 / 卡片 / 邊框灰階層次不變
-   - 漲跌色（漲紅跌綠）不變
-   - ScreeningPanel「估」（琥珀）/「追」（紅）badge、5 種提示框不變
-   - RegimeBanner 三色圓點（綠 / 琥珀 / 紅）不變
-   - Dashboard 燈號綠 / 覆蓋率紅黃、WatchlistPerfTable 走勢圖線色不變
-4. **grep 收尾**：`grep -rE "(text|bg|border|ring|divide)-(slate|blue|rose|emerald|amber|red|green|yellow|zinc|gray)-[0-9]" app/ components/`
-   應回空（`scripts/` 不算；`WatchlistPerfTable.tsx` 的 SVG 常數 HEX 若保留，在允許清單）。
-5. `pnpm build` 完整過一次。
+- `SignalResult` 已全是 number/string/plain object → `toView` 不用改（新欄位是 optional plain object，可序列化）。
+- `SignalScanView.results` 型別隨 `SignalResult` 自動帶新欄位。
+- 新增 `getSignalSpark(code: string): Promise<SparkPoint[]>`（§3.1）。import `SparkPoint` /
+  `SPARK_WINDOW` from `lib/dashboard-spark`、`buildSparkSeries` from `lib/spark-series`。
 
 ---
 
-## 6. 風險
+## 6. 驗證
 
-低。全是 class 字串 / 顏色常數替換，無邏輯改動。唯一不確定點 = Tailwind v4 `@theme inline`
-同名自我參照語法（步驟 1 先驗證，有 `--app-*` 前綴 fallback）。SVG 走勢圖硬編 HEX 需人工同步
-（已在 §2 檔案清單第 8 項標注，抽常數 + 註解）。
+1. `pnpm exec tsc --noEmit`（scripts + app 都要乾淨）。
+2. `pnpm tsx --test scripts/lib/signal-factors/factors.test.ts`（31 案 + 新增案全過）。
+3. `pnpm tsx scripts/screening/run-signal-scan.ts --date=<最近交易日>`：
+   - 跑得完、`data/signal-scan-results/<date>.json` 有新欄位。
+   - 隨機挑 2 檔 breakout：手動核對 `inst.trustRatio` ≈ (近5日投信淨買超 / volumeMa20)、
+     `factors.breakoutMarginPct` ≈ (close-上軌)/上軌×100、`factors.proximityShortScore +
+     proximityLongScore` ≈ `scores.proximityToHigh * 2`。
+   - `totalScore` / `rank` / `scores` 與改動前**逐檔完全一致**（評分沒被碰到）——改動前先存一份
+     `<date>.json` 比對。
+4. `curl http://localhost:3000/screening`（使用者的 dev server）：
+   - 三 tab、無「全部」、預設「今日突破」。
+   - 欄位順序、狀態 pill 底色、量增 `x2.5` / 醞釀中 `—`、籌碼 chip。
+   - 展開 breakout 列：三欄，線圖非同步載入、法人 diverging bar 柱長比例合理、突破因子 4 列顏色分級。
+   - 展開醞釀中列：只有線圖。
+5. `curl http://localhost:3000/`（Dashboard）：`WatchlistPerfTable` 走勢圖與改動前**視覺一致**
+   （`Sparkline` / `buildSparkSeries` 抽出後行為等價）。
+6. `pnpm build`（整專案 typecheck + 靜態預渲染不炸）。
+
+---
+
+## 7. 收尾
+
+- `docs/PROGRESS.md`：新增段落記錄本次改版（tab 收斂、欄位、展開列三欄、後端新增回傳欄位、
+  `Sparkline` / `buildSparkSeries` 抽出）。**把 `docs/UI.md` 的規格重點（法人籌碼區長條量尺規則、
+  1.4 chip 組合表、突破因子長條用分數不用原始值）併入這個 PROGRESS 段落**，之後看實作理由查
+  PROGRESS 即可。
+- **刪除 `docs/UI.md`**（`git rm docs/UI.md`）——規格已落實成程式碼 + PROGRESS 紀錄，獨立規格檔
+  完成階段性任務。
+- `docs/ROADMAP.md`：本次不對應既有 todo 項（UI 打磨屬前端迭代，ROADMAP 無此條），不打勾。
+  若要追蹤可在「已完成」段補一行；否則略過。
+- `CLAUDE.md`：前端段補記——`components/ui/Sparkline.tsx`（走勢圖共用元件出處）、
+  `lib/spark-series.ts`（`buildSparkSeries` 純函式，dashboard + screening 共用）、
+  screening 展開列三欄結構與 stage 分支（醞釀中只有線圖）、`SignalResult` 新增
+  `volumeRatio` / `inst` / `factors` 欄位（只 breakout 階段有值）。移除 `docs/UI.md` 的引用
+  （PROGRESS 維護段目前沒提到 UI.md，確認無殘留引用再收工）。
+- 不 merge，等使用者發話。

@@ -4,6 +4,7 @@ import {
   computeBreakoutMarginMonotone,
   computeInstitutionalFlow,
   computeMarginSurgePercentile,
+  computeProximityToHigh,
   consecutiveAboveBand,
   resolveSignalConfig,
   DEFAULT_SIGNAL_CONFIG,
@@ -247,6 +248,95 @@ test("marginChasing: true 時 score 跟沒有 margin 輸入時完全一致（不
   assert.equal(withMs.score, withoutMs.score);
   assert.equal(withMs.marginChasing, true);
   assert.equal(withoutMs.marginChasing, false);
+});
+
+// ---- computeInstitutionalFlow: PLAN §4.2 中繼值回傳 ----
+
+test("institutionalFlow §4.2: trustRatio / foreignRatio = 近窗淨買超合計 ÷ volumeMa20", () => {
+  const ma = 1_000_000;
+  const r = computeInstitutionalFlow({
+    trustNetBuyNewestFirst: [100_000, 100_000, 50_000, 0, 0], // 合計 250_000 → 0.25
+    foreignNetBuyNewestFirst: [-40_000, -10_000, 0, 0, 0], // 合計 -50_000 → -0.05
+    todayTrustNetBuy: 1,
+    todayForeignNetBuy: -1,
+    volumeMa20: ma,
+    marginSurgePercentile: null,
+    config: IF,
+  });
+  assert.ok(Math.abs(r.trustRatio - 0.25) < 1e-9, `trustRatio=${r.trustRatio}`);
+  assert.ok(Math.abs(r.foreignRatio - -0.05) < 1e-9, `foreignRatio=${r.foreignRatio}`);
+});
+
+test("institutionalFlow §4.2: volumeMa20 缺 → trustRatio / foreignRatio 回 0，todayXxxDir 照常算", () => {
+  const r = computeInstitutionalFlow({
+    trustNetBuyNewestFirst: [1000, 1000, 1000, 1000, 1000],
+    foreignNetBuyNewestFirst: [1000, 1000, 1000, 1000, 1000],
+    todayTrustNetBuy: 500,
+    todayForeignNetBuy: -500,
+    volumeMa20: null,
+    marginSurgePercentile: null,
+    config: IF,
+  });
+  assert.equal(r.trustRatio, 0);
+  assert.equal(r.foreignRatio, 0);
+  assert.equal(r.todayTrustDir, 1);
+  assert.equal(r.todayForeignDir, -1);
+});
+
+test("institutionalFlow §4.2: todayXxxDir 對 null / 正 / 負 / 0 四種輸入", () => {
+  const mk = (t: number | null, f: number | null) =>
+    computeInstitutionalFlow({
+      trustNetBuyNewestFirst: Array(5).fill(1000),
+      foreignNetBuyNewestFirst: Array(5).fill(1000),
+      todayTrustNetBuy: t,
+      todayForeignNetBuy: f,
+      volumeMa20: 1_000_000,
+      marginSurgePercentile: null,
+      config: IF,
+    });
+  assert.equal(mk(null, null).todayTrustDir, null);
+  assert.equal(mk(null, null).todayForeignDir, null);
+  assert.equal(mk(123, -1).todayTrustDir, 1);
+  assert.equal(mk(123, -1).todayForeignDir, -1);
+  assert.equal(mk(0, 0).todayTrustDir, 0);
+  assert.equal(mk(0, 0).todayForeignDir, 0);
+});
+
+// ---- computeProximityToHigh: PLAN §4.3 中繼值回傳 ----
+
+test("proximityToHigh §4.3: shortScore + longScore 一致於舊 score * 2（等價性）", () => {
+  const history = Array.from({ length: 240 }, (_, i) => 90 + (i % 20)); // 90~109 起伏
+  const r = computeProximityToHigh(105, history, 60, 240);
+  assert.ok(
+    Math.abs(r.shortScore * 0.5 + r.longScore * 0.5 - r.score) < 1e-9,
+    `score=${r.score} short=${r.shortScore} long=${r.longScore}`,
+  );
+});
+
+test("proximityToHigh §4.3: shortPct / longPct <= 0，收在窗內新高 → 0", () => {
+  const history = Array.from({ length: 240 }, () => 80); // 全部 80
+  const r = computeProximityToHigh(100, history, 60, 240); // 100 是新高
+  assert.equal(r.shortPct, 0);
+  assert.equal(r.longPct, 0);
+  const r2 = computeProximityToHigh(90, history, 60, 240); // 距高點 90 有 (90-90)/90=0（因為 max 含 referenceClose）
+  assert.ok(r2.shortPct <= 0);
+});
+
+test("proximityToHigh §4.3: degraded 早退分支 → 新欄位預設值", () => {
+  const r = computeProximityToHigh(100, [90, 91, 92], 60, 240); // < shortWindowDays
+  assert.equal(r.degraded, true);
+  assert.equal(r.score, 50);
+  assert.equal(r.shortScore, 50);
+  assert.equal(r.longScore, 50);
+  assert.equal(r.shortPct, 0);
+  assert.equal(r.longPct, 0);
+});
+
+test("proximityToHigh §4.3: 收盤明顯低於歷史高點 → shortPct 為負", () => {
+  const history = [...Array(60).fill(200), ...Array(180).fill(100)];
+  const r = computeProximityToHigh(150, history, 60, 240);
+  // 短窗 max = 200，(150-200)/200 = -25%
+  assert.ok(Math.abs(r.shortPct - -25) < 1e-9, `shortPct=${r.shortPct}`);
 });
 
 // ---- consecutiveAboveBand ----

@@ -7,7 +7,8 @@ import {
   computeBase,
   resolveBreakoutConfig,
 } from "../../scripts/lib/signal-factors/index";
-import { SPARK_CLIP, SPARK_WINDOW, type SparkPoint } from "../dashboard-spark";
+import { SPARK_WINDOW, type SparkPoint } from "../dashboard-spark";
+import { buildSparkSeries } from "../spark-series";
 
 // 近 60 日走勢圖：每點 = 當日收盤「相對布林中軌的偏離比例」＝(close − bollingerMid) / bollingerMid，
 // 夾在 ±SPARK_CLIP。以布林帶寬正規化 → 盤整期貼近 0（線壓中間窄帶）、噴出時衝向邊界；
@@ -117,16 +118,10 @@ export async function getWatchlistPerformance(): Promise<WatchlistPerfRow[]> {
       for (const ind of indicatorWindow) {
         midByDate.set(ind.date.getTime(), ind.bollingerMid);
       }
-      const spark: SparkPoint[] = quoteWindow
-        .slice(0, SPARK_WINDOW)
-        .slice()
-        .reverse() // 舊 → 新
-        .map((q) => {
-          const mid = midByDate.get(q.date.getTime()) ?? null;
-          if (mid == null || mid === 0) return { dev: null };
-          const raw = (q.close - mid) / mid;
-          return { dev: Math.max(-SPARK_CLIP, Math.min(SPARK_CLIP, raw)) };
-        });
+      const spark: SparkPoint[] = buildSparkSeries(
+        quoteWindow.slice(0, SPARK_WINDOW),
+        midByDate,
+      );
 
       // 力道（量能）：今日量 / 近 20 日均量
       const todayVolume = Number(quote.volume);

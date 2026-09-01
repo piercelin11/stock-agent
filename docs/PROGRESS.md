@@ -368,6 +368,39 @@
   7. 五階 slate 文字 → 兩 base + 三檔透明度，中間階對比略有位移（多數肉眼難分）。
   8. 提示框統一成 `border-X/30 bg-X/10 text-X`，底色比舊的 `bg-X-950/40` 更淡、更一致。
 
+---
+
+**Screening 頁表格 UI 改版（2026-09-01）**：`docs/PLAN.md`「Screening 頁表格 UI 改版」。`/screening` 結果表格重畫：tab 收斂三階段、欄位比照設計圖、展開列改「線圖 / 法人籌碼 / 突破因子」三欄。**零評分邏輯改動**（公式 / 權重 / 曲線 / gate / 階段判定全不動；改動前後 `2026-08-31.json` 逐檔 `totalScore` / `rank` / `scores` 完全一致）。分支 `feat/screening-ui`。
+
+- **後端只補回傳值**（`SignalResult` 加 3 個 optional 欄位，只在 `breakout-day` / `extended` 的 push 帶，`pre-breakout` undefined）：
+  - `volumeRatio?: number` — 觸發量比（`staged.volumeRatio`，breakout 階段必有）。
+  - `inst?: { trustRatio, foreignRatio, todayTrustDir, todayForeignDir }` — 法人籌碼中繼值。
+  - `factors?: { breakoutMarginScore, breakoutMarginPct, proximityShortScore, proximityLongScore, proximityShortPct, proximityLongPct }` — 突破因子分數 + 原始值。
+- **`computeInstitutionalFlow` 回傳擴充**（`institutional.ts`）：加 `trustRatio` / `foreignRatio`（近 5 日淨買超合計 ÷ volumeMa20，volumeMa20 缺 → 0）、`todayTrustDir` / `todayForeignDir`（`sign(todayXxxNetBuy)`；傳入 null → null）。`score` / `degraded` / `marginChasing` 邏輯一字不改（`trustSum` / `foreignSum` 從原本 `toFlowScore` 內的 reduce 提出來共用，不重算）。
+- **`computeProximityToHigh` 回傳擴充**（`breakout.ts`）：加 `shortScore` / `longScore`（函式內本來就分開算，只是原本合成後不回）+ `shortPct` / `longPct`（收盤距各窗最高點的 % 距離，`<= 0`；新增 `proximityPct()` helper）。合成公式 `shortScore*0.5 + longScore*0.5` 不動；degraded 早退分支新欄位給預設值（`shortScore=longScore=50`、`shortPct=longPct=0`）。
+- **`run-signal-scan.ts` 組裝**：`computeBreakoutFactors` 的 `BreakoutFactorOutput` 多回 `raw` 子物件（純中繼值），新 helper `breakoutExtras(factors)` 把 raw 組成 `inst` / `factors`，在 eod / realtime 兩處 `results.push` 展開。realtime 路徑 `todayTrustDir` / `todayForeignDir` 恆 null（當日法人拿不到），`volumeRatio` 有（即時量比）。
+- **Tab（PLAN §1）**：移除「全部」。剩三個順序固定 **今日突破 → 已延伸 → 醞釀中**，預設「今日突破」。`StageFilter` 型別去掉 `"all"` = `SignalStage`。清掉只為「全部」存在的 `sortKey==="rank"` 次要排序、跨階段提示段。每 tab 內 `rank` 是該階段內名次。
+- **表格欄位（PLAN §2）**：排名 / 代號 / 名稱 / **價格**（原「收盤/即時」，`estimated` 尾隨琥珀「估」badge）/ 漲跌%（百分比、漲紅跌綠、帶正負號）/ **狀態**（階段中文 pill，`breakout-day`=`bg-destructive/10 text-destructive`、`extended`=`bg-warning/10 text-warning`、`pre-breakout`=`bg-muted text-muted-foreground`）/ **量增**（`x{volumeRatio}`，醞釀中 `—`）/ **籌碼**（一句話結論 chip：`法人偏多`/`法人偏空`/`融資追價`/`資料不足`/`中性`，醞釀中 `—`；盤中沿用昨日籌碼附「昨」badge）/ 總分。移除獨立「降級項目」欄（移到展開列底部）。舊「追」badge 從價格欄移到籌碼 chip（marginChasing → 紅「融資追價」）。`Column` 加 `sortable?: boolean`，`inst` 欄 `false`（chip 是分類不是量，th 不掛 onClick / 不顯箭頭）。
+- **展開列三欄（PLAN §3）**：`RowGroup` 展開渲染 `<SignalDetail row={r} />`（原 `Detail` function 搬進新檔 `components/screening/SignalDetail.tsx`）。
+  - **stage 分支**：`pre-breakout` → **只有左側線圖**（不渲染法人 / 突破因子 / 舊評分明細網格，使用者明確要求）。`breakout-day` / `extended` → 三欄卡（`grid-cols-1 lg:grid-cols-3`，深色卡 `rounded-lg border border-border bg-card p-4`）。頂部 margin-chasing 紅框 / estimated 琥珀框兩種 stage 都渲染。degraded 資訊移到底部一行灰字。
+  - **左欄 `SignalSparkPanel`**（client）：按需撈——`useEffect` 依 `code` 呼叫 `getSignalSpark(code)`，載入中「資料載入中…」框。`rising = row.changePercent >= 0` 由 `SignalDetail` 傳入。切換展開列卸載重撈，不做跨列快取（YAGNI）。
+  - **中欄 `InstitutionalFlow`**（依 UI.md 第一節）：頂部 chip（純函式 `resolveInstChip(inst, warnings)` → `{ text, tone }`，依「近 5 日流向強弱 × 今日方向 × marginChasing」組合表，強/中/弱門檻 `ratioSum > 0.3` / `> 0` / `<= 0` **首版拍板待校準**）。投信 / 外資各一列 **diverging bar**：**柱長用 `inst.trustRatio` / `inst.foreignRatio`（近 5 日淨買超 ÷ volumeMa20），不是股數、不是分數**——柱長才跟分數公式同一把尺，達 `±clipDivisor`(=0.5) 即滿格 = 分數已封頂。中線 = 0，右綠買超 / 左紅賣超，寬度 = `min(|ratio|, 0.5) / 0.5 × 50%`。右側文字 `{(ratio*100).toFixed(0)}%` 帶正負號。小箭頭 ▲/▼ 依 `todayXxxDir`（**今日單日**方向，與柱子近 5 日累積是兩回事）；柱子與箭頭不同號（翻臉）→ 柱子 `opacity-50`。融資追價警示列只在 `warnings.includes("margin-chasing")` 時渲染（不觸發完全不佔版位）。盤中今日法人 null → 底部灰字「以上為近日資料」。顏色 = `success`/`warning`/`destructive` token，不複用台股漲跌色。
+  - **右欄 `BreakoutFactorBars`**（依 UI.md 第二節）：4 列（突破幅度 / 相對強度 / 距 60 日高點 / 距一年高點），每列 4 欄（標籤 / 長條 / 分數 / 原始值灰字）。**長條寬度用「因子內部分數（0~100）」不是原始數值**（UI.md 2.2 核心規則：四因子原始單位不同，直接比長短有誤導性）；原始值只放右側灰字，不參與長條。分數分級 `barTone(score)`：`>=70` `bg-success` / `40~69` `bg-warning` / `<40` `bg-destructive`。相對強度用 `row.scores.relativeStrength`（本身即百分位分數）。**不放位階（base）因子**（使用者已定；設計圖右欄無 base）。
+- **`Sparkline` / `buildSparkSeries` 抽出**（兩個使用者 → 不違反 YAGNI）：
+  - `components/ui/Sparkline.tsx`（新）：從 `WatchlistPerfTable.tsx` 搬 `Sparkline` function + `SPARK_UP` / `SPARK_DOWN` / `SPARK_BASELINE` HEX 常數（全 `export`）。`SPARK_CLIP` / `SPARK_WINDOW` / `SparkPoint` 留在 `lib/dashboard-spark.ts` 不動（`Sparkline.tsx` 從那 import）。放 `components/ui/` 與 `Card.tsx` / `Button.tsx` 同層。
+  - `lib/spark-series.ts`（新）：`buildSparkSeries(quoteWindow, midByDate)` 純函式（`dashboard.ts` 的 inline map 抽出，行為完全等價）。`dashboard.ts` 改呼叫它、`getSignalSpark` 也用它。
+  - `WatchlistPerfTable.tsx` 改 `import { Sparkline } from "../ui/Sparkline"`，刪本地定義與常數（行為不變）。
+- **`getSignalSpark(code)` action**（`lib/actions/signal-scan.ts`）：撈該 code 近 `SPARK_WINDOW` 筆 `DailyQuote`（date desc）+ `TechnicalIndicator`（bollingerMid），`buildSparkSeries` → `SparkPoint[]`。查不到 → `[]`。realtime / eod 都用同一支（讀 DB 歷史，與當下報價源無關）。
+- **驗證**：`tsc --noEmit` 乾淨、`pnpm tsx --test scripts/lib/signal-factors/factors.test.ts` 38 案全過（新增 `computeInstitutionalFlow` 中繼值 3 案 + `computeProximityToHigh` 中繼值 4 案，含 `shortScore*0.5 + longScore*0.5 === score` 等價性）、`run-signal-scan.ts --date=2026-08-31` 跑得完 + JSON 有新欄位 + 逐檔分數與改動前 0 diff、`pnpm build` 通過（三頁 `ƒ Dynamic`）、`curl /screening` `/` 皆 200。
+- **待校準（PLAN §7）**：`resolveInstChip` 的強/中/弱門檻（`ratioSum` `0.3` / `0`）首版拍腦袋，累積實盤觀察後調。
+
+**UI.md 規格重點（併入本段，`docs/UI.md` 已刪）**：
+- **法人籌碼區長條量尺規則**：diverging bar 的柱長 = 對應機構的 `ratio`（近 5 日淨買超 ÷ volumeMa20），**不能畫股數或原始金額**——柱長要跟分數公式同一把尺，達 `clipDivisor=0.5` 即圖表滿格、也代表分數已封頂不再加分。每列文字 = `ratio × 100`（%），是「買超相當於均量的百分之幾」，不是股價漲跌% 或股本佔比。小箭頭 = **今日單日**淨買超方向（`todayXxxNetBuy` 正負），跟柱子（近 5 日累積）是兩個不同的量；柱綠箭頭紅 = 近期買、今天賣（翻臉），柱子調淡打折。融資追價警示列只在 `marginChasing === true` 顯示、不觸發不留空位（觸發條件含「今日淨賣超」，故必與翻臉情境同時出現，不會單獨出現在買超情境）。
+- **1.4 chip 組合表**：由「近 5 日流向方向 × 今日方向 × marginChasing」三條件決定 chip 文字與顏色。綠 = 高分無警示 / 琥珀 = 封頂但無融資警示 / 紅 = 封頂且有融資警示或直接同步撤出 / 灰 = 今日未定（盤中）或籌碼資料不足（degraded）。
+- **突破因子長條用分數不用原始值**：四因子原始數值單位完全不同（突破幅度 = % 乖離、相對強度已是百分位、距高點 = % 距離），直接把原始數值當長條寬度會「看起來能比長短、實際在比不同單位的東西」，有誤導性。正確做法 = 每因子後端已被各自曲線函式換算成統一 0~100 內部分數，長條寬度用這個分數，原始值只放旁邊文字欄位。`breakoutMargin` 單調遞增（`computeBreakoutMarginMonotone`：0~3% 線性 40→100，>3% 封頂 100，不倒扣），UI 不需特別處理、分數本身已反映。
+
+---
+
 尚未開始/明確不做：估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯（`topic_alignment` 因子固定中性分）、AnalysisResult 產出流程（Phase D）、`screening/`（統一入口 `run-signal-scan.ts`；舊三支已於 4.5.4 退役刪除）與 `backfill/` 各支皆為獨立手動執行（不在 `daily-pipeline.ts` 內）、`run-signal-scan.ts` 的階段權重 / 法人因子曲線校準（首版全拍腦袋，靠肉眼看單日排名 + 實盤觀察調）、**整個回測系統**（3.0～3.7 已從 `main` 移除、擱置，見上方；程式碼在 `feat/backtest-ui-3.6-3.7` 分支，OOM 待修）。`archive/` 的 `calculate-screen-score.ts` / `run-screener.ts` / `fetch-candidate-details.ts` / `top20-gainers.js` 已停用不維護。
 
 （每次進度更新，麻煩幫我一併更新這個區塊。）

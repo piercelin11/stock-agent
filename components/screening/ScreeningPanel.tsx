@@ -15,6 +15,7 @@ import {
 import { addToWatchlist } from "../../lib/actions/watchlist";
 import { cn } from "../../lib/cn";
 import { Button } from "../ui/Button";
+import { SignalDetail } from "./SignalDetail";
 
 // ROADMAP 4.5.3：三分頁（第一根突破 / 冷水區醞釀 / 盤中即時掃描）收斂成單頁 + 階段 filter。
 // 「跑掃描」一顆按鈕，由 getScanMode() 決定文案與行為：
@@ -23,19 +24,23 @@ import { Button } from "../ui/Button";
 
 type SortDir = "asc" | "desc";
 
-type StageFilter = "all" | SignalStage;
+// tab 收斂成三階段（PLAN §1）：去掉「全部」，StageFilter 直接 = SignalStage。
+type StageFilter = SignalStage;
 
-const STAGE_FILTER_LABELS: Record<StageFilter, string> = {
-  all: "全部",
-  "pre-breakout": "醞釀中",
-  "breakout-day": "今日突破",
-  extended: "已延伸",
-};
+// 順序固定：今日突破 → 已延伸 → 醞釀中；預設選中「今日突破」。
+const STAGE_TABS: SignalStage[] = ["breakout-day", "extended", "pre-breakout"];
 
 const STAGE_LABELS: Record<SignalStage, string> = {
   "pre-breakout": "醞釀中",
   "breakout-day": "今日突破",
   extended: "已延伸",
+};
+
+// 狀態 pill 底色（PLAN §2，使用者已定；複用狀態語意 token）
+const STAGE_PILL_CLASS: Record<SignalStage, string> = {
+  "breakout-day": "bg-destructive/10 text-destructive",
+  extended: "bg-warning/10 text-warning",
+  "pre-breakout": "bg-muted text-muted-foreground",
 };
 
 // stage → WatchlistItem.source 映射（schema 的 source enum 不動）
@@ -45,9 +50,46 @@ function stageToSource(stage: SignalStage): "breakout" | "accumulation" {
 
 type Row = SignalScanView["results"][number];
 
-function changePercentCell(v: number): React.ReactNode {
+// 籌碼 chip（表格「籌碼」欄）：一句話結論。醞釀中階段後端無 inst → 呼叫端不渲染此欄內容。
+// 詳細組合邏輯在展開列的 InstitutionalFlow；表格只給極簡結論 + 「追」/「昨」badge。
+function instCell(r: Row): React.ReactNode {
+  if (!r.inst) return <span className="text-muted-foreground/50">—</span>;
+  const marginChasing = r.warnings.includes("margin-chasing");
+  const ratioSum = r.inst.trustRatio + r.inst.foreignRatio;
+  const todayKnown = r.inst.todayTrustDir !== null && r.inst.todayForeignDir !== null;
+  const noData = r.inst.trustRatio === 0 && r.inst.foreignRatio === 0;
+
+  let text: string;
+  let cls: string;
+  if (marginChasing) {
+    text = "融資追價";
+    cls = "bg-destructive/10 text-destructive";
+  } else if (noData) {
+    text = "資料不足";
+    cls = "bg-muted text-muted-foreground";
+  } else if (ratioSum > 0) {
+    text = "法人偏多";
+    cls = "bg-success/10 text-success";
+  } else if (ratioSum < 0) {
+    text = "法人偏空";
+    cls = "bg-destructive/10 text-destructive";
+  } else {
+    text = "中性";
+    cls = "bg-muted text-muted-foreground";
+  }
+
   return (
-    <span className={v > 0 ? "text-up" : v < 0 ? "text-down" : ""}>{v.toFixed(2)}</span>
+    <span className="inline-flex items-center gap-1">
+      <span className={cn("rounded px-1.5 py-0.5 text-xs font-medium", cls)}>{text}</span>
+      {!todayKnown && !noData ? (
+        <span
+          className="rounded bg-muted px-1 text-xs text-muted-foreground"
+          title="盤中未取得今日法人，沿用近日資料"
+        >
+          昨
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -57,6 +99,7 @@ interface Column {
   get: (r: Row) => number | string;
   render?: (r: Row) => React.ReactNode;
   numeric?: boolean;
+  sortable?: boolean; // 預設 true；false 時 th 不掛 onClick、不顯箭頭
 }
 
 const columns: Column[] = [
@@ -65,21 +108,13 @@ const columns: Column[] = [
   { key: "name", label: "名稱", get: (r) => r.name },
   {
     key: "close",
-    label: "收盤/即時",
+    label: "價格",
     get: (r) => r.close,
     render: (r) => (
       <span>
         {r.close.toFixed(2)}
         {r.priceSource === "estimated" ? (
           <span className="ml-1 rounded bg-warning/10 px-1 text-xs text-warning">估</span>
-        ) : null}
-        {r.warnings.includes("margin-chasing") ? (
-          <span
-            className="ml-1 rounded bg-destructive/10 px-1 text-xs text-destructive"
-            title="margin-chasing：突破當日法人淨賣超 + 本檔融資近期暴增"
-          >
-            追
-          </span>
         ) : null}
       </span>
     ),
@@ -89,14 +124,47 @@ const columns: Column[] = [
     key: "changePercent",
     label: "漲跌%",
     get: (r) => r.changePercent,
-    render: (r) => changePercentCell(r.changePercent),
+    render: (r) => (
+      <span className={r.changePercent > 0 ? "text-up" : r.changePercent < 0 ? "text-down" : ""}>
+        {r.changePercent >= 0 ? "+" : ""}
+        {r.changePercent.toFixed(2)}
+      </span>
+    ),
     numeric: true,
   },
   {
     key: "stage",
-    label: "階段",
+    label: "狀態",
     get: (r) => r.stage,
-    render: (r) => STAGE_LABELS[r.stage],
+    render: (r) => (
+      <span
+        className={cn(
+          "rounded px-1.5 py-0.5 text-xs font-medium",
+          STAGE_PILL_CLASS[r.stage],
+        )}
+      >
+        {STAGE_LABELS[r.stage]}
+      </span>
+    ),
+  },
+  {
+    key: "volumeRatio",
+    label: "量增",
+    get: (r) => r.volumeRatio ?? -1,
+    render: (r) =>
+      r.volumeRatio === undefined ? (
+        <span className="text-muted-foreground/50">—</span>
+      ) : (
+        `x${r.volumeRatio.toFixed(1)}`
+      ),
+    numeric: true,
+  },
+  {
+    key: "inst",
+    label: "籌碼",
+    get: (r) => (r.inst ? r.inst.trustRatio + r.inst.foreignRatio : 0),
+    render: instCell,
+    sortable: false,
   },
   {
     key: "totalScore",
@@ -105,17 +173,7 @@ const columns: Column[] = [
     render: (r) => r.totalScore.toFixed(1),
     numeric: true,
   },
-  {
-    key: "degraded",
-    label: "降級項目",
-    get: (r) => r.degraded.join(","),
-    render: (r) => (r.degraded.length > 0 ? r.degraded.join(", ") : "—"),
-  },
 ];
-
-function scoreEntries(obj: Record<string, number | null>): [string, number | null][] {
-  return Object.entries(obj);
-}
 
 export function ScreeningPanel() {
   const [mode, setMode] = useState<{ source: SignalSource; latestEodDate: string | null } | null>(
@@ -133,7 +191,7 @@ export function ScreeningPanel() {
   const [scanBusy, setScanBusy] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const [stageFilter, setStageFilter] = useState<StageFilter>("all");
+  const [stageFilter, setStageFilter] = useState<StageFilter>("breakout-day");
   const [sortKey, setSortKey] = useState("rank");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [expandedCode, setExpandedCode] = useState<string | null>(null);
@@ -141,7 +199,7 @@ export function ScreeningPanel() {
   const [addMsg, setAddMsg] = useState<string | null>(null);
 
   function resetTableState() {
-    setStageFilter("all");
+    setStageFilter("breakout-day");
     setSortKey("rank");
     setSortDir("asc");
     setExpandedCode(null);
@@ -263,18 +321,20 @@ export function ScreeningPanel() {
   const effectiveMode: SignalSource = chosenMode === "eod" && !eodFallbackToRealtime ? "eod" : "realtime";
 
   function toggleSort(key: string) {
+    const col = columns.find((c) => c.key === key);
+    if (col && col.sortable === false) return;
     if (sortKey === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSortKey(key);
-      // 全部 filter 時 rank 會有重複（每階段各 1..N）→ 預設用 totalScore 降冪較合理
+      // 純表格排序偏好：totalScore 預設降冪（無害）
       setSortDir(key === "totalScore" ? "desc" : "asc");
     }
   }
 
   const allRows = view?.results ?? [];
   const filteredRows = useMemo(
-    () => (stageFilter === "all" ? allRows : allRows.filter((r) => r.stage === stageFilter)),
+    () => allRows.filter((r) => r.stage === stageFilter),
     [allRows, stageFilter],
   );
 
@@ -288,8 +348,6 @@ export function ScreeningPanel() {
       let cmp: number;
       if (typeof va === "number" && typeof vb === "number") cmp = va - vb;
       else cmp = String(va).localeCompare(String(vb));
-      // rank 在「全部」filter 時同名次多筆 → 次要以 totalScore 降冪
-      if (cmp === 0 && sortKey === "rank") cmp = b.totalScore - a.totalScore;
       return sortDir === "asc" ? cmp : -cmp;
     });
     return copy;
@@ -457,11 +515,10 @@ export function ScreeningPanel() {
 
       {allRows.length > 0 ? (
         <>
-          {/* 階段 filter */}
+          {/* 階段 filter（三 tab，各 tab 內 rank 是該階段內名次） */}
           <div className="flex gap-1 border-b border-border">
-            {(Object.keys(STAGE_FILTER_LABELS) as StageFilter[]).map((f) => {
-              const count =
-                f === "all" ? allRows.length : allRows.filter((r) => r.stage === f).length;
+            {STAGE_TABS.map((f) => {
+              const count = allRows.filter((r) => r.stage === f).length;
               return (
                 <button
                   key={f}
@@ -476,17 +533,11 @@ export function ScreeningPanel() {
                       : "text-muted-foreground/70 hover:text-foreground",
                   )}
                 >
-                  {STAGE_FILTER_LABELS[f]}（{count}）
+                  {STAGE_LABELS[f]}（{count}）
                 </button>
               );
             })}
           </div>
-
-          {stageFilter === "all" ? (
-            <p className="text-xs text-muted-foreground/70">
-              「全部」檢視：排名為各階段內名次，不同階段分數語意不同、不可直接比較（預設依總分降冪）。
-            </p>
-          ) : null}
 
           <div className="flex items-center gap-3">
             <Button
@@ -504,18 +555,23 @@ export function ScreeningPanel() {
               <thead className="bg-muted/50 text-muted-foreground">
                 <tr>
                   <th className="w-10 px-3 py-2"></th>
-                  {columns.map((c) => (
-                    <th
-                      key={c.key}
-                      onClick={() => toggleSort(c.key)}
-                      className={`cursor-pointer select-none px-3 py-2 font-medium ${
-                        c.numeric ? "text-right" : "text-left"
-                      }`}
-                    >
-                      {c.label}
-                      {sortKey === c.key ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
-                    </th>
-                  ))}
+                  {columns.map((c) => {
+                    const sortable = c.sortable !== false;
+                    return (
+                      <th
+                        key={c.key}
+                        onClick={sortable ? () => toggleSort(c.key) : undefined}
+                        className={cn(
+                          "select-none px-3 py-2 font-medium",
+                          c.numeric ? "text-right" : "text-left",
+                          sortable && "cursor-pointer",
+                        )}
+                      >
+                        {c.label}
+                        {sortable && sortKey === c.key ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody>
@@ -586,57 +642,10 @@ function RowGroup({
       {isExpanded ? (
         <tr className="bg-muted/50">
           <td colSpan={columns.length + 1} className="px-6 py-3">
-            <Detail row={row} />
+            <SignalDetail row={row} />
           </td>
         </tr>
       ) : null}
     </>
-  );
-}
-
-function Detail({ row }: { row: Row }) {
-  const isPre = row.stage === "pre-breakout";
-  return (
-    <div className="space-y-3">
-      {row.warnings.includes("margin-chasing") ? (
-        <div className="rounded border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
-          ⚠ margin-chasing：突破當日三大法人（投信＋外資）淨賣超，且本檔融資餘額近期增速排在自己歷史前
-          20%——散戶追價、法人可能在派發。系統僅標記，未調整分數，請自行判斷是否排除。
-        </div>
-      ) : null}
-      {row.priceSource === "estimated" ? (
-        <div className="rounded border border-warning/30 bg-warning/10 p-2 text-xs text-warning">
-          此檔盤中無成交價，突破判定基於盤中最高價（保守），K 棒形態項為佔位分。
-        </div>
-      ) : null}
-      <div>
-        <div className="mb-1 text-xs font-semibold text-muted-foreground/70">
-          {isPre ? "評分明細（醞釀分項）" : "評分明細（突破 8 分項）"}
-        </div>
-        <div className="grid grid-cols-2 gap-x-8 gap-y-1 sm:grid-cols-4">
-          {scoreEntries(row.scores).map(([k, v]) => (
-            <div key={k} className="flex justify-between">
-              <span className="text-muted-foreground/70">{k}</span>
-              <span className="tabular-nums">{v?.toFixed(1) ?? "—"}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-      {isPre && row.detail ? (
-        <div>
-          <div className="mb-1 text-xs font-semibold text-muted-foreground/70">原始指標</div>
-          <div className="grid grid-cols-2 gap-x-8 gap-y-1 sm:grid-cols-3">
-            {scoreEntries(row.detail).map(([k, v]) => (
-              <div key={k} className="flex justify-between">
-                <span className="text-muted-foreground/70">{k}</span>
-                <span className="tabular-nums">
-                  {v === null ? "—" : Number.isInteger(v) ? v : v.toFixed(3)}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-    </div>
   );
 }

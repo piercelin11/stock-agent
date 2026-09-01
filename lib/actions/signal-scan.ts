@@ -11,6 +11,8 @@ import {
   type SignalStage,
   type SignalSource,
 } from "../../scripts/screening/run-signal-scan";
+import { SPARK_WINDOW, type SparkPoint } from "../dashboard-spark";
+import { buildSparkSeries } from "../spark-series";
 
 // ROADMAP 4.5.3：取代 screening.ts（runScreening）+ intraday.ts（3 個 action）。
 //
@@ -172,6 +174,36 @@ export async function startSignalScan(): Promise<{ started: boolean; reason?: st
 
 export async function getSignalScanProgress(): Promise<SignalScanProgress | null> {
   return readProgress();
+}
+
+// ============================================================================
+// getSignalSpark —— 展開列左欄近 60 交易日走勢圖（按需撈，PLAN §3.1）
+// ============================================================================
+//
+// 純讀 DB、回可序列化 SparkPoint[]。realtime / eod 都用同一支（都讀 DB 歷史，與當下報價源無關）。
+// 查不到 → 回 []（前端顯示「資料不足」）。方向（rising）前端已有 row.changePercent，不放這裡。
+
+export async function getSignalSpark(code: string): Promise<SparkPoint[]> {
+  const [quotes, indicators] = await Promise.all([
+    prisma.dailyQuote.findMany({
+      where: { stockCode: code },
+      orderBy: { date: "desc" },
+      take: SPARK_WINDOW,
+      select: { date: true, close: true },
+    }),
+    prisma.technicalIndicator.findMany({
+      where: { stockCode: code },
+      orderBy: { date: "desc" },
+      take: SPARK_WINDOW,
+      select: { date: true, bollingerMid: true },
+    }),
+  ]);
+  if (quotes.length === 0) return [];
+
+  const midByDate = new Map<number, number | null>();
+  for (const ind of indicators) midByDate.set(ind.date.getTime(), ind.bollingerMid);
+
+  return buildSparkSeries(quotes, midByDate);
 }
 
 export async function getSignalScanResult(): Promise<SignalScanView | null> {

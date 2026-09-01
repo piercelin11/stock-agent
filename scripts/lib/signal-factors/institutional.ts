@@ -99,26 +99,53 @@ export function computeInstitutionalFlow(input: {
   volumeMa20: number | null;
   marginSurgePercentile: number | null; // PLAN §2.2：null = 盤中 / 資料不足 → 不觸發
   config: InstitutionalFlowConfig;
-}): { score: number; degraded: boolean; marginChasing: boolean } {
+}): {
+  score: number;
+  degraded: boolean;
+  marginChasing: boolean;
+  // PLAN §4.2：多回已算好的中繼值給前端 diverging bar 用（不動 score / degraded / marginChasing）。
+  trustRatio: number; // 近 lookbackDays 日投信淨買超合計 ÷ volumeMa20（volumeMa20 缺 → 0）
+  foreignRatio: number; // 同上，外資
+  todayTrustDir: -1 | 0 | 1 | null; // sign(todayTrustNetBuy)；傳入 null → null
+  todayForeignDir: -1 | 0 | 1 | null;
+} {
   const { config } = input;
   const halfWindow = Math.ceil(config.lookbackDays / 2);
+
+  const sign = (v: number): -1 | 0 | 1 => (v > 0 ? 1 : v < 0 ? -1 : 0);
+  const todayTrustDir: -1 | 0 | 1 | null =
+    input.todayTrustNetBuy === null ? null : sign(input.todayTrustNetBuy);
+  const todayForeignDir: -1 | 0 | 1 | null =
+    input.todayForeignNetBuy === null ? null : sign(input.todayForeignNetBuy);
 
   // 1. volumeMa20 缺 / 近 lookbackDays 資料不足一半 → 中性
   const trustSeries = input.trustNetBuyNewestFirst.slice(0, config.lookbackDays);
   const foreignSeries = input.foreignNetBuyNewestFirst.slice(0, config.lookbackDays);
   const dataDays = Math.min(trustSeries.length, foreignSeries.length);
+  const trustSum = trustSeries.reduce((s, v) => s + v, 0);
+  const foreignSum = foreignSeries.reduce((s, v) => s + v, 0);
   if (input.volumeMa20 === null || input.volumeMa20 <= 0 || dataDays < halfWindow) {
-    return { score: 50, degraded: true, marginChasing: false };
+    return {
+      score: 50,
+      degraded: true,
+      marginChasing: false,
+      trustRatio: 0,
+      foreignRatio: 0,
+      todayTrustDir,
+      todayForeignDir,
+    };
   }
 
+  const trustRatio = trustSum / input.volumeMa20;
+  const foreignRatio = foreignSum / input.volumeMa20;
+
   // 2. 近窗淨買超 ÷ volumeMa20 → clip [0, clipDivisor] → ×(100/clipDivisor) → 0~100
-  const toFlowScore = (series: number[]): number => {
-    const sum = series.reduce((s, v) => s + v, 0);
+  const toFlowScore = (sum: number): number => {
     const ratio = sum / input.volumeMa20!;
     return clip(ratio, 0, config.clipDivisor) * (100 / config.clipDivisor);
   };
-  const trustFlow = toFlowScore(trustSeries);
-  const foreignFlow = toFlowScore(foreignSeries);
+  const trustFlow = toFlowScore(trustSum);
+  const foreignFlow = toFlowScore(foreignSum);
 
   // 3. 加權合成
   let score = trustFlow * config.trustWeight + foreignFlow * config.foreignWeight;
@@ -145,5 +172,13 @@ export function computeInstitutionalFlow(input: {
     todayNetSell;
 
   // 6. clip
-  return { score: clip(score, 0, 100), degraded, marginChasing };
+  return {
+    score: clip(score, 0, 100),
+    degraded,
+    marginChasing,
+    trustRatio,
+    foreignRatio,
+    todayTrustDir,
+    todayForeignDir,
+  };
 }

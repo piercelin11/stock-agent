@@ -83,6 +83,22 @@ export interface SignalResult {
   detail?: Record<string, number | null>; // pre-breakout 的原始指標
   degraded: string[]; // 資料不足 / 不確定（語意不變）
   warnings: string[]; // PLAN §4：資料充足、系統明確發現的風險訊號（目前只有 "margin-chasing"）
+  // PLAN §4.1：展開列三欄用的中繼值。只在 breakout-day / extended 的 push 帶；pre-breakout undefined。
+  volumeRatio?: number; // 觸發量比（今日 volume / volumeMa20）
+  inst?: {
+    trustRatio: number; // 近 lookbackDays 日投信淨買超 ÷ volumeMa20
+    foreignRatio: number; // 同上，外資
+    todayTrustDir: -1 | 0 | 1 | null; // 今日投信淨買超方向（null = 盤中無當日資料）
+    todayForeignDir: -1 | 0 | 1 | null;
+  };
+  factors?: {
+    breakoutMarginScore: number; // = scores.breakoutMargin（重述，方便前端一次拿齊）
+    breakoutMarginPct: number; // (close - bollingerUpper) / bollingerUpper * 100
+    proximityShortScore: number; // computeProximityToHigh 短窗分數
+    proximityLongScore: number; // 長窗分數
+    proximityShortPct: number; // 收盤距短窗高點的 % 距離（<= 0）
+    proximityLongPct: number; // 距長窗高點的 % 距離
+  };
 }
 
 export interface SignalScanOutput {
@@ -200,6 +216,18 @@ interface BreakoutFactorOutput {
   };
   degraded: string[];
   warnings: string[]; // PLAN §5.2：目前只有 "margin-chasing"
+  // PLAN §4.4：raw 中繼值，組裝成 SignalResult.inst / .factors 在呼叫端做。
+  raw: {
+    breakoutMarginPct: number;
+    proximityShortScore: number;
+    proximityLongScore: number;
+    proximityShortPct: number;
+    proximityLongPct: number;
+    instTrustRatio: number;
+    instForeignRatio: number;
+    instTodayTrustDir: -1 | 0 | 1 | null;
+    instTodayForeignDir: -1 | 0 | 1 | null;
+  };
 }
 
 function computeBreakoutFactors(
@@ -247,6 +275,8 @@ function computeBreakoutFactors(
   );
   if (proximityResult.degraded) degraded.push("proximityToHigh240");
 
+  const breakoutMarginPct = ((input.close - input.bollingerUpper) / input.bollingerUpper) * 100;
+
   if (input.rsHistoryDays < 2) degraded.push("relativeStrength");
 
   const flow = computeInstitutionalFlow({
@@ -276,6 +306,37 @@ function computeBreakoutFactors(
     },
     degraded,
     warnings,
+    raw: {
+      breakoutMarginPct,
+      proximityShortScore: proximityResult.shortScore,
+      proximityLongScore: proximityResult.longScore,
+      proximityShortPct: proximityResult.shortPct,
+      proximityLongPct: proximityResult.longPct,
+      instTrustRatio: flow.trustRatio,
+      instForeignRatio: flow.foreignRatio,
+      instTodayTrustDir: flow.todayTrustDir,
+      instTodayForeignDir: flow.todayForeignDir,
+    },
+  };
+}
+
+/** PLAN §4.4：把 computeBreakoutFactors 的 raw 中繼值組成 SignalResult.inst / .factors。 */
+function breakoutExtras(factors: BreakoutFactorOutput): Pick<SignalResult, "inst" | "factors"> {
+  return {
+    inst: {
+      trustRatio: factors.raw.instTrustRatio,
+      foreignRatio: factors.raw.instForeignRatio,
+      todayTrustDir: factors.raw.instTodayTrustDir,
+      todayForeignDir: factors.raw.instTodayForeignDir,
+    },
+    factors: {
+      breakoutMarginScore: factors.scores.breakoutMargin,
+      breakoutMarginPct: factors.raw.breakoutMarginPct,
+      proximityShortScore: factors.raw.proximityShortScore,
+      proximityLongScore: factors.raw.proximityLongScore,
+      proximityShortPct: factors.raw.proximityShortPct,
+      proximityLongPct: factors.raw.proximityLongPct,
+    },
   };
 }
 
@@ -604,6 +665,8 @@ async function runEod(
       scores: factors.scores,
       degraded: factors.degraded,
       warnings: factors.warnings,
+      volumeRatio: s.volumeRatio!,
+      ...breakoutExtras(factors),
     });
   }
 
@@ -1075,6 +1138,8 @@ async function runRealtime(
       scores: factors.scores,
       degraded: factors.degraded,
       warnings: factors.warnings,
+      volumeRatio: s.volumeRatio!,
+      ...breakoutExtras(factors),
     });
   }
 
