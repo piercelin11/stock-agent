@@ -1,9 +1,9 @@
 "use server";
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
 import { prisma } from "../prisma";
 import { revalidatePath } from "next/cache";
+import { readLatestScan, type LatestScan } from "../latest-scan";
+import { resolveDataContext } from "../data-context";
 import { Market } from "../../generated/prisma/client";
 import {
   computeCandleShape,
@@ -37,7 +37,6 @@ import { buildSparkSeries } from "../spark-series";
 const { score } = resolveBreakoutConfig();
 const BASE_MAX_WINDOW = score.baseMaxWindowDays; // 240
 const BASE_MIN_HISTORY = score.baseMinHistoryDays; // 40
-const RS_RESULT_DIR = join(process.cwd(), "data", "signal-scan-results");
 
 // 醞釀階段（pre-breakout）法人籌碼區塊用（PLAN 醞釀中卡片法人籌碼區塊）
 const ACC = resolveAccumulationConfig().score;
@@ -110,76 +109,7 @@ function taipeiTodayIso(): string {
   return new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
 }
 
-// ============================================================================
-// 最近 eod 掃描結果讀檔（不現算全市場）——供「強度 PR」欄 + 醞釀階段法人分數共用
-// ============================================================================
-
-interface ScanResultRow {
-  code: string;
-  stage?: string;
-  scores?: {
-    relativeStrength?: number;
-    trustScore?: number;
-    otherInstScore?: number;
-  };
-  detail?: {
-    trustNetRatio?: number | null;
-    otherInstRatio?: number | null;
-  };
-}
-
-// 醞釀階段每檔從掃描結果拿的欄位（不在名單 → 該 code 無此 entry）
-interface ScanPreInst {
-  trustScore: number | null;
-  otherInstScore: number | null;
-  trustNetRatio: number | null;
-  otherInstRatio: number | null;
-}
-
-interface LatestScan {
-  scanDate: string;
-  prByCode: Map<string, number>; // stage 不限：relativeStrength（強度 PR 欄）
-  preInstByCode: Map<string, ScanPreInst>; // 只 pre-breakout：trustScore / otherInstScore / detail
-}
-
-function readLatestScan(): LatestScan | null {
-  if (!existsSync(RS_RESULT_DIR)) return null;
-  // 只讀 {YYYY-MM-DD}.json（eod 定案結果）；跳過 {timestamp}.json（realtime）與 progress.json
-  const files = readdirSync(RS_RESULT_DIR)
-    .filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f))
-    .sort();
-  const latest = files.at(-1);
-  if (!latest) return null;
-
-  try {
-    const parsed = JSON.parse(readFileSync(join(RS_RESULT_DIR, latest), "utf8")) as {
-      date?: string;
-      results?: ScanResultRow[];
-    };
-    const scanDate = parsed.date ?? latest.replace(".json", "");
-    const prByCode = new Map<string, number>();
-    const preInstByCode = new Map<string, ScanPreInst>();
-    for (const r of parsed.results ?? []) {
-      const rs = r.scores?.relativeStrength;
-      if (typeof rs === "number") prByCode.set(r.code, rs);
-      if (r.stage === "pre-breakout") {
-        preInstByCode.set(r.code, {
-          trustScore:
-            typeof r.scores?.trustScore === "number" ? r.scores.trustScore : null,
-          otherInstScore:
-            typeof r.scores?.otherInstScore === "number" ? r.scores.otherInstScore : null,
-          trustNetRatio:
-            typeof r.detail?.trustNetRatio === "number" ? r.detail.trustNetRatio : null,
-          otherInstRatio:
-            typeof r.detail?.otherInstRatio === "number" ? r.detail.otherInstRatio : null,
-        });
-      }
-    }
-    return { scanDate, prByCode, preInstByCode };
-  } catch {
-    return null;
-  }
-}
+// 最近掃描結果讀檔（供「強度 PR」欄 + 醞釀階段法人分數）已搬到 lib/latest-scan.ts（PLAN 2 §1）。
 
 // ============================================================================
 // listWatchlist —— 卡片 gallery 資料
@@ -194,14 +124,11 @@ export async function listWatchlist(): Promise<WatchlistCardRow[]> {
   });
   if (items.length === 0) return [];
 
-  // 資料源判斷：DB 最新一般股票交易日 == 台北今日？
-  const latestQuote = await prisma.dailyQuote.findFirst({
-    where: { stock: { securityType: "stock" } },
-    orderBy: { date: "desc" },
-    select: { date: true },
-  });
-  const todayIso = taipeiTodayIso();
-  const dataFresh = latestQuote ? isoDate(latestQuote.date) === todayIso : false;
+  // 資料源判斷：收斂到 resolveDataContext（PLAN 2 §2.3）。
+  // 本份不改盤中資料來源（仍是 !dataFresh 就進頁打 MIS，見下）——那是 PLAN 3 §5。
+  // 這裡只是「把日期判斷換成 helper」，行為等價（dataFresh == ctx.mode === "eod"）。
+  const ctx = await resolveDataContext(prisma);
+  const dataFresh = ctx.mode === "eod";
 
   // 非當日 → 打 MIS 盤中報價（一次抓全部觀察股；< 50 檔 = 1 批）
   let misQuotes: Map<string, MisQuote> | null = null;
@@ -220,7 +147,7 @@ export async function listWatchlist(): Promise<WatchlistCardRow[]> {
     }
   }
 
-  const scan = readLatestScan();
+  const scan = readLatestScan(); // 預設：只讀 eod 定案 {YYYY-MM-DD}.json
 
   const rows = await Promise.all(
     items.map((item) => buildCardRow(item, dataFresh, misQuotes, elapsedRatio, scan)),

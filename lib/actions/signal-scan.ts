@@ -10,9 +10,11 @@ import {
   type SignalResult,
   type SignalStage,
   type SignalSource,
+  type WatchlistQuote,
 } from "../../scripts/screening/run-signal-scan";
 import { SPARK_WINDOW, type SparkPoint } from "../dashboard-spark";
 import { buildSparkSeries } from "../spark-series";
+import { resolveDataContext } from "../data-context";
 
 // ROADMAP 4.5.3：取代 screening.ts（runScreening）+ intraday.ts（3 個 action）。
 //
@@ -42,6 +44,7 @@ export interface SignalScanView {
   stats: Record<string, number>;
   warnings: string[];
   results: SignalResult[];
+  watchlistQuotes?: WatchlistQuote[]; // PLAN 2 §3.2：透傳
 }
 
 export interface SignalScanProgress {
@@ -73,6 +76,7 @@ function toView(out: SignalScanOutput): SignalScanView {
     results: out.results,
   };
   if (out.elapsedRatio !== undefined) view.elapsedRatio = out.elapsedRatio;
+  if (out.watchlistQuotes !== undefined) view.watchlistQuotes = out.watchlistQuotes;
   return view;
 }
 
@@ -84,15 +88,13 @@ export async function getScanMode(): Promise<{
   source: SignalSource;
   latestEodDate: string | null;
 }> {
-  const todayIso = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
-  const latest = await prisma.dailyQuote.findFirst({
-    where: { stock: { securityType: "stock" } },
-    orderBy: { date: "desc" },
-    select: { date: true },
-  });
-  const latestEodDate = latest ? latest.date.toISOString().slice(0, 10) : null;
-  const source: SignalSource = latestEodDate === todayIso ? "eod" : "realtime";
-  return { source, latestEodDate };
+  // PLAN 2 §2.3：日期判斷收斂到 resolveDataContext。
+  // eod → source "eod"；intraday / stale → source "realtime"（今天還沒 DailyQuote，走盤中掃描）。
+  const ctx = await resolveDataContext(prisma);
+  return {
+    source: ctx.mode === "eod" ? "eod" : "realtime",
+    latestEodDate: ctx.latestEodDate || null,
+  };
 }
 
 // ============================================================================
@@ -100,6 +102,8 @@ export async function getScanMode(): Promise<{
 // ============================================================================
 
 export async function runSignalScanEod(): Promise<SignalScanView> {
+  // 「強制 eod 補算」語意，不需要 context 判斷；且 runSignalScan 要 Date 物件。
+  // 日期模式判斷見 lib/data-context.ts（getScanMode 走那支）。
   const latest = await prisma.dailyQuote.findFirst({
     where: { stock: { securityType: "stock" } },
     orderBy: { date: "desc" },
