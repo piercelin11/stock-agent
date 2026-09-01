@@ -1,36 +1,35 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import {
-  runSignalScanEod,
-  startSignalScan,
-  getSignalScanProgress,
-  getSignalScanResult,
-  getScanMode,
-  getLatestScanMeta,
+  getScreeningContext,
+  getScreeningResult,
   type SignalScanView,
-  type SignalScanProgress,
   type SignalStage,
-  type SignalSource,
 } from "../../lib/actions/signal-scan";
+import type { DataMode } from "../../lib/data-context";
 import { addToWatchlist } from "../../lib/actions/watchlist";
 import { cn } from "../../lib/cn";
 import { Button } from "../ui/Button";
 import { STAGE_LABELS, STAGE_PILL_CLASS, STAGE_ORDER } from "../signal/labels";
 import { SignalDetail } from "./SignalDetail";
 
-// ROADMAP 4.5.3：三分頁（第一根突破 / 冷水區醞釀 / 盤中即時掃描）收斂成單頁 + 階段 filter。
-// 「跑掃描」一顆按鈕，由 getScanMode() 決定文案與行為：
-//   eod  → 「跑盤後掃描」，按 = runSignalScanEod()（秒級同步）
-//   realtime → 「開始盤中掃描」，按 = startSignalScan() + 輪詢 progress.json（背景任務）
+// PLAN 4：選股頁拉回跟 watchlist 同一心智模型——進頁問 resolveDataContext()，它說用哪份就用哪份，
+// 讀一次就定住（要看最新自己重整）。移除盤後/盤中 toggle、realtime 背景任務（spawn + 輪詢
+// progress.json + 接管）、自動刷新（setInterval 60 秒比 timestamp）——這一大坨狀態機是「昨」
+// badge 事故的根因。realtime 掃描的背景產出者只剩 intraday-scan.ts（launchd 每 30 分）。
+//
+// 進頁：getScreeningContext() → 狀態行文案；getScreeningResult() → 依 mode 回結果
+//   eod            → 同步跑一次盤後掃描（秒級），使用者不用按任何按鈕。
+//   intraday/stale → 讀 launchd 產出的最新 realtime {timestamp}.json。
+// 一顆按鈕手動重跑：eod =「重跑盤後掃描」（秒級）；realtime =「立即掃描」（同步卡 UI ~30 秒）。
 
 type SortDir = "asc" | "desc";
 
-// tab 收斂成三階段（PLAN §1）：去掉「全部」，StageFilter 直接 = SignalStage。
+// tab 收斂成三階段：StageFilter 直接 = SignalStage。
 type StageFilter = SignalStage;
 
 // 順序固定：首次突破 → 延續爆發 → 醞釀中；預設選中「首次突破」。
-// STAGE_LABELS / STAGE_PILL_CLASS / STAGE_ORDER 已抽到 components/signal/labels.ts（screening + watchlist 共用）。
 const STAGE_TABS: SignalStage[] = STAGE_ORDER;
 
 // stage → WatchlistItem.source 映射（schema 的 source enum 不動）
@@ -41,7 +40,6 @@ function stageToSource(stage: SignalStage): "breakout" | "accumulation" {
 type Row = SignalScanView["results"][number];
 
 // 籌碼 chip（表格「籌碼」欄）：一句話結論。醞釀中階段後端無 inst → 呼叫端不渲染此欄內容。
-// 詳細組合邏輯在展開列的 InstitutionalFlow；表格只給極簡結論 + 「追」/「昨」badge。
 function instCell(r: Row): React.ReactNode {
   if (!r.inst) return <span className="text-muted-foreground/50">—</span>;
   const marginChasing = r.warnings.includes("margin-chasing");
@@ -165,27 +163,19 @@ const columns: Column[] = [
   },
 ];
 
-export function ScreeningPanel() {
-  const [mode, setMode] = useState<{ source: SignalSource; latestEodDate: string | null } | null>(
-    null,
-  );
-  // 使用者手動選的模式（預設 = getScanMode() 的判斷結果，可覆蓋）
-  const [chosenMode, setChosenMode] = useState<SignalSource | null>(null);
+interface ScreeningCtx {
+  mode: DataMode;
+  asOfDate: string;
+  latestEodDate: string | null;
+  hasScan: boolean;
+}
 
+export function ScreeningPanel() {
+  const [ctx, setCtx] = useState<ScreeningCtx | null>(null);
   const [view, setView] = useState<SignalScanView | null>(null);
+  const [loading, setLoading] = useState(true);
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
-
-  // realtime 背景任務 state
-  const [progress, setProgress] = useState<SignalScanProgress | null>(null);
-  const [scanBusy, setScanBusy] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // 自動刷新輪詢用 ref：讓 interval callback 讀最新 view.queriedAt / scanBusy 而不必重建 interval。
-  const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const viewRef = useRef<SignalScanView | null>(null);
-  const scanBusyRef = useRef(false);
-  viewRef.current = view;
-  scanBusyRef.current = scanBusy;
 
   const [stageFilter, setStageFilter] = useState<StageFilter>("breakout-day");
   const [sortKey, setSortKey] = useState("rank");
@@ -203,164 +193,46 @@ export function ScreeningPanel() {
     setAddMsg(null);
   }
 
-  // 一進頁問 scan mode（決定 toggle 的預設值；使用者之後可手動切）
+  // 進頁載入：問 context → 依 mode 拿結果（eod 同步跑、intraday/stale 讀最新 realtime JSON）。
+  // 讀一次就定住，不自動輪詢（跟 watchlist 一致）。
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const m = await getScanMode();
-      if (cancelled) return;
-      setMode(m);
-      setChosenMode((prev) => prev ?? m.source);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // ---- realtime 輪詢 ----
-  const stopPolling = useCallback(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-  }, []);
-
-  const startPolling = useCallback(() => {
-    stopPolling();
-    pollRef.current = setInterval(async () => {
-      const p = await getSignalScanProgress();
-      if (!p) return;
-      setProgress(p);
-      if (p.status === "done") {
-        stopPolling();
-        setScanBusy(false);
-        const res = await getSignalScanResult();
+      try {
+        const c = await getScreeningContext();
+        if (cancelled) return;
+        setCtx(c);
+        const res = await getScreeningResult();
+        if (cancelled) return;
         setView(res);
         resetTableState();
-      } else if (p.status === "error") {
-        stopPolling();
-        setScanBusy(false);
-        setError(p.error ?? "掃描失敗");
-      }
-    }, 2000);
-  }, [stopPolling]);
-
-  // 掛載時若 progress.json 還在 running（切走又回來），接管輪詢。
-  // 但 running 逾時（子進程死掉、或 CLI 手動跑留下的殘檔）→ 當它不存在，不接管。
-  const STALE_MS = 90_000;
-  // done 態的 progress.json 會無限期殘留（上次 realtime 掃描的終態，直到下次掃描才被覆蓋）。
-  // 進頁撿 done 結果只在「盤中模式 + 這份 done 夠新」時才合理——否則盤後進頁會撿到幾小時前的
-  // realtime 殘檔顯示，每檔掛「昨」badge（realtime 路徑刻意不採當日法人）。2026-09-01 事故。
-  const DONE_STALE_MS = 30 * 60_000; // 30 分：對齊 launchd 盤中掃描間隔
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const p = await getSignalScanProgress();
-      if (cancelled) return;
-      const isFresh =
-        p?.status === "running" && Date.now() - new Date(p.updatedAt).getTime() < STALE_MS;
-      if (p && (p.status !== "running" || isFresh)) setProgress(p);
-      if (isFresh) {
-        setScanBusy(true);
-        startPolling();
-        return;
-      }
-      // done 且無 view：僅在「done 夠新」（30 分內，對齊 launchd 盤中掃描間隔）時撿回顯示。
-      // 這擋掉「盤後進頁撿到幾小時前的 realtime 殘檔」——舊 realtime 掃描的 done 態會無限期殘留。
-      // 註：這裡不加 mode 守衛（mode 由 useEffect A 非同步設，此 effect 掛載即跑可能還是 null）；
-      //     DONE_STALE_MS 已足夠——盤後手動跑的 realtime 殘檔通常都超過 30 分。
-      const doneFresh =
-        p?.status === "done" && Date.now() - new Date(p.updatedAt).getTime() < DONE_STALE_MS;
-      if (p?.status === "done" && !view && doneFresh) {
-        const res = await getSignalScanResult();
-        if (!cancelled) setView(res);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
     return () => {
       cancelled = true;
-      stopPolling();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => stopPolling, [stopPolling]);
-
-  // ---- 自動刷新（PLAN 3 §4.2）----
-  // 每 60 秒問 getLatestScanMeta()（只看最新 realtime {timestamp}.json），若比目前畫面新 → 重載表格。
-  // 資料來源：intraday-scan.ts（launchd 每 30 分）或使用者手動 realtime 掃描產出的新 {timestamp}.json。
-  // 掛載即啟動、卸載清除。
-  //
-  // **只在畫面目前顯示 realtime 結果時才作用**（`v.source === "realtime"`）：自動刷新是「盤中每半小時
-  // 換上新掃描」的機制。畫面在 eod（盤後定案）結果時不該去撿 realtime 檔——2026-09-01 事故：同一天
-  // 既跑過盤後又跑過盤中，realtime 檔 queriedAt 剛好晚 2 分鐘，被自動刷新當「較新」拿來蓋掉正式盤後
-  // 結果，導致每檔掛「昨」badge（realtime 路徑刻意不採當日法人）。
-  // scanBusy（手動 realtime 掃描進行中）時也跳過，避免掃到一半被半成品覆蓋。
-  useEffect(() => {
-    autoRefreshRef.current = setInterval(async () => {
-      if (scanBusyRef.current) return;
-      const v = viewRef.current;
-      if (!v || v.source !== "realtime") return;
-      const meta = await getLatestScanMeta();
-      if (!meta || !meta.timestamp) return;
-      if (new Date(meta.timestamp).getTime() > new Date(v.queriedAt).getTime()) {
-        const res = await getSignalScanResult();
-        if (res) {
-          setView(res);
-          resetTableState();
-        }
-      }
-    }, 60_000);
-    return () => {
-      if (autoRefreshRef.current) {
-        clearInterval(autoRefreshRef.current);
-        autoRefreshRef.current = null;
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function runEod() {
+  // 「跑掃描」按鈕：eod → 重跑盤後（秒級）；intraday/stale → 立即掃描（同步卡 UI ~30 秒）。
+  function rerun() {
+    if (!ctx) return;
     setError(null);
     setAddMsg(null);
+    const force = ctx.mode === "eod" ? "eod" : "realtime";
     startTransition(async () => {
       try {
-        const v = await runSignalScanEod();
-        setView(v);
+        const res = await getScreeningResult({ force });
+        setView(res);
         resetTableState();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
     });
   }
-
-  async function runRealtime() {
-    setError(null);
-    setAddMsg(null);
-    const res = await startSignalScan();
-    if (!res.started) {
-      setError(res.reason ?? "無法啟動掃描");
-      return;
-    }
-    setView(null);
-    setProgress(null);
-    setScanBusy(true);
-    resetTableState();
-    startPolling();
-  }
-
-  // 按「跑掃描」：依使用者選的模式分派。
-  // 選「盤後」但今天 DB 尚無資料（mode.source === "realtime"）→ 實際改跑盤中，UI 另有提示。
-  function runScan() {
-    if (chosenMode === "eod" && mode?.source === "eod") {
-      runEod();
-    } else {
-      void runRealtime();
-    }
-  }
-
-  // 選了盤後、但今天還沒有盤後資料 → 會 fallback 到盤中
-  const eodFallbackToRealtime = chosenMode === "eod" && mode?.source === "realtime";
-  const effectiveMode: SignalSource = chosenMode === "eod" && !eodFallbackToRealtime ? "eod" : "realtime";
 
   function toggleSort(key: string) {
     const col = columns.find((c) => c.key === key);
@@ -369,7 +241,6 @@ export function ScreeningPanel() {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSortKey(key);
-      // 純表格排序偏好：totalScore 預設降冪（無害）
       setSortDir(key === "totalScore" ? "desc" : "asc");
     }
   }
@@ -434,40 +305,39 @@ export function ScreeningPanel() {
     });
   }
 
-  const isRealtime = effectiveMode === "realtime";
   const estimatedCount = view?.stats.estimatedCount ?? 0;
+  const isRealtimeMode = ctx !== null && ctx.mode !== "eod";
+
+  // 狀態行文案（§1）
+  function statusLine(): string {
+    if (!ctx) return "";
+    if (ctx.mode === "eod") return `盤後定案 · ${ctx.asOfDate}`;
+    if (ctx.mode === "intraday")
+      return `盤中即時 · 背景每 30 分更新，重整頁面看最新 · 截至 ${ctx.asOfDate}`;
+    // stale
+    return ctx.hasScan
+      ? `盤後未跑，顯示最近一次掃描（${ctx.asOfDate}）`
+      : "尚無掃描結果";
+  }
+
+  const rerunLabel = ctx?.mode === "eod" ? "重跑盤後掃描" : "立即掃描";
 
   return (
     <div className="space-y-4">
-      {/* 模式切換 + 掃描按鈕 */}
+      {/* 狀態行 + 手動重跑按鈕 */}
       <div className="flex flex-wrap items-center gap-4">
-        {mode === null ? (
-          <span className="text-sm text-muted-foreground/70">判斷掃描模式中…</span>
+        {loading || !ctx ? (
+          <span className="text-sm text-muted-foreground/70">載入中…</span>
         ) : (
           <>
-            <div className="inline-flex overflow-hidden rounded-lg border border-border text-sm">
-              {(["eod", "realtime"] as SignalSource[]).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setChosenMode(m)}
-                  disabled={scanBusy || isPending}
-                  className={cn(
-                    "px-3 py-1.5 disabled:opacity-50",
-                    chosenMode === m
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-card text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {m === "eod" ? "盤後定案" : "盤中即時"}
-                </button>
-              ))}
-            </div>
-            <Button
-              onClick={runScan}
-              disabled={scanBusy || isPending}
-            >
-              {scanBusy ? "掃描中…" : isPending ? "計算中…" : "跑掃描"}
+            <Button onClick={rerun} disabled={isPending}>
+              {isPending
+                ? isRealtimeMode
+                  ? "掃描中…（約 30 秒）"
+                  : "計算中…"
+                : rerunLabel}
             </Button>
+            <span className="text-sm text-muted-foreground">{statusLine()}</span>
           </>
         )}
 
@@ -485,50 +355,17 @@ export function ScreeningPanel() {
                 估 {estimatedCount} 檔
               </span>
             ) : null}
-            {view.source === "realtime" ? (
-              <span className="ml-2 text-xs text-muted-foreground/70">每分鐘自動更新</span>
-            ) : null}
           </span>
-        ) : scanBusy && progress?.status === "running" ? (
-          <span className="text-sm text-muted-foreground">
-            {progress.phase === "scoring"
-              ? "評分中…"
-              : `抓取即時報價中… ${progress.fetchedBatches}/${progress.totalBatches || "?"} 批`}
-          </span>
-        ) : scanBusy ? (
-          <span className="text-sm text-muted-foreground">啟動中…</span>
         ) : null}
       </div>
 
-      {/* 選了盤後但今天還沒有盤後資料 → 會 fallback 盤中 */}
-      {eodFallbackToRealtime ? (
-        <div className="rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
-          今天尚無盤後資料（daily-pipeline 未跑或非交易日），按「跑掃描」會改跑盤中即時掃描。
-          {mode?.latestEodDate ? `最新盤後資料日：${mode.latestEodDate}。` : null}
-        </div>
-      ) : null}
-
       {/* realtime 常駐警語 */}
-      {isRealtime ? (
+      {isRealtimeMode ? (
         <div className="rounded border border-border bg-muted/50 p-3 text-sm text-muted-foreground">
-          盤中即時掃描：對 <code>mis.twse.com.tw</code> 即時報價跑全市場快照，約需 20–30 秒。
-          收盤價 / 量 / OHLC / 布林上軌為即時或估計值，<strong>與盤後結果不可直接比較</strong>。
-          缺成交價的檔以盤中最高價代入（列尾標「估」）。可切走再回來看進度。
-        </div>
-      ) : null}
-
-      {/* realtime 進度條 */}
-      {scanBusy && progress?.status === "running" && progress.totalBatches > 0 ? (
-        <div className="h-2 w-full overflow-hidden rounded bg-muted">
-          <div
-            className="h-full bg-primary transition-all"
-            style={{
-              width: `${Math.min(
-                100,
-                Math.round((progress.fetchedBatches / progress.totalBatches) * 100),
-              )}%`,
-            }}
-          />
+          盤中即時掃描每 30 分由背景排程（launchd）自動跑，對 <code>mis.twse.com.tw</code>{" "}
+          即時報價跑全市場快照。收盤價 / 量 / OHLC / 布林上軌為即時或估計值，
+          <strong>與盤後結果不可直接比較</strong>。缺成交價的檔以盤中最高價代入（列尾標「估」）。
+          按「立即掃描」會現場同步跑一次，約需 20–30 秒。
         </div>
       ) : null}
 
@@ -548,7 +385,11 @@ export function ScreeningPanel() {
         </div>
       ) : null}
 
-      {view?.isNonTradingDay ? (
+      {!loading && !view ? (
+        <div className="rounded border border-border bg-muted/50 p-3 text-sm text-muted-foreground">
+          尚無盤中掃描結果——稍候（背景每 30 分自動跑）或按「立即掃描」。
+        </div>
+      ) : view?.isNonTradingDay ? (
         <div className="rounded border border-warning/30 bg-warning/10 p-3 text-sm text-warning">
           最新交易日尚無資料，請先跑 daily-pipeline。
         </div>

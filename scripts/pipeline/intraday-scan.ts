@@ -5,10 +5,11 @@
 // 是 → runSignalScan(new Date(), { source: "realtime" }) 寫 {timestamp}.json（runSignalScan 本體負責）。
 // **不寫 DB。** 盤中衍生值不落地，遵循專案「衍生值不落地」哲學。
 //
-// 與 _run-signal-scan.ts 的差異：
-//   - _run-signal-scan.ts：被 Server Action startSignalScan() spawn、要寫 progress.json 終態給前端輪詢。
-//   - intraday-scan.ts：被 launchd 排程觸發、無前端在等、只需靜默跑完寫 JSON。
-//     （runSignalScan 的 runRealtime 內部仍會 writeProgressDone()，無害——下次手動掃描前會被覆蓋。）
+// PLAN 4 起這是 realtime 掃描唯一的背景執行者——前端不再自己 spawn（_run-signal-scan.ts +
+// startSignalScan() 已刪）。選股頁進頁只讀最新 {timestamp}.json；「立即掃描」按鈕改成 Server
+// Action 內同步跑（卡 UI ~30 秒），也不 spawn。
+//   （runSignalScan 的 runRealtime 內部仍會 writeProgressDone() 寫 progress.json，無害——
+//    前端不讀了，只剩 CLI 手動跑時的紀錄。）
 
 import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";

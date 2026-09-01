@@ -1,7 +1,6 @@
 "use server";
 
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { prisma } from "../prisma";
 import {
@@ -14,23 +13,25 @@ import {
 } from "../../scripts/screening/run-signal-scan";
 import { SPARK_WINDOW, type SparkPoint } from "../dashboard-spark";
 import { buildSparkSeries } from "../spark-series";
-import { resolveDataContext } from "../data-context";
+import { resolveDataContext, type DataMode } from "../data-context";
 
-// ROADMAP 4.5.3：取代 screening.ts（runScreening）+ intraday.ts（3 個 action）。
+// ROADMAP 4.5.3 / PLAN 4：選股頁資料源統一走 resolveDataContext()。
 //
-// eod 模式：同步在 Next 進程內 import 呼叫 runSignalScan（秒級），傳 prisma 單例。
-// realtime 模式：背景任務（比照舊 intraday）——spawn detached 子進程跑 _run-signal-scan.ts，
-//   子進程逐批覆寫 progress.json，這裡輪詢讀檔，client setInterval poll。
+// 前端一進頁：getScreeningContext() 拿 { mode, asOfDate, latestEodDate, hasScan } →
+//   getScreeningResult() 依 mode 回對應結果：
+//     eod            → 先讀 data/signal-scan-results/{date}.json（無時間戳）；沒有才同步
+//                       runSignalScan 算一次（秒級）並寫入。daily-pipeline 不會自動產出這份檔
+//                       （run-signal-scan.ts 獨立手動執行，不進 pipeline）——只有「當天第一次
+//                       進選股頁」或手動重跑會觸發計算，同一天內之後進頁都是讀檔，不重算。
+//     intraday/stale → 讀最新 realtime {timestamp}.json（launchd 的 intraday-scan.ts 產出）。
+//   手動重跑：getScreeningResult({ force }) —— eod 一律重算並覆寫該檔；realtime 同步卡 UI ~30 秒
+//     （不再 spawn 背景子進程 + 輪詢 progress.json，PLAN 4 移除那套狀態機）。
 //
-// 只 import type { SignalScanOutput, ... }（type-only）——runSignalScan 本體會被 import 進 bundle，
-// 但它已在 screening.ts 舊模式運作過（同步 import 純函式），沿用同一套。realtime 的 MIS 抓取只走
-// 子進程，不進 bundle。
+// runSignalScan 本體會被 import 進 bundle（同步純函式，screening.ts 舊模式已這樣跑過）；
+// realtime 的 MIS 抓取在同步呼叫裡完成，會卡住 Server Action ~30 秒——這是 PLAN 4 的取捨。
 
 const REPO_ROOT = process.cwd();
 const RESULT_DIR = join(REPO_ROOT, "data", "signal-scan-results");
-const PROGRESS_PATH = join(RESULT_DIR, "progress.json");
-
-const STALE_MS = 90_000;
 
 // ---- view 型別（邊界轉換後的可序列化版；SignalResult 已全是 number/string）----
 export type { SignalStage, SignalSource };
@@ -45,24 +46,6 @@ export interface SignalScanView {
   warnings: string[];
   results: SignalResult[];
   watchlistQuotes?: WatchlistQuote[]; // PLAN 2 §3.2：透傳
-}
-
-export interface SignalScanProgress {
-  status: "running" | "done" | "error";
-  phase: "fetching-quotes" | "scoring" | "done" | "error";
-  queriedAt: string;
-  fetchedBatches: number;
-  totalBatches: number;
-  failedCount: number;
-  startedAt: string;
-  updatedAt: string;
-  warnings: string[];
-  error: string | null;
-}
-
-function atomicWrite(path: string, obj: unknown): void {
-  writeFileSync(`${path}.tmp`, JSON.stringify(obj, null, 2));
-  renameSync(`${path}.tmp`, path);
 }
 
 function toView(out: SignalScanOutput): SignalScanView {
@@ -80,104 +63,106 @@ function toView(out: SignalScanOutput): SignalScanView {
   return view;
 }
 
-// ============================================================================
-// getScanMode —— 前端一進頁先問這個，決定顯示「跑盤後掃描」還是「開始盤中掃描」
-// ============================================================================
-
-export async function getScanMode(): Promise<{
-  source: SignalSource;
-  latestEodDate: string | null;
-}> {
-  // PLAN 2 §2.3：日期判斷收斂到 resolveDataContext。
-  // eod → source "eod"；intraday / stale → source "realtime"（今天還沒 DailyQuote，走盤中掃描）。
-  const ctx = await resolveDataContext(prisma);
-  return {
-    source: ctx.mode === "eod" ? "eod" : "realtime",
-    latestEodDate: ctx.latestEodDate || null,
-  };
-}
-
-// ============================================================================
-// eod 模式：同步跑
-// ============================================================================
-
-export async function runSignalScanEod(): Promise<SignalScanView> {
-  // 「強制 eod 補算」語意，不需要 context 判斷；且 runSignalScan 要 Date 物件。
-  // 日期模式判斷見 lib/data-context.ts（getScanMode 走那支）。
-  const latest = await prisma.dailyQuote.findFirst({
-    where: { stock: { securityType: "stock" } },
-    orderBy: { date: "desc" },
-    select: { date: true },
-  });
-  if (!latest) {
-    return {
-      date: "",
-      source: "eod",
-      queriedAt: new Date().toISOString(),
-      isNonTradingDay: true,
-      stats: {},
-      warnings: ["資料庫尚無 DailyQuote，請先跑 daily-pipeline"],
-      results: [],
-    };
-  }
-  // 傳前端 Prisma 單例 + 強制 eod（跑 DB 最新交易日）。純函式偵測 options.prisma 時不 $disconnect。
-  const out = await runSignalScan(latest.date, { prisma, source: "eod" });
-  return toView(out);
-}
-
-// ============================================================================
-// realtime 模式：背景任務
-// ============================================================================
-
-function readProgress(): SignalScanProgress | null {
-  if (!existsSync(PROGRESS_PATH)) return null;
+/** 最新 realtime 掃描檔（{timestamp}.json）。壞檔 / 無檔回 null。 */
+function readLatestRealtimeFile(): SignalScanOutput | null {
+  if (!existsSync(RESULT_DIR)) return null;
+  const files = readdirSync(RESULT_DIR)
+    .filter((f) => /^\d{4}-\d{2}-\d{2}T.*\.json$/.test(f))
+    .sort();
+  const latest = files.at(-1);
+  if (!latest) return null;
   try {
-    return JSON.parse(readFileSync(PROGRESS_PATH, "utf8")) as SignalScanProgress;
+    return JSON.parse(readFileSync(join(RESULT_DIR, latest), "utf8")) as SignalScanOutput;
   } catch {
     return null;
   }
 }
 
-export async function startSignalScan(): Promise<{ started: boolean; reason?: string }> {
-  const current = readProgress();
-  if (
-    current &&
-    current.status === "running" &&
-    Date.now() - new Date(current.updatedAt).getTime() < STALE_MS
-  ) {
-    return { started: false, reason: "已有掃描進行中" };
+/** eod 掃描檔（{date}.json，無時間戳）。壞檔 / 無檔回 null。 */
+function readEodFile(dateStr: string): SignalScanOutput | null {
+  const path = join(RESULT_DIR, `${dateStr}.json`);
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as SignalScanOutput;
+  } catch {
+    return null;
   }
-
-  mkdirSync(RESULT_DIR, { recursive: true });
-
-  const startedAt = new Date().toISOString();
-  atomicWrite(PROGRESS_PATH, {
-    status: "running",
-    phase: "fetching-quotes",
-    queriedAt: startedAt,
-    fetchedBatches: 0,
-    totalBatches: 0,
-    failedCount: 0,
-    startedAt,
-    updatedAt: startedAt,
-    warnings: [],
-    error: null,
-  } satisfies SignalScanProgress);
-
-  const tsxCli = join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
-  const script = join(REPO_ROOT, "scripts", "screening", "_run-signal-scan.ts");
-  const child = spawn(process.execPath, [tsxCli, script], {
-    detached: true,
-    stdio: "ignore",
-    cwd: REPO_ROOT,
-  });
-  child.unref();
-
-  return { started: true };
 }
 
-export async function getSignalScanProgress(): Promise<SignalScanProgress | null> {
-  return readProgress();
+// ============================================================================
+// getScreeningContext —— 前端一進頁先問這個，決定狀態行文案 + 有沒有結果可顯示
+// ============================================================================
+//
+// 直接透傳 resolveDataContext() 的關鍵欄位 + hasScan（「有沒有可顯示的掃描結果」）。
+//   eod            → hasScan = 有 latestEodDate（進頁讀 {date}.json，沒有才同步算一次，見下）。
+//   intraday/stale → hasScan = data/signal-scan-results/ 有 realtime {timestamp}.json。
+
+export async function getScreeningContext(): Promise<{
+  mode: DataMode;
+  asOfDate: string;
+  latestEodDate: string | null;
+  hasScan: boolean;
+}> {
+  const ctx = await resolveDataContext(prisma);
+  const hasScan =
+    ctx.mode === "eod" ? Boolean(ctx.latestEodDate) : readLatestRealtimeFile() !== null;
+  return {
+    mode: ctx.mode,
+    asOfDate: ctx.asOfDate,
+    latestEodDate: ctx.latestEodDate || null,
+    hasScan,
+  };
+}
+
+// ============================================================================
+// getScreeningResult —— 單一入口：依 resolveDataContext().mode（或 force）回結果
+// ============================================================================
+
+export async function getScreeningResult(
+  opts: { force?: "eod" | "realtime" } = {},
+): Promise<SignalScanView | null> {
+  const ctx = await resolveDataContext(prisma);
+  const mode = opts.force ?? (ctx.mode === "eod" ? "eod" : "realtime");
+
+  if (mode === "eod") {
+    // 「強制 eod 補算」語意：跑 DB 最新一般股票交易日。runSignalScan 要 Date 物件。
+    const latest = await prisma.dailyQuote.findFirst({
+      where: { stock: { securityType: "stock" } },
+      orderBy: { date: "desc" },
+      select: { date: true },
+    });
+    if (!latest) {
+      return {
+        date: "",
+        source: "eod",
+        queriedAt: new Date().toISOString(),
+        isNonTradingDay: true,
+        stats: {},
+        warnings: ["資料庫尚無 DailyQuote，請先跑 daily-pipeline"],
+        results: [],
+      };
+    }
+    const dateStr = latest.date.toISOString().slice(0, 10);
+    // 非強制重跑：{date}.json 已存在就直接讀，不重算（daily-pipeline 不會自動產出這份檔，
+    // 只有「當天第一次進頁」或手動重跑才需要真的算）。
+    if (opts.force !== "eod") {
+      const cached = readEodFile(dateStr);
+      if (cached) return toView(cached);
+    }
+    // 傳前端 Prisma 單例 + 強制 eod。純函式偵測 options.prisma 時不 $disconnect。
+    // 一律重算並覆寫 {date}.json（含 force:"eod" 手動重跑、與檔案不存在/壞檔的 fallback）。
+    const out = await runSignalScan(latest.date, { prisma, source: "eod" });
+    return toView(out);
+  }
+
+  // realtime：force 時同步跑一次全市場 MIS 掃描（卡 UI ~30 秒，寫 {timestamp}.json）；
+  // 不 force 時讀 launchd 產出的最新 realtime {timestamp}.json（intraday / stale 的一般進頁路徑）。
+  if (opts.force === "realtime") {
+    const out = await runSignalScan(new Date(), { prisma, source: "realtime" });
+    return toView(out);
+  }
+  const rt = readLatestRealtimeFile();
+  return rt ? toView(rt) : null;
 }
 
 // ============================================================================
@@ -208,47 +193,4 @@ export async function getSignalSpark(code: string): Promise<SparkPoint[]> {
   for (const ind of indicators) midByDate.set(ind.date.getTime(), ind.bollingerMid);
 
   return buildSparkSeries(quotes, midByDate);
-}
-
-// ============================================================================
-// getLatestScanMeta —— ScreeningPanel 自動刷新輪詢用（PLAN 3 §4.1）
-// ============================================================================
-//
-// 輕量：只讀最新 realtime 掃描檔（{timestamp}.json）的 meta。ScreeningPanel 每 60 秒問一次，
-// 若回傳的 timestamp 比目前畫面 view.queriedAt 新 → 呼叫 getSignalScanResult() 重載表格
-// （資料來自 intraday-scan.ts / launchd 每 30 分、或使用者手動 realtime 掃描產出的新 {timestamp}.json）。
-//
-// **只認 realtime 檔**（不比 eod）：自動刷新是「盤中每半小時換上新掃描」的機制，只在 realtime
-// 情境有意義；eod 模式下 ScreeningPanel 根本不啟動這個輪詢（見 ScreeningPanel §4.2）。這裡把
-// 來源鎖死 realtime，避免「同一天既跑過盤後又跑過盤中、realtime 檔 queriedAt 剛好較新」時
-// 把正式的盤後結果蓋掉（2026-09-01 事故）。getSignalScanResult() 讀的也是最新 {timestamp}.json，一致。
-
-function readLatestRealtimeFile(): SignalScanOutput | null {
-  if (!existsSync(RESULT_DIR)) return null;
-  const files = readdirSync(RESULT_DIR)
-    .filter((f) => /^\d{4}-\d{2}-\d{2}T.*\.json$/.test(f))
-    .sort();
-  const latest = files.at(-1);
-  if (!latest) return null;
-  try {
-    return JSON.parse(readFileSync(join(RESULT_DIR, latest), "utf8")) as SignalScanOutput;
-  } catch {
-    return null;
-  }
-}
-
-export async function getLatestScanMeta(): Promise<{
-  timestamp: string;
-  source: SignalSource;
-  scanDate: string;
-} | null> {
-  const rt = readLatestRealtimeFile();
-  if (!rt) return null;
-  return { timestamp: rt.queriedAt, source: rt.source, scanDate: rt.date };
-}
-
-export async function getSignalScanResult(): Promise<SignalScanView | null> {
-  const parsed = readLatestRealtimeFile();
-  if (!parsed) return null;
-  return toView(parsed);
 }

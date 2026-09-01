@@ -6,7 +6,7 @@
 
 盤後選股 v2、前端 scaffolding（Next.js + Prisma）、選股 → 挑股 → 觀察清單流程、籌碼面 / 大盤濾網強化（大盤燈號 4.5.1 / 融資融券資料層 4.5.2 / 選股引擎統一 4.5.3 / 舊三支退役 4.5.4）皆已完成。**歷史回測系統**做到「訓練/驗證切分 + 完整 UI」後因效能問題（進儀表板 OOM）於 2026-08-31 放棄，程式碼凍結在 `feat/backtest-ui-3.6-3.7` 分支，不再撿回。
 
-**資料源統一 + 盤中即時性（三份 PLAN，2026-09-01）**：PLAN 1（daily-pipeline 冷進程穩定性——TPEx 非致命 + 冷連線預熱 + retry:5 + `.ok` 補跑標記）、PLAN 2（資料脈絡判斷收斂到 `lib/data-context.ts` 的 `resolveDataContext()` 單一 helper + `lib/latest-scan.ts` 掃描結果唯一讀取入口 + `run-signal-scan.ts` watchlist 成員豁免 gate → 6226 PR / 醞釀籌碼空白已解）、PLAN 3（`scripts/pipeline/intraday-scan.ts` + launchd 每 30 分盤中自動掃描、`/screening` 頁每 60 秒自動刷新、`/watchlist` 頁改讀掃描 JSON 三分支、進頁不再打 MIS；醞釀中卡片移除 K棒/力道/位階三分數）皆已完成並部署 launchd。**與下方第 5 節「盤中提醒」不同**——那是「人不在電腦前也收到推播」（依賴雲端 DB + GitHub Actions），這三份只做「伺服器開著時盤中資料即時、頁面資料源判斷統一」。
+**資料源統一 + 盤中即時性（四份 PLAN，2026-09-01）**：PLAN 1（daily-pipeline 冷進程穩定性——TPEx 非致命 + 冷連線預熱 + retry:5 + `.ok` 補跑標記）、PLAN 2（資料脈絡判斷收斂到 `lib/data-context.ts` 的 `resolveDataContext()` 單一 helper + `lib/latest-scan.ts` 掃描結果唯一讀取入口 + `run-signal-scan.ts` watchlist 成員豁免 gate → 6226 PR / 醞釀籌碼空白已解）、PLAN 3（`scripts/pipeline/intraday-scan.ts` + launchd 每 30 分盤中自動掃描、`/screening` 頁每 60 秒自動刷新、`/watchlist` 頁改讀掃描 JSON 三分支、進頁不再打 MIS；醞釀中卡片移除 K棒/力道/位階三分數）、PLAN 4（`/screening` 頁簡化——移除盤後/盤中 toggle + realtime 背景任務 spawn + 每 60 秒自動刷新，`_run-signal-scan.ts` 刪除；進頁一律 `getScreeningContext()` → `getScreeningResult()` 依 `resolveDataContext().mode` 回結果，讀一次就定住、要看新的手動重整——跟 watchlist 心智模型一致；「昨」badge 事故徹底解決）皆已完成並部署 launchd。**與下方第 5 節「盤中提醒」不同**——那是「人不在電腦前也收到推播」（依賴雲端 DB + GitHub Actions），這三份只做「伺服器開著時盤中資料即時、頁面資料源判斷統一」。
 
 逐次的設計理由、實測數字、驗證過程全部記在 [docs/PROGRESS.md](PROGRESS.md)。
 

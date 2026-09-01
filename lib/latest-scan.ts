@@ -3,8 +3,9 @@
 // 從 lib/actions/watchlist.ts 內建的 readLatestScan() 搬出來、擴充成回傳更完整的 map。
 // **非 "use server"**（純檔案 IO + 純函式，供多個 action import；比照 lib/dashboard-spark.ts 是值不是 server）。
 //
-// 職責：跨頁面「拿某幾檔的分數 / 分項」。與 lib/actions/signal-scan.ts 的 getSignalScanResult()
-// （screening 頁 realtime 掃完後直接拿整份結果用）職責不同、不合併——兩者共用私有 parseScanFile()。
+// 職責：跨頁面「拿某幾檔的分數 / 分項」。與 lib/actions/signal-scan.ts 的 getScreeningResult()
+// （screening 頁進頁 / 手動重跑時拿整份結果用）職責不同、不合併——signal-scan.ts 自帶
+// readLatestRealtimeFile()，本檔另有 parseScanFile() + eod/realtime 比對邏輯。
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";

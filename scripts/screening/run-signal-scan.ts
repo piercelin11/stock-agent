@@ -871,7 +871,8 @@ async function runRealtime(
   }
 
   // 結束時（成功）覆寫 progress.json 為 done —— CLI 直接跑也不會留下卡在 running 的殘檔。
-  // 背景任務模式下 _run-signal-scan.ts 還會再寫一次（同資料，無害）；error 態由 runner 負責。
+  // PLAN 4 起前端不再讀 progress.json（背景 spawn + 輪詢那套已移除），這份只剩 CLI /
+  // intraday-scan.ts 的紀錄用途。
   function writeProgressDone(out: SignalScanOutput): void {
     atomicWrite(PROGRESS_PATH, {
       status: "done",
