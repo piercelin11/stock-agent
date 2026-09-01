@@ -99,6 +99,19 @@ export interface SignalResult {
     proximityShortPct: number; // 收盤距短窗高點的 % 距離（<= 0）
     proximityLongPct: number; // 距長窗高點的 % 距離
   };
+  // 醞釀階段法人籌碼區塊（前端 PreBreakoutInstitutional 用）。只在 pre-breakout 的 push 帶。
+  // 與 lib/actions/watchlist.ts 的 PreBreakoutInst 結構相同（screening 展開列與 watchlist 卡片共用元件）。
+  preInst?: {
+    buyDayFlags: boolean[]; // 20 日投信淨買超 > 0 的逐日布林，舊 → 新
+    buyDays: number;
+    consecutiveBuyDays: number;
+    dataDays: number;
+    trustScore: number | null; // = scores.trustScore
+    otherInstScore: number | null; // = scores.otherInstScore
+    trustNetRatio: number | null; // = detail.trustNetRatio
+    otherInstRatio: number | null; // = detail.otherInstRatio
+    degraded: boolean; // dataDays < ceil(institutionalWindowDays * minInstitutionalDaysRatio)
+  };
 }
 
 export interface SignalScanOutput {
@@ -336,6 +349,37 @@ function breakoutExtras(factors: BreakoutFactorOutput): Pick<SignalResult, "inst
       proximityLongScore: factors.raw.proximityLongScore,
       proximityShortPct: factors.raw.proximityShortPct,
       proximityLongPct: factors.raw.proximityLongPct,
+    },
+  };
+}
+
+/** 醞釀階段：把 trustNetBuy 序列 + 已算好的分數/原始值組成 SignalResult.preInst（前端展開列/卡片共用元件用）。 */
+function preBreakoutExtras(
+  trustNetBuyNewestFirst: number[],
+  trustScore: number,
+  otherInstScore: number,
+  trustNetRatio: number | null,
+  otherInstRatio: number | null,
+  minDataDays: number,
+): Pick<SignalResult, "preInst"> {
+  const flagsNewToOld = trustNetBuyNewestFirst.map((v) => v > 0);
+  const dataDays = flagsNewToOld.length;
+  let consecutiveBuyDays = 0;
+  for (const f of flagsNewToOld) {
+    if (f) consecutiveBuyDays += 1;
+    else break;
+  }
+  return {
+    preInst: {
+      buyDayFlags: [...flagsNewToOld].reverse(), // 舊 → 新
+      buyDays: flagsNewToOld.filter(Boolean).length,
+      consecutiveBuyDays,
+      dataDays,
+      trustScore,
+      otherInstScore,
+      trustNetRatio,
+      otherInstRatio,
+      degraded: dataDays < minDataDays,
     },
   };
 }
@@ -614,6 +658,14 @@ async function runEod(
           squeezeDepthDays: bs.historyDays,
           avgVolumeRatio5d: q.avgRatio,
         },
+        ...preBreakoutExtras(
+          accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [],
+          trustScore,
+          otherInstScore,
+          t.netRatio,
+          o.ratio,
+          Math.ceil(pb.institutionalWindowDays * pb.minInstitutionalDaysRatio),
+        ),
         degraded,
         warnings: [], // pre-breakout 恆無 warnings（PLAN §4）
       });
@@ -1080,6 +1132,14 @@ async function runRealtime(
           squeezeDepthDays: bs.historyDays,
           avgVolumeRatio5d: q.avgRatio,
         },
+        ...preBreakoutExtras(
+          accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [],
+          trustScore,
+          otherInstScore,
+          t.netRatio,
+          o.ratio,
+          Math.ceil(pb.institutionalWindowDays * pb.minInstitutionalDaysRatio),
+        ),
         degraded,
         warnings: [], // pre-breakout 恆無 warnings（PLAN §4）
       });

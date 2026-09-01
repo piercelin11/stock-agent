@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { listWatchlist } from "../../lib/actions/watchlist";
-import { WatchlistTable } from "../../components/watchlist/WatchlistTable";
+import { WatchlistGallery } from "../../components/watchlist/WatchlistGallery";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +12,8 @@ export default async function WatchlistPage() {
       <div>
         <h1 className="text-xl font-semibold text-foreground">觀察清單</h1>
         <p className="mt-1 text-sm text-muted-foreground/70">
-          手動維護的正式觀察名單。每檔顯示三表（報價 / 技術 / 籌碼）各自最新一筆。
+          手動維護的正式觀察名單。依「連續站上布林上軌天數」即時分成首次突破 / 延續爆發 / 醞釀中。
+          資料庫有當日資料時用資料庫（⚡），否則自動抓盤中即時報價（🕐）。
         </p>
       </div>
 
@@ -25,7 +26,7 @@ export default async function WatchlistPage() {
           挑幾檔。
         </div>
       ) : (
-        <WatchlistTable rows={rows} />
+        <WatchlistGallery rows={rows} />
       )}
     </div>
   );

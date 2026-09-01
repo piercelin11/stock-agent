@@ -1,13 +1,14 @@
 import type { SignalScanView } from "../../lib/actions/signal-scan";
 import { SignalSparkPanel } from "./SignalSparkPanel";
-import { InstitutionalFlow } from "./InstitutionalFlow";
+import { InstitutionalFlowPanel } from "../signal/InstitutionalFlowPanel";
+import { PreBreakoutInstitutional } from "../signal/PreBreakoutInstitutional";
 import { BreakoutFactorBars } from "./BreakoutFactorBars";
 
 // 展開列內容（PLAN §3）。原 ScreeningPanel 內的 Detail function 搬進本檔（ScreeningPanel 已太長）。
 //
-// stage 分支（PLAN §3.0）：
-//   pre-breakout → 只有左側線圖（不渲染法人 / 突破因子 / 舊評分明細網格）
-//   breakout-day / extended → 三欄卡：左線圖 / 中法人 / 右突破因子
+// stage 分支：
+//   pre-breakout → 左線圖 + 醞釀階段法人籌碼區塊（20 格買超日曆 + 兩條全市場百分位進度條）
+//   breakout-day / extended → 三欄卡：左線圖 / 中法人 diverging bar / 右突破因子
 //
 // 頂部 margin-chasing 紅框、estimated 琥珀框在兩種 stage 都渲染。
 
@@ -32,13 +33,22 @@ export function SignalDetail({ row }: { row: Row }) {
       ) : null}
 
       {isPre ? (
-        <SignalSparkPanel code={row.code} rising={rising} />
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <SignalSparkPanel code={row.code} rising={rising} />
+            {row.preInst ? (
+              <PreBreakoutInstitutional preInst={row.preInst} />
+            ) : (
+              <div className="text-xs text-muted-foreground/70">無法人籌碼資料</div>
+            )}
+          </div>
+        </div>
       ) : (
         <div className="rounded-lg border border-border bg-card p-4">
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
             <SignalSparkPanel code={row.code} rising={rising} />
             {row.inst ? (
-              <InstitutionalFlow inst={row.inst} warnings={row.warnings} />
+              <InstitutionalFlowPanel inst={row.inst} warnings={row.warnings} />
             ) : (
               <div className="text-xs text-muted-foreground/70">無法人籌碼資料</div>
             )}

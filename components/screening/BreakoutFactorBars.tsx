@@ -1,4 +1,5 @@
 import { cn } from "../../lib/cn";
+import { FACTOR_LABELS } from "../signal/labels";
 import type { SignalScanView } from "../../lib/actions/signal-scan";
 
 // 展開列右欄：突破因子（UI.md 第二節）。
@@ -53,18 +54,18 @@ export function BreakoutFactorBars({
     <div className="space-y-1.5">
       <div className="text-xs font-semibold text-muted-foreground/70">突破因子</div>
       <FactorBar
-        label="突破幅度"
+        label={FACTOR_LABELS.breakoutMargin}
         score={factors.breakoutMarginScore}
         raw={`${factors.breakoutMarginPct >= 0 ? "+" : ""}${factors.breakoutMarginPct.toFixed(1)}%`}
       />
-      <FactorBar label="相對強度" score={rs} raw={`${rs.toFixed(0)} 分位`} />
+      <FactorBar label={FACTOR_LABELS.relativeStrength} score={rs} raw={`${rs.toFixed(0)} 分位`} />
       <FactorBar
-        label="距 60 日高點"
+        label={FACTOR_LABELS.proximityShort}
         score={factors.proximityShortScore}
         raw={`${factors.proximityShortPct.toFixed(1)}%`}
       />
       <FactorBar
-        label="距一年高點"
+        label={FACTOR_LABELS.proximityLong}
         score={factors.proximityLongScore}
         raw={`${factors.proximityLongPct.toFixed(1)}%`}
       />

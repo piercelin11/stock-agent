@@ -1,0 +1,104 @@
+"use client";
+
+import { useTransition } from "react";
+import { removeFromWatchlist, type WatchlistCardRow } from "../../lib/actions/watchlist";
+import { cn } from "../../lib/cn";
+import { Button } from "../ui/Button";
+import { Sparkline } from "../ui/Sparkline";
+import { FreshnessBadge } from "../signal/FreshnessBadge";
+import { FactorList } from "../signal/FactorList";
+import {
+  InstitutionalFlowPanel,
+  resolveInstChip,
+  TONE_CHIP,
+} from "../signal/InstitutionalFlowPanel";
+import { PreBreakoutInstitutional } from "../signal/PreBreakoutInstitutional";
+import { resolvePreBreakoutChip } from "../signal/pre-breakout-chip";
+import { STAGE_LABELS, STAGE_PILL_CLASS } from "../signal/labels";
+
+export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
+  const [isPending, startTransition] = useTransition();
+  const rising = row.changePercent >= 0;
+  const cpClass = rising ? "text-up" : "text-down";
+
+  function remove() {
+    startTransition(async () => {
+      await removeFromWatchlist({ code: row.stockCode });
+    });
+  }
+
+  const chip =
+    row.stage === "pre-breakout"
+      ? resolvePreBreakoutChip(row.preInst)
+      : row.inst
+        ? resolveInstChip(row.inst, [])
+        : null;
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-border bg-background p-4">
+      {/* 標頭 */}
+      <div className="flex items-start gap-2">
+        <FreshnessBadge fresh={row.dataFresh} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span className="text-3xl font-semibold tracking-tight text-foreground">
+              {row.stockCode}
+            </span>
+            <span className={cn("text-base font-medium tabular-nums", cpClass)}>
+              {rising ? "+" : ""}
+              {row.changePercent.toFixed(2)}%
+            </span>
+            <span
+              className={cn(
+                "rounded px-1.5 py-0.5 text-xs font-medium",
+                STAGE_PILL_CLASS[row.stage],
+              )}
+            >
+              {STAGE_LABELS[row.stage]}
+            </span>
+            {chip ? (
+              <span
+                className={cn(
+                  "rounded px-1.5 py-0.5 text-xs font-medium",
+                  TONE_CHIP[chip.tone],
+                )}
+              >
+                {chip.text}
+              </span>
+            ) : null}
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-sm text-muted-foreground">
+            <span className="truncate">{row.name}</span>
+            <span className="tabular-nums text-muted-foreground/70">
+              {row.close.toFixed(2)}
+            </span>
+            {row.priceSource === "estimated" ? (
+              <span className="rounded bg-warning/10 px-1 text-xs text-warning">估</span>
+            ) : null}
+            <span className="text-xs text-muted-foreground/50">{row.refDate}</span>
+          </div>
+        </div>
+        <Button variant="danger" onClick={remove} disabled={isPending}>
+          移除
+        </Button>
+      </div>
+
+      {/* 走勢圖 */}
+      <Sparkline points={row.spark} rising={rising} />
+
+      {/* 法人籌碼區塊：breakout 階段 = diverging bar；醞釀階段 = 20 格日曆 + 百分位進度條 */}
+      {row.stage === "pre-breakout" ? (
+        row.preInst ? (
+          <PreBreakoutInstitutional preInst={row.preInst} />
+        ) : null
+      ) : row.inst ? (
+        <InstitutionalFlowPanel inst={row.inst} warnings={[]} showChip={false} />
+      ) : null}
+
+      {/* 底排因子 */}
+      <div className="border-t border-border pt-3">
+        <FactorList row={row} />
+      </div>
+    </div>
+  );
+}
