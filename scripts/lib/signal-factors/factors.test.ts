@@ -8,9 +8,9 @@ import {
   resolveSignalConfig,
   DEFAULT_SIGNAL_CONFIG,
   DEFAULT_INSTITUTIONAL_FLOW_CONFIG,
-} from "./signal-factors";
+} from "./index";
 
-// 跑：pnpm tsx --test scripts/lib/signal-factors.test.ts
+// 跑：pnpm tsx --test scripts/lib/signal-factors/factors.test.ts
 
 // ---- computeBreakoutMarginMonotone（§2.5 單調遞增、無倒扣）----
 

@@ -1,21 +1,23 @@
-// 盤後選股 v2（投信吃貨訊號）共用純函式庫（無 Prisma / CLI）。
+// 盤後選股 v2（投信吃貨訊號）共用純函式庫。
 //
 // 計分結構為乘法：最終分數 = 籌碼分數 × 技術就緒係數
 //   - 籌碼分數（0~100）：主排序依據。投信分數 × 0.7 + 其他法人分數 × 0.3。
 //   - 技術就緒係數（READINESS_FLOOR~1.0）：調節項。壓縮度 / 窒息量合成後線性映射，
 //     下限刻意設在 0.5 而非 0——技術面沒收斂只把籌碼分數打折，不歸零、不從排名抹掉。
 //
-// 壓縮度分數直接重用 breakout-shared.ts 的 computeBase（帶寬歷史百分位 + 低帶寬持續天數），
-// 與 calculate-breakout-strength.ts 口徑一致，未來兩系統結果可比對。
+// 壓縮度分數直接重用 breakout.ts 的 computeBase（帶寬歷史百分位 + 低帶寬持續天數）。
 //
-// 註：本檔原為「無 Prisma / CLI」的純函式庫。2026-08-29（回測 Layer 0）起追加
-// fetchAccumulationRawInputs——它 import PrismaClient「型別」並會查 DB，比照 breakout-shared.ts
-// 的 fetchHistoryWindow / fetchBreakoutRawInputs。純評分函式仍不碰 Prisma。
+// fetchAccumulationRawInputs import PrismaClient「型別」並會查 DB，比照 breakout.ts 的
+// fetchHistoryWindow / fetchBreakoutRawInputs。純評分函式仍不碰 Prisma。
 
-import type { PrismaClient } from "../../generated/prisma/client";
-import type { DeepPartial } from "./types";
+import type { PrismaClient } from "../../../generated/prisma/client";
+import type { DeepPartial } from "../types";
+import { clip } from "./util";
+// computeBase 的 degraded 門檻——與 breakout 同一個常數（單一數值來源），
+// 目錄化前是各自寫死的 40，合併時改成從 breakout.ts 拿。
+import { BASE_MIN_HISTORY_DAYS } from "./breakout";
 
-// ---- 視窗與資格門檻常數（比照 breakout-shared.ts 的 RS_WINDOW_DAYS 寫法，寫死不留活動範圍）----
+// ---- 視窗與資格門檻常數（寫死不留活動範圍）----
 export const INSTITUTIONAL_WINDOW_DAYS = 20; // 投信 / 其他法人分數的回看視窗（交易日）
 export const SQUEEZE_VOLUME_WINDOW_DAYS = 5; // 窒息量的近期平均量比視窗（交易日）
 export const BANDWIDTH_HISTORY_MAX_DAYS = 240; // 壓縮度分數的帶寬歷史窗（不含當日），對應 computeBase 需求
@@ -24,7 +26,6 @@ export const READINESS_FLOOR = 0.5; // 技術就緒係數下限
 export const MIN_INSTITUTIONAL_DAYS_RATIO = 0.5; // 視窗內三大法人有資料天數 < 一半 → degraded
 export const MIN_SQUEEZE_VOLUME_DAYS = 3; // 近 5 日量比有效天數 < 3 → degraded
 export const NEUTRAL_SCORE = 50; // degraded 時的中性分
-export const BASE_MIN_HISTORY_DAYS = 40; // computeBase 的 degraded 門檻（沿用 breakout-shared 的預設值）
 
 // ---- 待校準參數（跑完看前 20~30 名再調）----
 export const CHIP_WEIGHTS = {
@@ -40,18 +41,18 @@ export const TECH_WEIGHTS = {
   quietVolume: 0.5, // 窒息量（近 5 日平均量比）
 };
 
-// ---- config 型別（回測用：門檻類走 Layer 1，加權/曲線/視窗類走 Layer 2）----
+// ---- config 型別（門檻類走 gate，加權/曲線/視窗類走 score）----
 
-/** 門檻類：決定誰進候選池（Layer 1）。回測時調這些要重篩池 → rankScore 要重跑。 */
+/** 門檻類：決定誰進候選池。 */
 export interface AccumulationGateConfig {
   minAvgVolumeShares: number; // 500_000
 }
 
-/** 加權 / 曲線 / 視窗類：決定分數怎麼組（Layer 2）。調這些不動候選池成員。 */
+/** 加權 / 曲線 / 視窗類：決定分數怎麼組。調這些不動候選池成員。 */
 export interface AccumulationScoreConfig {
-  institutionalWindowDays: number; // 20 // 回測調大此值需確認 Layer 0 序列夠長
-  squeezeVolumeWindowDays: number; // 5 // 回測調大此值需確認 Layer 0 序列夠長
-  bandwidthHistoryMaxDays: number; // 240 // 回測調大此值需確認 Layer 0 序列夠長
+  institutionalWindowDays: number; // 20
+  squeezeVolumeWindowDays: number; // 5
+  bandwidthHistoryMaxDays: number; // 240
   readinessFloor: number; // 0.5
   minInstitutionalDaysRatio: number; // 0.5（degraded 判定，見 §3：不剔除股票只降級分項 → 歸 score）
   minSqueezeVolumeDays: number; // 3
@@ -119,31 +120,6 @@ export function resolveAccumulationConfig(
       },
     },
   };
-}
-
-export function clip(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-// 對應 breakout-shared.ts / calculate-screen-score.ts 的 rankScore：cross-sectional percentile rank，0~100。
-// lowerIsBetter=true 時數值越小排名分數越高。naScore：該欄位缺值時給的預設分數。
-export function rankScore(values: (number | null)[], lowerIsBetter: boolean, naScore: number): number[] {
-  const validEntries = values
-    .map((v, i) => ({ v, i }))
-    .filter((e): e is { v: number; i: number } => e.v !== null && !Number.isNaN(e.v));
-
-  if (validEntries.length === 0) {
-    return values.map(() => naScore);
-  }
-
-  const sorted = [...validEntries].sort((a, b) => (lowerIsBetter ? b.v - a.v : a.v - b.v));
-
-  const result = new Array<number>(values.length).fill(naScore);
-  for (let rank = 0; rank < sorted.length; rank++) {
-    const percentile = ((rank + 1) / sorted.length) * 100;
-    result[sorted[rank]!.i] = percentile;
-  }
-  return result;
 }
 
 // ---- 投信買進動能：兩個子指標的原始值（rankScore 由呼叫端跨市場一次算）----
@@ -272,7 +248,7 @@ export function combineFinalScore(chipScore: number, readinessCoef: number): num
   return chipScore * readinessCoef;
 }
 
-// ---- 撈 DB + 組視窗序列（calculate-accumulation-score.ts 與 Layer 0 批次引擎共用）----
+// ---- 撈 DB + 組視窗序列（正式跑與回測 Layer 0 共用）----
 // 從 calculate-accumulation-score.ts 的 buildFactorInputs 抽出（去掉 buildCandidatePool 的門檻篩選）。
 // 呼叫端負責決定 codes（正式跑傳候選池、Layer 0 傳全市場一般股票）與對應的 volumeMa20。
 

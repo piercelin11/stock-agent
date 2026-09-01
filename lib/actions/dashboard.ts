@@ -6,7 +6,7 @@ import {
   computeVolumeStrength,
   computeBase,
   resolveBreakoutConfig,
-} from "../../scripts/lib/breakout-shared";
+} from "../../scripts/lib/signal-factors/index";
 import { SPARK_CLIP, SPARK_WINDOW, type SparkPoint } from "../dashboard-spark";
 
 // 近 60 日走勢圖：每點 = 當日收盤「相對布林中軌的偏離比例」＝(close − bollingerMid) / bollingerMid，

@@ -316,6 +316,27 @@
 - **待校準（PLAN §7）**：累積滿 3 個月資料後（約 2026-11），回頭看觸發頻率 + 命中準確度，再決定 `surgePercentileThreshold`(80) / `lookbackDays`(5) / `historyWindowDays`(40)。
 - **明確不做**：動 `computeInstitutionalFlow` 分數 / 封頂 / 權重、pre-breakout 接融資融券（無「當日法人賣」概念）、融券 / 資券互抵進因子、跨股票比較、回測校準、`MarginTrading` 進 daily-pipeline 選股步驟。
 
-尚未開始/明確不做：估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯（`topic_alignment` 因子固定中性分）、AnalysisResult 產出流程（Phase D）、`screening/` 各支（統一入口 `run-signal-scan.ts`；舊三支 `calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts` 保留可跑、退役待下一批）與 `backfill/` 各支皆為獨立手動執行（不在 `daily-pipeline.ts` 內）、`run-signal-scan.ts` 的階段權重 / 法人因子曲線校準（首版全拍腦袋，靠肉眼看單日排名 + 實盤觀察調）、**整個回測系統**（3.0～3.7 已從 `main` 移除、擱置，見上方；程式碼在 `feat/backtest-ui-3.6-3.7` 分支，OOM 待修）。`archive/` 的 `calculate-screen-score.ts` / `run-screener.ts` / `fetch-candidate-details.ts` / `top20-gainers.js` 已停用不維護。
+---
+
+**舊三支退役 + `signal-factors/` 目錄化（2026-09-01）**：ROADMAP 4.5.4，收尾批。統一引擎 `run-signal-scan.ts` 跑穩、`feat/screening-unified` 已 merge → 把舊路線正式收掉。純結構搬遷，零行為變更（`tsc` + `build` + 31 案單測全綠、`grep` 程式碼 0 命中）。分支 `feat/screening-retire-legacy`。
+
+- **舊三支 + 孤兒 runner 直接刪（`git rm`，不進 `archive/`）**：`calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts` / `_run-intraday-scan.ts`。判斷：本體只是「串 shared 函式 + 寫 JSON」的 CLI 殼，評分邏輯已整併進 `signal-factors/`，設計理由留在本檔，`git show <sha>:path` 撈得回舊實作。`archive/` 的用途是「還可能撿回參考的獨立實作」，這些殼不符 → 進 `archive/` 只會多一份要在 CLAUDE.md 解釋的死碼。使用者拍板直接刪。
+- **`scripts/lib/signal-factors.ts` 單檔 → `scripts/lib/signal-factors/` 目錄**：
+  - `index.ts` — barrel（`export * from` 各子檔）。`run-signal-scan.ts`（原 `../lib/signal-factors`）與 `lib/actions/dashboard.ts`（原 `../../scripts/lib/breakout-shared`）都改 import `signal-factors/index`（scripts 走 `nodenext`，目錄 import 需顯式 `/index`）。
+  - `util.ts` — `clip` / `rankScore`。原本 `breakout-shared.ts` / `accumulation-shared.ts` 各有一份一字不差的複製，合併成單一出處。
+  - `breakout.ts` — 原 `breakout-shared.ts` 全文（路徑修正 `../../generated` → `../../../generated`、`./types` → `../types`；`clip` 改 import `./util`）。
+  - `accumulation.ts` — 原 `accumulation-shared.ts` 全文（同路徑修正）。`BASE_MIN_HISTORY_DAYS` 原本 breakout / accumulation 各自 `export const = 40`，barrel `export *` 會撞名（`TS2308`）→ `accumulation.ts` 改 `import { BASE_MIN_HISTORY_DAYS } from "./breakout"`（本來註解就寫「沿用 breakout 的預設值」，改成真的單一數值來源）。
+  - `institutional.ts` — `computeInstitutionalFlow` / `computeMarginSurgePercentile` + 其 config 型別。
+  - `staging.ts` — `consecutiveAboveBand` / `computeBreakoutMarginMonotone`。
+  - `config.ts` — `SignalScanConfig` / `DEFAULT_SIGNAL_CONFIG` / `DEFAULT_INSTITUTIONAL_FLOW_CONFIG` / `resolveSignalConfig` / `baseCurveFor`。
+- **`git rm` `breakout-shared.ts` / `accumulation-shared.ts`**：內容已搬進 `signal-factors/`、無人 import（直接刪、不進 `archive/`，留著只會有兩份同名函式）。
+- **單測搬遷**：`scripts/lib/signal-factors.test.ts` → `scripts/lib/signal-factors/factors.test.ts`（`git mv`），import 改 `./index`。
+- **`data/` 舊輸出資料夾刪**：`data/breakout-strength-results/` / `accumulation-score-results/` / `intraday-breakout-snapshots/`（僅舊腳本會寫、原本就 gitignored、未進版控），`.gitignore` 對應三行一併移除。
+- **註解順手更新**：`market-regime.ts` / `mis-quotes.ts` / `_run-signal-scan.ts` 提及已刪檔名的註解改掉；殘留 `breakout-shared` / `accumulation-shared` 字串只剩 `signal-factors/` 內 4 處歷史敘述註解 + CLAUDE.md / docs。
+- **未動**（如 ROADMAP 計畫）：`mis-quotes.ts` / `market-regime.ts` / `http.ts` / `types.ts` 本體。ROADMAP 3.1 抽出的兩套 `XxxConfig` 三件組（`breakout.ts` / `accumulation.ts` 內）保留——`run-signal-scan.ts` 正式跑吃的是 `config.ts` 的 `SignalScanConfig`，這兩套現只給「用 config 覆蓋參數比對排名」的輕量校準用。
+
+---
+
+尚未開始/明確不做：估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯（`topic_alignment` 因子固定中性分）、AnalysisResult 產出流程（Phase D）、`screening/`（統一入口 `run-signal-scan.ts`；舊三支已於 4.5.4 退役刪除）與 `backfill/` 各支皆為獨立手動執行（不在 `daily-pipeline.ts` 內）、`run-signal-scan.ts` 的階段權重 / 法人因子曲線校準（首版全拍腦袋，靠肉眼看單日排名 + 實盤觀察調）、**整個回測系統**（3.0～3.7 已從 `main` 移除、擱置，見上方；程式碼在 `feat/backtest-ui-3.6-3.7` 分支，OOM 待修）。`archive/` 的 `calculate-screen-score.ts` / `run-screener.ts` / `fetch-candidate-details.ts` / `top20-gainers.js` 已停用不維護。
 
 （每次進度更新，麻煩幫我一併更新這個區塊。）

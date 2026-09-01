@@ -1,7 +1,8 @@
-import { PrismaClient } from "../../generated/prisma/client";
-import type { DeepPartial } from "./types";
+import { PrismaClient } from "../../../generated/prisma/client";
+import type { DeepPartial } from "../types";
+import { clip } from "./util";
 
-// ---- 資格門檻（可調整，calculate-breakout-strength.ts 與 check-intraday-breakout.ts 共用）----
+// ---- 資格門檻（可調整）----
 export const GATES = {
   minMarketCap: 3_000_000_000, // 30 億台幣（原 50 億）
   minVolumeShares: 1_000_000, // 1000 張
@@ -24,8 +25,8 @@ export const BASE_MAX_WINDOW_DAYS = 240;
 export const PROXIMITY_SHORT_WINDOW = 60;
 export const PROXIMITY_LONG_WINDOW = 240;
 export const RS_WINDOW_DAYS = 60;
-export const FIRST_BAR_LOOKBACK_DAYS = 30; // 原本寫死在 calculate-breakout-strength.ts / check-intraday-breakout.ts 內
-export const NA_SCORE = 50; // rankScore 缺值補分（原多處字面量 50）
+export const FIRST_BAR_LOOKBACK_DAYS = 30;
+export const NA_SCORE = 50; // rankScore 缺值補分
 
 // ---- 曲線轉折點（§4 決定抽出的校準對象；其餘見各函式上方 TODO 註解）----
 export const VOLUME_STRENGTH_CURVE = {
@@ -45,9 +46,9 @@ export const BASE_CURVE = {
   durationCapDays: 40, // durationDays / 40 封頂
 };
 
-// ---- config 型別（回測用：門檻類走 Layer 1，加權/曲線/視窗類走 Layer 2）----
+// ---- config 型別（門檻類走 gate，加權/曲線/視窗類走 score）----
 
-/** 門檻類：決定誰進候選池。回測時調這些要重篩池 → rankScore 要重跑。 */
+/** 門檻類：決定誰進候選池。 */
 export interface BreakoutGateConfig {
   minMarketCap: number; // 3_000_000_000
   minVolumeShares: number; // 1_000_000
@@ -66,10 +67,10 @@ export interface BreakoutScoreConfig {
     relativeStrength: number;
   };
   baseMinHistoryDays: number; // 40（degraded 門檻，見 §3：不剔除股票只降級分項 → 歸 score）
-  baseMaxWindowDays: number; // 240 // 回測調大此值需確認 Layer 0 序列夠長
-  proximityShortWindow: number; // 60 // 回測調大此值需確認 Layer 0 序列夠長
-  proximityLongWindow: number; // 240 // 回測調大此值需確認 Layer 0 序列夠長
-  rsWindowDays: number; // 60 // 回測調大此值需確認 Layer 0 序列夠長
+  baseMaxWindowDays: number; // 240
+  proximityShortWindow: number; // 60
+  proximityLongWindow: number; // 240
+  rsWindowDays: number; // 60
   firstBarLookbackDays: number; // 30
   naScore: number; // 50（rankScore 缺值補分）
   curves: {
@@ -159,38 +160,13 @@ export function resolveBreakoutConfig(override?: DeepPartial<BreakoutConfig>): B
   };
 }
 
-// 對應 calculate-screen-score.ts 的 rankScore：cross-sectional percentile rank，0~100
-export function rankScore(values: (number | null)[], lowerIsBetter: boolean, naScore: number): number[] {
-  const validEntries = values
-    .map((v, i) => ({ v, i }))
-    .filter((e): e is { v: number; i: number } => e.v !== null && !Number.isNaN(e.v));
-
-  if (validEntries.length === 0) {
-    return values.map(() => naScore);
-  }
-
-  const sorted = [...validEntries].sort((a, b) => (lowerIsBetter ? b.v - a.v : a.v - b.v));
-
-  const result = new Array<number>(values.length).fill(naScore);
-  for (let rank = 0; rank < sorted.length; rank++) {
-    const percentile = ((rank + 1) / sorted.length) * 100;
-    result[sorted[rank]!.i] = percentile;
-  }
-  return result;
-}
-
-export function clip(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
 export interface HistoryPoint {
   date: Date;
   close: number | null;
   bollingerBandwidth: number | null;
 }
 
-// ---- 撈 DB + 組視窗序列（calculate-breakout-strength.ts 與 Layer 0 批次引擎共用）----
-// 從 calculate-breakout-strength.ts 抽出，確保正式跑與回測 Layer 0 撈的資料逐位元一致。
+// ---- 撈 DB + 組視窗序列（正式跑與回測 Layer 0 撈的資料逐位元一致）----
 
 export interface BreakoutQuoteRow {
   stockCode: string;
