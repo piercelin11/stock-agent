@@ -12,7 +12,7 @@
 
 ### `scripts/pipeline/`
 
-- `daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」七步：補齊今日 TWSE+TPEx 報價 → 抓今日三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 抓今日融資融券餘額（非關鍵路徑，證交所通常傍晚才出）→ 算技術指標 → 算大盤濾網（市場狀態燈號，非關鍵路徑，失敗只警告）→ 算產業熱度。歷史缺漏回補、跑選股皆為個別手動執行。抓取步驟的對外請求走 `scripts/lib/http.ts` 的 `fetchJson`（3 次 retry + 30s timeout），單一暫時性網路錯誤不會讓整條 pipeline 中斷。
+- `daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」八步：補齊今日 TWSE+TPEx 報價 → 補今日加權指數 TAIEX 行情（FinMind，關鍵路徑）→ 抓今日三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 抓今日融資融券餘額（非關鍵路徑，證交所通常傍晚才出）→ 算技術指標 → 算大盤濾網（市場狀態燈號，非關鍵路徑，失敗只警告）→ 算產業熱度。歷史缺漏回補、跑選股皆為個別手動執行。抓取步驟的對外請求走 `scripts/lib/http.ts` 的 `fetchJson`（3 次 retry + 30s timeout），單一暫時性網路錯誤不會讓整條 pipeline 中斷。
 - `fill-daily-quotes.ts`：補齊全市場報價——TWSE 用證交所 `MI_INDEX` 報表 API，支援指定任意單一天（可補歷史缺漏）；TPEx 用櫃買中心 OpenAPI，不支援指定日期，只能補「目前最新一天」。皆會自動新增資料庫沒有的股票記錄。
 - `fill-institutional-trading.ts`：抓取指定日期的 TWSE（`T86`）+ TPEx（`tpex_3insti_daily_trading`）三大法人買賣超寫入 `InstitutionalTrading`。TWSE 支援任意歷史日期，TPEx 不支援日期參數、永遠回傳「目前最新一天」。
 - `fill-gap-valuation.ts`：抓取指定日期的個股估值（本益比/股價淨值比/殖利率）寫入 `StockValuation`，TWSE 與 TPEx 皆支援任意歷史日期。
@@ -33,7 +33,7 @@
 - `backfill-daily-quotes.ts`：用 FinMind API 逐支股票回補歷史報價至 `DailyQuote`，回補區間預設 `2020-01-01` 起（`BACKFILL_START_DATE` 覆蓋）到執行當天。
 - `backfill-institutional-trading.ts`：用 FinMind API 逐支股票回補歷史三大法人買賣超至 `InstitutionalTrading`（回補區間同上），補上 `fill-institutional-trading.ts` 只能抓當天資料的歷史缺口。
 - `backfill-benchmark-quotes.ts`：用 FinMind API 回補回測用大盤基準標的（目前 0050）的 `DailyQuote`，只寫報價、不碰技術指標/籌碼。
-- `backfill-index-quotes.ts`：用 FinMind `TaiwanStockPrice?data_id=TAIEX` 回補加權指數日線至 `DailyQuote`（開頭自建 `Stock` 記錄 `code="TAIEX"`、`securityType="index"`）。只寫報價，給大盤濾網算 MA60/帶寬用，不進選股。
+- `backfill-index-quotes.ts`：用 FinMind `TaiwanStockPrice?data_id=TAIEX` 回補加權指數日線至 `DailyQuote`（自建 `Stock` 記錄 `code="TAIEX"`、`securityType="index"`）。只寫報價（完整 OHLC），給大盤濾網算 MA60/帶寬用，不進選股。另匯出 `fillTodayIndex(isoDate, prisma?)` 供 `daily-pipeline.ts` 第 1.5 步補當日 TAIEX。
 - `update-shares-outstanding.ts`：從 MOPS 公開 CSV 更新各股票已發行普通股數（月頻手動執行；市值用「股數 × 收盤價」現算，不落地存欄位）。
 - `mark-delisted.ts`：維護 `Stock.delistedAt` 下市標記（月頻手動執行）——最後行情距 DB 最新交易日超過 60 天（或從無行情）標記為下市，復牌自動清除；覆蓋率分母與 FinMind 回補清單會排除已下市股票。
 
