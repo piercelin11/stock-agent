@@ -2,6 +2,7 @@ import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, Market, SecurityType } from "../../generated/prisma/client.js";
 import { fetchJson } from "../lib/http.js";
+import { toSecurityType } from "../lib/security-type.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -69,16 +70,6 @@ function parseLotsNullable(raw: string | number | undefined): bigint | null {
 function rocSlashDateToIso(rocDate: string): string {
   const [rocYear, month, day] = rocDate.split("/");
   return `${parseInt(rocYear ?? "0", 10) + 1911}-${month}-${day}`;
-}
-
-// 沿用 fill-institutional-trading.ts 的分類規則
-function toSecurityType(code: string, name: string): SecurityType {
-  if (code.startsWith("00")) return SecurityType.etf;
-  if (/^.{4}[A-Za-z]$/.test(code)) return SecurityType.preferred;
-  if (/^\d{6}$/.test(code) || name.includes("購") || name.includes("售")) return SecurityType.warrant;
-  if (/^\d{5}$/.test(code)) return SecurityType.bond;
-  if (/^\d{4}$/.test(code)) return SecurityType.stock;
-  return SecurityType.other;
 }
 
 // 這批保留一般股票 + 特別股（特別股也有信用交易資格）
