@@ -1,17 +1,27 @@
-# PLAN：醞釀中（pre-breakout）卡片的「法人籌碼」區塊
+# PLAN 1：daily-pipeline 穩定性
 
-承接已 commit（未 merge）的 watchlist 卡片 gallery 改版。上一版 watchlist 改版時
-**刻意不做**醞釀中卡片的法人區塊，使用者定案 UI 後於本計畫補上。
+三份計劃的第一份（PLAN 2 = 資料層統一 + 掃描腳本改造；PLAN 3 = 盤中自動掃描 + watchlist 改接）。
+本份與其他兩份無耦合，是純止血：讓 launchd 冷進程執行 daily-pipeline 不再整條掛掉。
+**不動前端、不動掃描邏輯、不動 schema。**
 
-**分支**：`feat/watchlist-card-gallery`（延續，不另開）。merge 時機等使用者發話。
+**分支**：`feat/pipeline-stability`。merge 時機等使用者發話。
 
-**需求來源**：使用者 2026-09-01 提供的設計圖（4908 前鼎，「法人買賣 / 近20日投信買超日 /
-20 格點狀日曆 / 投信 85 ⓘ / 外資 / 自營商 64 ⓘ」）+ 逐元素拆解指令（本檔第 1~3 節即該指令的落地）。
+**需求來源**：使用者回報 `com.piercelin.dailypipeline.plist` 由 launchd 觸發時「常常」失敗
+（非電腦休眠、非網路問題——當時電腦開著使用中、網路正常）。log 佐證（`logs/daily_pipeline_stderr.log`，
+2026-09-01 17:00 觸發）：
 
-**與突破階段法人卡片的關係**：完全不同的資料結構。突破階段（`components/signal/InstitutionalFlowPanel.tsx`）
-用「近 5 日淨買超 ÷ volumeMa20 的 diverging bar + 今日方向箭頭」；醞釀階段的公式
-（`computeTrustRawMetrics` + `computeOtherInstitutionRatio`，`accumulation.ts`）是 **20 日窗口、
-只看頻率與累積佔比、沒有「今日方向」概念**。不共用 `InstitutionalFlowPanel`，另做新元件。
+```
+⚠ fetch 第 1 次重試 ...tpex_mainboard_daily_close_quotes：The operation was aborted due to timeout
+⚠ fetch 第 2 次重試 ...tpex_mainboard_daily_close_quotes：terminated
+[補齊今日報價] 處理日期 2026-09-01 失敗: fetch 重試 3 次仍失敗 ...：terminated
+  [cause]: SocketError: other side closed (UND_ERR_SOCKET)
+```
+
+同一次冷執行 TWSE（`www.twse.com.tw`）已成功寫 1384 筆，接著換 `www.tpex.org.tw`（這個進程從沒碰過的
+host）第一次 DNS+TLS 握手就 timeout / 被 RST。UI 按鈕 / 終端手動跑幾乎不遇到，因為那些是「溫進程」
+（Next dev server 或逛過網站後的終端），對政府端點有既存的 keep-alive 連線池、DNS 已快取；launchd 是
+全新冷進程，連線池空的。而 `fillTodayTpex` 失敗會 `throw PipelineStepError` → 整條 pipeline 停 →
+TWSE 已寫的報價之後的籌碼 / 估值 / 融資融券 / 技術指標 / 大盤濾網 / 產業熱度全部不跑。
 
 ---
 
@@ -19,222 +29,238 @@
 
 **動：**
 
-- `package.json`：`+ @radix-ui/react-tooltip`（`pnpm add`）。
-- `components/ui/Tooltip.tsx`：**新**——`@radix-ui/react-tooltip` 的手刻薄包裝（照
-  `Button.tsx` 用專案 token 的模式，**不引入 shadcn**，CLAUDE.md 既有約束）。
-- `components/signal/PreBreakoutInstitutional.tsx`：**新**——醞釀階段法人籌碼區塊
-  （標題 + 20 格日曆 + 兩條百分位進度條 + ⓘ tooltip）。
-- `components/signal/labels.ts`：`FACTOR_LABELS` 補「外資 / 自營商」等本區塊用到的中文名。
-- `components/signal/pre-breakout-chip.ts`：**新**——`resolvePreBreakoutChip()`（頂部籌碼 badge
-  判斷表，第 3 節）。與突破階段的 `resolveInstChip`（在 `InstitutionalFlowPanel.tsx`）並存、依 stage 分流。
-- `lib/actions/watchlist.ts`：
-  - `WatchlistCardRow` 加 `preInst: PreBreakoutInst | null`（breakout 階段為 null）。
-  - `buildCardRow` 的 pre-breakout 分支：撈 20 日投信淨買超序列 + `Stock.sharesOutstanding`，
-    讀最近 eod 掃描結果的 `scores.trustScore` / `scores.otherInstScore` / `detail.*`，組 `preInst`。
-- `components/watchlist/WatchlistCard.tsx`：pre-breakout 分支渲染 `<PreBreakoutInstitutional>`
-  + 頂部 chip 改用 `resolvePreBreakoutChip`（stage 分流）。
+- `scripts/pipeline/calculate-technical-indicators.ts`：**僅確認 + commit**——使用者 2026-08-31 已在本機修過
+  「`mode: "latest"` 誤跑成 full」（8-31 log 顯示 `寫入 TechnicalIndicator 筆數: 3063199`、耗時 1139 秒；
+  使用者今日手動跑 1~2 分鐘完成，修復已生效但未 commit，`git status` 目前 clean）。本份負責把它進版控。
+- `scripts/pipeline/daily-pipeline.ts`：TPEx 報價步從關鍵路徑（throw）改非關鍵路徑（try/catch + warn +
+  `warningCount++`）；TWSE 步維持關鍵路徑。TWSE↔TPEx 之間插一段 `sleep`。
+- `scripts/pipeline/fill-daily-quotes.ts`：`fetchTpexQuotes` 真正呼叫前加「冷連線預熱」fetch；
+  `fetchJson` 呼叫加 `{ retries: 5, baseDelayMs: 3000 }`。
+- `scripts/pipeline/fill-institutional-trading.ts`、`fill-gap-valuation.ts`、`fill-margin-trading.ts`：
+  對外 `fetchJson` 呼叫統一加 `{ retries: 5, baseDelayMs: 3000 }`。
+- `~/Library/LaunchAgents/com.piercelin.dailypipeline.plist`：`StartCalendarInterval` 從單一 17:00
+  改成陣列 17:00 / 17:30 / 18:00（補跑）。
+- `scripts/pipeline/daily-pipeline.ts`：加「當日成功標記檔」——跑完無致命錯誤時寫
+  `data/daily-pipeline-runs/{YYYY-MM-DD}.ok`，`main()` 開頭若當日 `.ok` 已存在則印訊息並 `return`
+  （讓 17:30 / 18:00 補跑在 17:00 已成功時秒退，不重跑 20 分鐘）。
 
 **不動：**
 
-- `scripts/screening/run-signal-scan.ts`：**完全不改**。醞釀階段的 `scores` / `detail` 已含所需欄位
-  （`trustScore` / `otherInstScore` / `trustBuyFreq` / `trustConsecutiveDays` / `trustNetRatio` /
-  `otherInstRatio`），本計畫只讀不寫。
-- `scripts/lib/signal-factors/*`：不改。日曆的逐日買超布林陣列 scan 沒存 → action 自己撈 20 日
-  `investmentTrustNetBuy` 序列現算。
-- `components/signal/InstitutionalFlowPanel.tsx` / `FactorList.tsx` / 突破階段任何東西：不動。
-- `prisma/schema.prisma`：不動。
+- `scripts/lib/http.ts`：預設值（`DEFAULT_RETRIES = 3` / `DEFAULT_BASE_DELAY_MS = 2000` /
+  `DEFAULT_TIMEOUT_MS = 30_000`）不改。只在呼叫端傳 options 覆蓋。理由：backfill 等手動腳本沒必要
+  一律變激進，且 30s timeout 對冷握手本來就夠（問題是握手直接被 RST，不是慢）。
+- `scripts/backfill/*`：不接 `fetchJson` options（現況本來就多數沒接 http.ts），本份不碰。
+- 前端任何檔、`lib/*`、`components/*`、`prisma/schema.prisma`、掃描腳本：完全不動。
 
 ---
 
-## 1. 區塊結構（由上到下）
+## 1. 技術指標修復進版控（收尾既有工作）
 
-```
-[階段badge] [籌碼badge]              ← 卡片頂部（既有），籌碼 badge 改由 resolvePreBreakoutChip 決定（第 3 節）
-...(K 線圖，既有，不動)...
-法人買賣                             ← 區塊標題（text-xs font-semibold text-muted-foreground/70，同 InstitutionalFlowPanel 標題樣式）
-近20日投信買超日                      ← 次標題（text-xs text-muted-foreground/50）
-[▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢]            ← 20 格日曆，2 列 × 10 欄
-[▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢]
-投信            ▓▓▓▓▓▓▓▓░░  85  ⓘ   ← 投信分數列
-外資 / 自營商   ▓▓▓▓▓░░░░░  64  ⓘ   ← 外資自營分數列
-```
-
-若該檔不在最近 eod 掃描結果裡（見 §2.4）→ 只渲染標題 + 日曆 + 縮減版 tooltip，
-兩條進度條與分數不顯示（見 §2.5 退化規則）。
+- `git diff` 確認 `calculate-technical-indicators.ts` 的本機改動內容（`mode: "latest"` 分支：
+  每支只撈最近 ~250 筆、只 upsert 最新一天）。若 `git status` 真的 clean（改動可能已被使用者
+  自己 commit 到別的地方 / 或還在 working tree）——先 `git log --oneline -5 -- scripts/pipeline/calculate-technical-indicators.ts`
+  查最後一次動它是哪個 commit。
+- 若改動在 working tree → 本份分支一併 commit（訊息獨立成一個 commit，不跟 pipeline 改動混）。
+- 若已 commit 過 → 本節無動作，只在 PROGRESS 記「已確認 latest 模式正常」。
+- **驗證**：`pnpm tsx scripts/pipeline/calculate-technical-indicators.ts 2330`（單股，全歷史 full 應仍可跑）
+  + 讀 `daily-pipeline.ts` 第 4 步確認呼叫的是 `calculateTechnicalIndicators(undefined, { mode: "latest" })`。
 
 ---
 
-## 2. 每個元素的資料來源與顯示規則
+## 2. TPEx 報價步改非致命（`daily-pipeline.ts`）
 
-### 2.1 20 格點狀日曆「近20日投信買超日」
-
-- 2 列 × 10 欄 = 20 格，對應 `institutionalWindowDays = 20`。
-- **排列**：左上 → 右下 = 舊 → 新。第一列第一格 = 最舊；最後一列最後一格 = 最新交易日。
-  （action 撈的序列是「新到舊」，渲染時 `reverse()`。）
-- **每格布林值**：該日 `investmentTrustNetBuy > 0`。**只問「有沒有買」**——不看買多少、不區分
-  「賣超」與「無資料」（對齊 `buyFrequency = 買超天數 ÷ 有資料天數`，公式不分這兩種狀態）。
-- **配色**：買超日 = `bg-success`（實色綠，與進度條同色系，暗示「進度條是日曆的量化版」）；
-  非買超日 = `bg-muted`（深灰底格）。**不用紅色**（「非買超」≠「賣超警訊」，公式無此語意）。
-- **尺寸**：正方形 `size-6`（24px）左右，`gap-1`，`grid grid-cols-10 gap-1`；卡片窄時整塊
-  `w-full` 內縮。實際尺寸依卡片寬微調，不強求 28px。
-- **不加常駐文字數字**（「買超12天」之類）——數格子即可看出「頻率」與「連續性」。
-  買超天數 / 連續天數收進投信列的 ⓘ tooltip。
-- 有效資料不足 20 天：序列短於 20 → 前面（舊端）補「無資料」灰格（與非買超同 `bg-muted`，
-  但可略降透明度 `bg-muted/50` 區分，非必要）。序列長度 `< 10`（`ceil(20 × 0.5)`）→ 走 §2.5 退化 +
-  badge「籌碼資料不足」。
-
-### 2.2 投信分數列
-
-- **進度條寬度 = 掃描結果的 `scores.trustScore`（0~100）**。這是 run-signal-scan 跑全市場
-  pre-breakout 候選時算好的：`rankScore(buyFrequency, 全市場) × trustSubWeights.buyFrequency(0.5) +
-  rankScore(netRatio, 全市場) × trustSubWeights.netRatio(0.5)`。**watchlist 自己算不出**（只有幾檔，
-  rankScore 無意義）→ 只能讀掃描結果。
-- 條色：`bg-success`（綠，同日曆買超格）。
-- 條後數字：`Math.round(trustScore)`，無 `%` 符號。
-- **ⓘ tooltip**（`@radix-ui/react-tooltip`，多行純文字）：
-  ```
-  近20日買超 {buyDays} 天，最近連續 {consecutiveBuyDays} 天
-  買超金額佔已發行股數 {(trustNetRatio*100).toFixed(1)}%      ← trustNetRatio 為 null 時省略此行
-  優於全市場 {Math.round(trustScore)}% 的個股
-  ```
-  - `buyDays` = action 自算（20 日序列中 `> 0` 的天數）或 `Math.round(detail.trustBuyFreq * dataDays)`。
-  - `consecutiveBuyDays` = `detail.trustConsecutiveDays`（或 action 自算，兩者應一致）。
-  - `trustNetRatio` = `detail.trustNetRatio`（scan 已算，含 `÷ sharesOutstanding`）。
-    scan 結果沒有該檔時 action 用 20 日序列 + `Stock.sharesOutstanding` 現算；`sharesOutstanding`
-    為 null（KY 股等）→ 此行省略。
-  - 「優於全市場 X%」的 X = `trustScore`（rankScore 百分位語意；退化時無此行）。
-- **不常駐顯示原始買超張數/金額**——投信資金規模天生 < 外資，秀絕對數字誤導「在跟外資比大小」。
-  金額只在 tooltip 且搭「佔已發行股數」相對表達。
-
-### 2.3 外資 / 自營商分數列
-
-- **進度條寬度 = 掃描結果的 `scores.otherInstScore`（0~100）** =
-  `rankScore(otherInstRatio, 全市場)`，`otherInstRatio = 近20日(外資+自營)淨買超加總 ÷ 近20日成交量加總`。
-- 條色：`bg-warning`（橘/琥珀，**刻意與投信綠區分**——次要修飾訊號，非本階段主訊號）。
-- 條後數字：`Math.round(otherInstScore)`。
-- **ⓘ tooltip**（一行）：
-  ```
-  外資＋自營商20日合計淨買超，佔同期成交量 {(otherInstRatio*100).toFixed(1)}%
-  ```
-  `otherInstRatio` = `detail.otherInstRatio`。
-- **不做 20 格日曆**——公式只有 20 天彙總比例、無逐日拆解；畫日曆會暗示系統在乎外資連續性
-  （實際不吃）。
-
-### 2.4 資料來源優先序（§2.2 / §2.3 的分數與 detail）
-
-`buildCardRow` 的 pre-breakout 分支：
-
-1. **讀 `data/signal-scan-results/` 最新 `{YYYY-MM-DD}.json`（eod 定案）**——沿用 §上一版
-   `readLatestScanRs()` 的讀檔套路，但這次要 `scores.trustScore` / `scores.otherInstScore` +
-   `detail.{trustBuyFreq,trustConsecutiveDays,trustNetRatio,otherInstRatio}`。把
-   `readLatestScanRs()` 擴成回傳更完整的 map（或新增一個 `readLatestScanPreInst()`）。
-2. **20 格日曆的逐日布林陣列**：scan 沒存 → action `prisma.institutionalTrading.findMany({
-   where: { stockCode }, orderBy: { date: "desc" }, take: 20, select: { date, investmentTrustNetBuy } })`
-   現算（新到舊，渲染時 reverse）。
-3. **`sharesOutstanding`**：`WatchlistItem.stock` 的 `include` 加 `sharesOutstanding`（現只 select
-   `name, market`）。僅在 scan 結果無 `detail.trustNetRatio` 時用來現算，否則不需要。
-
-### 2.5 退化規則（該檔不在最近 eod 掃描結果）
-
-觀察股大多從 screening 加入 → 通常在名單裡；手動加的冷門股 / 沒跑掃描 / 當天沒過 gate
-（市值<30億 / 當日量<100萬股 / 均量<50萬股）→ 不在。
-
-- 有 20 日投信序列（`>= 10` 天）→ 渲染標題 + 日曆 + 投信列**只顯示 tooltip 前兩行**
-  （買超天數 / 連續天數，action 自算），**無進度條、無分數數字、無「優於全市場」行**。
-  外資/自營列整列不顯示（無 `otherInstRatio` 可算，且它本非主訊號）。
-- 序列 `< 10` 天 → 整個區塊只顯示標題 + 「近 20 日投信資料不足」一行 muted 文字，badge 走
-  「籌碼資料不足」。
-
-### 2.6 刻意不呈現（避免實作者加回去）
-
-- 不加「今日買賣方向」箭頭 ▲/▼（此階段公式不看單日）。
-- 不把「技術就緒係數」/「籌碼分 × 技術就緒 = 總分」放進本區塊（技術就緒屬位階/技術面家族，
-  另區塊）。
-- 進度條旁不常駐原始比例文字，一律收進 ⓘ tooltip。
-
----
-
-## 3. 頂部籌碼 badge（`resolvePreBreakoutChip`）
-
-`components/signal/pre-breakout-chip.ts` 新增 `resolvePreBreakoutChip(preInst)`，
-回 `{ text: string; tone: Tone }`（`Tone` / `TONE_CHIP` 從 `InstitutionalFlowPanel.tsx` 複用其 export）。
-
-`WatchlistCard.tsx` 頂部 chip：`row.stage === "pre-breakout"` → `resolvePreBreakoutChip(row.preInst)`；
-否則沿用既有 `resolveInstChip(row.inst)`。
-
-**判斷表**（`trustScore` = `preInst.trustScore`，`otherScore` = `preInst.otherInstScore`，
-`consecutive` = `preInst.consecutiveBuyDays`；門檻首版拍板、註解標「待校準」）：
-
-| # | 條件 | 標籤文字 | tone |
-|---|---|---|---|
-| 1 | 資料不足（20 日序列 < 10 天 / `preInst` degraded） | 籌碼資料不足 | `muted` |
-| 2 | 不在掃描結果（`trustScore` == null）但序列足 | 依日曆型態：`consecutive >= 5` → 「投信近期連續買」；否則 「投信買盤分散」 | `success` / `muted` |
-| 3 | `trustScore >= 70` 且 `consecutive >= 5` | 投信持續進場 | `success` |
-| 4 | `trustScore >= 70` 且 `consecutive < 5` | 投信分散布局 | `success`（淺，用 `success` tone） |
-| 5 | `trustScore` 40~69 且 `otherScore >= 70` | 法人合力偏多 | `success` |
-| 6 | `trustScore` 40~69 且 `otherScore < 70` | 投信小幅偏多 | `warning` |
-| 7 | `trustScore < 40` 且 `otherScore >= 70` | 外資自營偏多・投信未跟 | `warning` |
-| 8 | `trustScore < 40` 且 `otherScore < 40` | 籌碼尚無明顯佈局 | `muted` |
-| 9 | 其他（落在上表縫隙，如 trustScore<40 且 otherScore 40~69） | 籌碼中性 | `muted` |
-
-判斷優先序：# 由上到下，先命中先回。「連續」門檻 `>= 5` 綁 `consecutiveBuyDays`，待校準。
-
----
-
-## 4. `WatchlistCardRow` 型別擴充
+**現況**（第 44~57 行附近）：
 
 ```ts
-export interface PreBreakoutInst {
-  // 20 格日曆：舊 → 新，長度可能 < 20（前面補「無資料」）。true = 該日投信淨買超 > 0
-  buyDayFlags: boolean[];
-  buyDays: number;            // buyDayFlags 中 true 的數量
-  consecutiveBuyDays: number; // 從最新往回連續買超天數
-  dataDays: number;           // 20 日窗內實際有 InstitutionalTrading 的天數
-  // 掃描結果帶入（不在名單 → null）
-  trustScore: number | null;      // scores.trustScore（rankScore 加權合成）
-  otherInstScore: number | null;  // scores.otherInstScore（rankScore(otherInstRatio)）
-  trustNetRatio: number | null;   // detail.trustNetRatio 或 action 現算（sharesOutstanding null → null）
-  otherInstRatio: number | null;  // detail.otherInstRatio
-  degraded: boolean;              // dataDays < 10
+try {
+  const twseResult = await fillOneDayTwse(todayStr);
+  const tpexResult = await fillTodayTpex(todayStr);
+  quotesWritten = twseResult.processed + tpexResult.processed;
+  quotesDerivativesSkipped = twseResult.skippedDerivatives + tpexResult.skippedDerivatives;
+  twseHasData = !twseResult.isNonTradingDay;
+  tpexHasData = !tpexResult.isStaleDate && !tpexResult.isNonTradingDay;
+  if (tpexResult.isStaleDate) warningCount++;
+} catch (err) {
+  throw new PipelineStepError("補齊今日報價", `處理日期 ${todayStr} 失敗`, err);
 }
-
-// WatchlistCardRow 追加：
-preInst: PreBreakoutInst | null; // 只在 stage === "pre-breakout" 有值；breakout 階段 null
 ```
 
-**邊界轉換**：`investmentTrustNetBuy` 是 `BigInt` → `Number()`；掃描結果 JSON 讀進來已是 number。
+**改為**：拆成兩個獨立 try/catch。
+
+```ts
+// 1a. TWSE 報價（關鍵路徑：失敗 throw）
+try {
+  const twseResult = await fillOneDayTwse(todayStr);
+  quotesWritten += twseResult.processed;
+  quotesDerivativesSkipped += twseResult.skippedDerivatives;
+  twseHasData = !twseResult.isNonTradingDay;
+} catch (err) {
+  throw new PipelineStepError("補齊今日 TWSE 報價", `處理日期 ${todayStr} 失敗`, err);
+}
+
+// 1b. 冷進程連續打兩個政府 host 之間喘口氣（見 §3）
+await sleep(TPEX_COLD_GAP_MS); // 4000
+
+// 1c. TPEx 報價（非關鍵路徑：失敗只 warn，tpexHasData 留 false）
+//     TPEx OpenAPI 本來就只給「最新一天」，隔天 pipeline 會再抓；缺的那天可用 backfill-daily-quotes.ts 補。
+//     比照第 3.5 步融資融券的既有寫法。
+try {
+  const tpexResult = await fillTodayTpex(todayStr);
+  quotesWritten += tpexResult.processed;
+  quotesDerivativesSkipped += tpexResult.skippedDerivatives;
+  tpexHasData = !tpexResult.isStaleDate && !tpexResult.isNonTradingDay;
+  if (tpexResult.isStaleDate) warningCount++;
+} catch (err) {
+  console.warn(
+    `[TPEx 報價] 抓取失敗（不中斷 pipeline）: ${err instanceof Error ? err.message : String(err)}`,
+  );
+  warningCount++;
+  // tpexHasData 維持初始 false
+}
+```
+
+**關鍵防呆**：`twseHasData` / `tpexHasData` 宣告時初始化為 `false`（現在是在 try 內才賦值）。
+第 60 行的「TWSE 與 TPEx 皆無當日資料 → 判非交易日提前結束」邏輯不變——TPEx catch 裡**不重新 throw**，
+`tpexHasData` 留 `false`，若 TWSE 也 `false`（真非交易日）仍會正常走提前結束；若 TWSE 有資料（`true`）
+則 TPEx 掛掉只是 `warningCount++`，pipeline 續跑。
+
+`quotesWritten` / `quotesDerivativesSkipped` 從 `=` 改 `+=`（分兩段累加）。
 
 ---
 
-## 5. `components/ui/Tooltip.tsx`（手刻 radix 包裝）
+## 3. TPEx 冷連線預熱 + host 間 sleep
 
-照 `Button.tsx` 模式：`import * as TooltipPrimitive from "@radix-ui/react-tooltip"`，
-export 一個 `<Tooltip content={...}>{trigger}</Tooltip>` 便利元件（內含 `Provider` /
-`Root` / `Trigger asChild` / `Portal` / `Content`）。Content 用專案 token：
-`rounded-md border border-border bg-card px-3 py-2 text-xs text-card-foreground shadow-md`，
-`side="top"` `sideOffset={6}`，帶 `<TooltipPrimitive.Arrow className="fill-card" />`。
-多行內容以 `whitespace-pre-line` 或傳 `ReactNode`（幾個 `<div>`）。手機：radix tooltip
-預設 tap 觸發（`disableHoverableContent` 不設）；卡片在 grid 邊緣的碰撞由 radix `Portal` +
-自動 `side` 翻轉處理。`delayDuration={200}`。
+### 3.1 `daily-pipeline.ts`
 
-單一 `TooltipPrimitive.Provider` 放這個便利元件內即可（每個 tooltip 各自帶 Provider 也行，
-radix 允許巢狀）。若之後多處要用再考慮提到 layout。YAGNI：先就地。
+- 檔頭加 `const TPEX_COLD_GAP_MS = 4000;` 常數 + 一個本地 `sleep` helper（`daily-pipeline.ts` 目前沒有，
+  加 `function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }`）。
+- §2 的 1b 已用。
+
+### 3.2 `fill-daily-quotes.ts`
+
+`fetchTpexQuotes()` 內、真正 `fetchJson(TPEX_QUOTES_URL)` 之前：
+
+```ts
+// 冷進程對 www.tpex.org.tw 第一次 DNS+TLS 握手常被 RST（launchd 事故 2026-09-01）。
+// 先用一個「便宜、允許失敗」的請求把 DNS 解析 + TLS session 建起來，真正的 API 呼叫走溫連線。
+async function warmUpTpex(): Promise<void> {
+  try {
+    await fetch("https://www.tpex.org.tw/", {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    /* 預熱失敗無所謂，下面的正式呼叫自己有 retry */
+  }
+}
+```
+
+- `fetchTpexQuotes()` 開頭 `await warmUpTpex();`。
+- **只對 TPEx 做**——TWSE 在 pipeline 裡永遠先跑、且是關鍵路徑，它自己那次呼叫就是「預熱」；
+  TPEx 是「冷進程碰的第二個 host」才需要。
 
 ---
 
-## 6. 收尾
+## 4. 抓取步驟加重試（四支 pipeline 抓取腳本）
 
-- `pnpm add @radix-ui/react-tooltip` → `pnpm exec tsc --noEmit` 乾淨。
-- `pnpm tsx --test scripts/lib/signal-factors/factors.test.ts`（不受影響，應仍 38 案全過）。
-- `curl http://localhost:3000/watchlist`（打使用者 dev server）：
-  - 有 pre-breakout 觀察股且在掃描結果 → 日曆 + 兩條進度條 + badge 正確。
-  - pre-breakout 但不在掃描結果 → 退化顯示（日曆 + 縮減 tooltip）。
-  - 醞釀中 tab 為空 → 不受影響（既有空狀態）。
-  - 若當前無 pre-breakout 觀察股：臨時把某檔的 stage 判定 log 出來確認，或手動加一檔已知
-    醞釀中的股票驗一次。
-- `git rm` 無（本計畫不刪檔）。
-- 更新 `docs/PROGRESS.md`（新增「醞釀中卡片法人籌碼區塊」段，記設計理由 + 退化行為 + 實測）。
-- 更新 `CLAUDE.md` 的 `/watchlist` 頁描述（補「醞釀中卡片法人區塊 = 20 格日曆 + 兩條全市場
-  百分位進度條，資料讀最近 eod 掃描結果」）。
-- 更新 `README.md` 觀察清單頁描述（醞釀中卡片內容補上）。
-- `docs/ROADMAP.md`：本項不在 ROADMAP 清單上（watchlist UI 細修），無打勾動作。
+對「打政府端點」的 `fetchJson` 呼叫統一傳 `{ retries: 5, baseDelayMs: 3000 }`
+（總嘗試 5 次，間隔 3s → 6s → 12s → 24s；冷握手的 `other side closed` 通常隔幾秒再試就過）。
+
+| 檔案 | 呼叫點 | 端點 |
+|---|---|---|
+| `fill-daily-quotes.ts` | `fetchTwseQuotes` 的 `fetchJson<MiIndexResponse>` | `MI_INDEX` |
+| `fill-daily-quotes.ts` | `fetchTpexQuotes` 的 `fetchJson<TpexRow[]>` | `tpex_mainboard_daily_close_quotes` |
+| `fill-institutional-trading.ts` | TWSE `T86` + TPEx `tpex_3insti_daily_trading` 的 `fetchJson` | 二處 |
+| `fill-gap-valuation.ts` | TWSE `BWIBBU_d` + TPEx `peQryDate` 的 `fetchJson` | 二處 |
+| `fill-margin-trading.ts` | TWSE `MI_MARGN` + TPEx `margin/balance` 的 `fetchJson` | 二處 |
+
+實作：`grep -n "fetchJson" scripts/pipeline/fill-*.ts` 逐一補第二參數。不改 `http.ts` 本體。
+
+---
+
+## 5. 當日成功標記檔（`daily-pipeline.ts`）
+
+避免 17:30 / 18:00 補跑在 17:00 已成功時又跑滿 20 分鐘。
+
+- `main()` 開頭：
+  ```ts
+  const OK_MARK = join(process.cwd(), "data", "daily-pipeline-runs", `${todayStr}.ok`);
+  if (existsSync(OK_MARK)) {
+    console.log(`${todayStr} 今日 pipeline 已成功執行過（${OK_MARK}），跳過。`);
+    return;
+  }
+  ```
+  （`todayStr` 目前在 `main()` 中段才宣告——把它上移到開頭。）
+- `main()` 正常結束前（「每日主流程結束」那段 log 之後、`return` 之前）：
+  ```ts
+  mkdirSync(dirname(OK_MARK), { recursive: true });
+  writeFileSync(OK_MARK, new Date().toISOString());
+  ```
+- **提前結束（非交易日）也寫 `.ok`**——非交易日的補跑同樣該秒退（第 60 行那段 return 前補寫）。
+- **致命錯誤不寫 `.ok`**——`main().catch()` 分支不碰標記檔，補跑才有意義。
+- `data/daily-pipeline-runs/` 已 gitignored（現有 `progress.json` / `*.log` 都在裡面），`.ok` 一併忽略，
+  無需改 `.gitignore`。
+- **不做自動清理**——每天一個小檔（~30 bytes），累積無感；要清手動 `rm data/daily-pipeline-runs/*.ok`。
+
+---
+
+## 6. LaunchAgent 補跑時段
+
+`~/Library/LaunchAgents/com.piercelin.dailypipeline.plist`：
+
+```xml
+<key>StartCalendarInterval</key>
+<array>
+  <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>0</integer></dict>
+  <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>30</integer></dict>
+  <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>0</integer></dict>
+</array>
+```
+
+其餘（`ProgramArguments` 的 node 絕對路徑、`WorkingDirectory`、log 導向）不動。
+
+**部署步驟**（本份最後一個任務項，會先讓使用者看 plist diff 再執行）：
+
+```bash
+which node   # 先確認 plist 裡的 node 路徑仍有效（使用者若換過 nvm 版本要同步改）
+launchctl unload ~/Library/LaunchAgents/com.piercelin.dailypipeline.plist
+launchctl load  ~/Library/LaunchAgents/com.piercelin.dailypipeline.plist
+launchctl list | grep piercelin.dailypipeline   # 確認登錄
+```
+
+pipeline 全 upsert、且有 `.ok` 標記把關，補跑 idempotent、無害。
+
+---
+
+## 7. 收尾
+
+- `pnpm exec tsc --noEmit` 乾淨（本份只動 `scripts/pipeline/*`，不碰 app）。
+- **手動全流程驗證**：`rm -f data/daily-pipeline-runs/$(date +%F).ok`（若當日已有）→
+  `pnpm tsx scripts/pipeline/daily-pipeline.ts`：
+  - 正常跑完、寫出 `data/daily-pipeline-runs/{今日}.ok`。
+  - 再跑一次 → 秒退「今日 pipeline 已成功執行過」。
+- **launchd 冷觸發驗證**：`launchctl kickstart -k gui/$(id -u)/com.piercelin.dailypipeline`（先 `rm` 當日 `.ok`），
+  看 `logs/daily_pipeline_stdout.log` / `stderr.log`：TPEx 這次應該過（預熱 + 5 retry）；即便沒過，
+  應看到 `[TPEx 報價] 抓取失敗（不中斷 pipeline）` 且後續步驟（籌碼/估值/技術指標/大盤濾網/產業熱度）
+  仍有跑、pipeline 以非致命方式結束並寫 `.ok`。
+- 更新 `docs/PROGRESS.md`：新增「daily-pipeline 穩定性強化」段——記 launchd 冷連線事故、TPEx 改非關鍵
+  路徑的理由（同第 3.5 步融資融券哲學）、預熱 + retry:5 + 補跑時段 + `.ok` 標記、實測數字。
+- 更新 `CLAUDE.md`：
+  - 「`daily-pipeline.ts` 八步」描述——把 TPEx 報價從關鍵路徑改述為「TWSE 報價關鍵、TPEx 報價非關鍵
+    （失敗只 warn，隔天再抓 / backfill 補）」。
+  - `daily_pipeline.plist` 段——「每天 17:00 觸發」改「17:00 / 17:30 / 18:00 三次（補跑，靠 `{date}.ok`
+    標記避免重跑），**已部署到 launchd**」（順手修正舊述「尚未部署」）。
+  - `scripts/lib/http.ts` 段——補「pipeline 四支抓取腳本對政府端點傳 `retries:5, baseDelayMs:3000`；
+    `fill-daily-quotes.ts` 另對 `www.tpex.org.tw` 做冷連線預熱」。
+- 更新 `README.md`：若「使用方式 / 目前功能」有提到 daily-pipeline 排程時間或穩定性，同步。
+- `docs/ROADMAP.md`：本項不在 ROADMAP 清單上（維運強化），無打勾動作。
+- `git rm` 無（本份不刪檔）。
+
+---
+
+## 8. 給後續 PLAN 的備註（不在本份執行）
+
+- **PLAN 2**：資料層統一（`lib/data-context.ts` + `lib/latest-scan.ts`）+ 掃描腳本改造
+  （watchlist 成員豁免 gate → 解 6226 PR / 醞釀籌碼空白；JSON 加 `watchlistQuotes`）。
+- **PLAN 3**：盤中自動掃描（`scripts/pipeline/intraday-scan.ts` + `com.piercelin.intradayscan.plist`，
+  每 30 分、Hour 9–13 × Minute 0/30）+ screening 頁自動刷新 + watchlist 頁改讀 JSON、移除進頁 MIS。

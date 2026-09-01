@@ -12,7 +12,7 @@
 
 ### `scripts/pipeline/`
 
-- `daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」八步：補齊今日 TWSE+TPEx 報價 → 補今日加權指數 TAIEX 行情（FinMind，關鍵路徑）→ 抓今日三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 抓今日融資融券餘額（非關鍵路徑，證交所通常傍晚才出）→ 算技術指標 → 算大盤濾網（市場狀態燈號，非關鍵路徑，失敗只警告）→ 算產業熱度。歷史缺漏回補、跑選股皆為個別手動執行。抓取步驟的對外請求走 `scripts/lib/http.ts` 的 `fetchJson`（3 次 retry + 30s timeout），單一暫時性網路錯誤不會讓整條 pipeline 中斷。
+- `daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」八步：補齊今日報價（TWSE 關鍵路徑；TPEx 非關鍵路徑，失敗只警告、隔天再抓）→ 補今日加權指數 TAIEX 行情（FinMind，關鍵路徑）→ 抓今日三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 抓今日融資融券餘額（非關鍵路徑，證交所通常傍晚才出）→ 算技術指標 → 算大盤濾網（市場狀態燈號，非關鍵路徑，失敗只警告）→ 算產業熱度。跑完無致命錯誤時寫 `data/daily-pipeline-runs/{date}.ok` 標記，同日重跑會秒退（供 launchd 17:00 / 17:30 / 18:00 三次觸發的補跑機制用）。歷史缺漏回補、跑選股皆為個別手動執行。抓取步驟的對外請求走 `scripts/lib/http.ts` 的 `fetchJson`（pipeline 對政府端點用 5 次 retry + 冷連線預熱），單一暫時性網路錯誤不會讓整條 pipeline 中斷。
 - `fill-daily-quotes.ts`：補齊全市場報價——TWSE 用證交所 `MI_INDEX` 報表 API，支援指定任意單一天（可補歷史缺漏）；TPEx 用櫃買中心 OpenAPI，不支援指定日期，只能補「目前最新一天」。皆會自動新增資料庫沒有的股票記錄。
 - `fill-institutional-trading.ts`：抓取指定日期的 TWSE（`T86`）+ TPEx（`tpex_3insti_daily_trading`）三大法人買賣超寫入 `InstitutionalTrading`。TWSE 支援任意歷史日期，TPEx 不支援日期參數、永遠回傳「目前最新一天」。
 - `fill-gap-valuation.ts`：抓取指定日期的個股估值（本益比/股價淨值比/殖利率）寫入 `StockValuation`，TWSE 與 TPEx 皆支援任意歷史日期。
@@ -93,7 +93,8 @@ pnpm start    # 跑打包後的正式伺服器
 # 初次建置資料庫（股票清單 + 產業別）
 pnpm prisma db seed
 
-# 每日主流程（補齊今日 TWSE+TPEx 報價 → 抓今日籌碼 → 抓今日估值 → 抓今日融資融券 → 算技術指標 → 算大盤濾網 → 算產業熱度）
+# 每日主流程（補齊今日報價 → 補 TAIEX → 抓今日籌碼 → 抓今日估值 → 抓今日融資融券 → 算技術指標 → 算大盤濾網 → 算產業熱度）
+# 由 launchd（com.piercelin.dailypipeline.plist）每天 17:00 / 17:30 / 18:00 觸發；當日已成功則補跑秒退
 pnpm tsx scripts/pipeline/daily-pipeline.ts
 
 # --- pipeline 各步驟也可單獨執行 ---

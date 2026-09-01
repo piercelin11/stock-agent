@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../../generated/prisma/client.js";
 import { fillOneDayTwse, fillTodayTpex } from "./fill-daily-quotes.js";
@@ -12,6 +14,14 @@ import { calculateOneDayHeat } from "./calculate-industry-heat.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
+
+// 冷進程連續打兩個政府 host（TWSE → TPEx）之間喘口氣：TWSE 那次呼叫已把 DNS/TLS 暖起來，
+// 但 www.tpex.org.tw 是這個進程碰的第二個 host，第一次握手常被 RST（launchd 事故 2026-09-01）。
+const TPEX_COLD_GAP_MS = 4000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
@@ -28,6 +38,16 @@ async function main() {
   const startedAt = new Date();
   console.log(`===== 每日主流程開始 ${startedAt.toISOString()} =====`);
 
+  const todayStr = formatDate(new Date());
+
+  // 當日成功標記檔：17:00 已成功時，讓 17:30 / 18:00 的補跑秒退，不重跑 20 分鐘。
+  // 只在「跑完無致命錯誤」（正常結束 or 非交易日提前結束）時寫，致命錯誤不寫 → 補跑才有意義。
+  const OK_MARK = join(process.cwd(), "data", "daily-pipeline-runs", `${todayStr}.ok`);
+  if (existsSync(OK_MARK)) {
+    console.log(`${todayStr} 今日 pipeline 已成功執行過（${OK_MARK}），跳過。`);
+    return;
+  }
+
   let quotesWritten = 0;
   let quotesDerivativesSkipped = 0;
   let indexWritten = 0;
@@ -39,21 +59,38 @@ async function main() {
   let heatSectorCount = 0;
   let warningCount = 0;
 
-  const todayStr = formatDate(new Date());
-
-  // 1. 補齊今天的報價（TWSE + TPEx）
+  // 1. 補齊今天的報價
   let twseHasData = false;
   let tpexHasData = false;
+
+  // 1a. TWSE 報價（關鍵路徑：失敗 throw）
   try {
     const twseResult = await fillOneDayTwse(todayStr);
-    const tpexResult = await fillTodayTpex(todayStr);
-    quotesWritten = twseResult.processed + tpexResult.processed;
-    quotesDerivativesSkipped = twseResult.skippedDerivatives + tpexResult.skippedDerivatives;
+    quotesWritten += twseResult.processed;
+    quotesDerivativesSkipped += twseResult.skippedDerivatives;
     twseHasData = !twseResult.isNonTradingDay;
+  } catch (err) {
+    throw new PipelineStepError("補齊今日 TWSE 報價", `處理日期 ${todayStr} 失敗`, err);
+  }
+
+  // 1b. 冷進程連續打兩個政府 host 之間喘口氣
+  await sleep(TPEX_COLD_GAP_MS);
+
+  // 1c. TPEx 報價（非關鍵路徑：失敗只 warn，tpexHasData 留 false）
+  //     TPEx OpenAPI 本來就只給「最新一天」，隔天 pipeline 會再抓；缺的那天可用 backfill-daily-quotes.ts 補。
+  //     比照第 3.5 步融資融券的既有寫法。
+  try {
+    const tpexResult = await fillTodayTpex(todayStr);
+    quotesWritten += tpexResult.processed;
+    quotesDerivativesSkipped += tpexResult.skippedDerivatives;
     tpexHasData = !tpexResult.isStaleDate && !tpexResult.isNonTradingDay;
     if (tpexResult.isStaleDate) warningCount++;
   } catch (err) {
-    throw new PipelineStepError("補齊今日報價", `處理日期 ${todayStr} 失敗`, err);
+    console.warn(
+      `[TPEx 報價] 抓取失敗（不中斷 pipeline）: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    warningCount++;
+    // tpexHasData 維持初始 false
   }
 
   // TWSE 沒開盤且 TPEx 也拿不到當日資料：今天沒有任何當日資料可用，後面的計算沒有意義，提前結束
@@ -65,6 +102,7 @@ async function main() {
     console.log(`總耗時: ${elapsedSeconds} 秒`);
     console.log(`今日新增報價筆數: ${quotesWritten}`);
     console.log(`今日警告: ${warningCount} 則`);
+    writeOkMark(OK_MARK); // 非交易日的補跑同樣該秒退
     return;
   }
 
@@ -182,6 +220,13 @@ async function main() {
   console.log(`大盤濾網: ${regimeLabel}`);
   console.log(`產業熱度計算產業數: ${heatSectorCount}`);
   console.log(`今日警告: ${warningCount} 則`);
+
+  writeOkMark(OK_MARK);
+}
+
+function writeOkMark(okMark: string): void {
+  mkdirSync(dirname(okMark), { recursive: true });
+  writeFileSync(okMark, new Date().toISOString());
 }
 
 main()

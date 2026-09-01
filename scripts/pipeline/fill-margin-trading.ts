@@ -83,7 +83,7 @@ async function fetchTwseMargin(isoDate: string): Promise<MarginRow[] | null> {
   url.searchParams.set("date", isoDate.replaceAll("-", ""));
   url.searchParams.set("selectType", "ALL");
 
-  const body = await fetchJson<TwseMarginResponse>(url.toString());
+  const body = await fetchJson<TwseMarginResponse>(url.toString(), { retries: 5, baseDelayMs: 3000 });
   if (body.stat !== "OK" || !body.tables) {
     // 非交易日的 stat 是「很抱歉，沒有符合條件的資料!」，無 tables
     return null;
@@ -121,7 +121,7 @@ async function fetchTpexMargin(isoDate: string): Promise<MarginRow[] | null> {
   url.searchParams.set("id", "");
   url.searchParams.set("response", "json");
 
-  const body = await fetchJson<TpexMarginResponse>(url.toString());
+  const body = await fetchJson<TpexMarginResponse>(url.toString(), { retries: 5, baseDelayMs: 3000 });
   const table = body.tables?.[0];
   if (!table || !table.totalCount || !table.data || table.data.length === 0) {
     // 非交易日 totalCount 為 0 / data 空
