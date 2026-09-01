@@ -2,6 +2,7 @@ import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, Market, SecurityType } from "../../generated/prisma/client.js";
 import { fetchJson } from "../lib/http.js";
+import { toSecurityType } from "../lib/security-type.js";
 
 const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
 const prisma = new PrismaClient({ adapter });
@@ -64,16 +65,6 @@ function rocDateToIso(rocDate: string): string {
   const day = rocDate.slice(5, 7);
   const year = rocYear + 1911;
   return `${year}-${month}-${day}`;
-}
-
-// 沿用 fill-daily-quotes.ts 的分類規則，這裡只保留一般股票（stock），ETF/權證/可轉債等不寫入籌碼表
-function toSecurityType(code: string, name: string): SecurityType {
-  if (code.startsWith("00")) return SecurityType.etf;
-  if (/^.{4}[A-Za-z]$/.test(code)) return SecurityType.preferred;
-  if (/^\d{6}$/.test(code) || name.includes("購") || name.includes("售")) return SecurityType.warrant;
-  if (/^\d{5}$/.test(code)) return SecurityType.bond;
-  if (/^\d{4}$/.test(code)) return SecurityType.stock;
-  return SecurityType.other;
 }
 
 async function fetchTwseInstitutional(isoDate: string): Promise<InstitutionalRow[] | null> {

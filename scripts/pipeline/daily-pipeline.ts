@@ -2,6 +2,7 @@ import "dotenv/config";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../../generated/prisma/client.js";
 import { fillOneDayTwse, fillTodayTpex } from "./fill-daily-quotes.js";
+import { fillTodayIndex } from "../backfill/backfill-index-quotes.js";
 import { fillOneDayInstitutional } from "./fill-institutional-trading.js";
 import { fillOneDayValuation } from "./fill-gap-valuation.js";
 import { fillOneDayMargin } from "./fill-margin-trading.js";
@@ -29,6 +30,7 @@ async function main() {
 
   let quotesWritten = 0;
   let quotesDerivativesSkipped = 0;
+  let indexWritten = 0;
   let institutionalWritten = 0;
   let valuationsWritten = 0;
   let marginWritten = 0;
@@ -64,6 +66,23 @@ async function main() {
     console.log(`今日新增報價筆數: ${quotesWritten}`);
     console.log(`今日警告: ${warningCount} 則`);
     return;
+  }
+
+  // 1.5. 補齊今天的加權指數（TAIEX）行情
+  // FinMind TaiwanStockPrice?data_id=TAIEX，含完整 OHLC。pipeline 唯一補 TAIEX DailyQuote 的地方
+  // （fill-daily-quotes 抓的是全市場個股，MI_INDEX 個股明細不含加權指數這筆）。
+  // 第 4 步 calculate-technical-indicators 的 where 有納入 TAIEX、第 5 步大盤濾網吃它算 MA60/斜率，
+  // 都依賴這步先補好當日 close。關鍵路徑：FinMind 盤後即有當日 TAIEX（2026-09-01 實測），拿不到就 throw。
+  try {
+    const indexResult = await fillTodayIndex(todayStr, prisma);
+    indexWritten = indexResult.processed;
+    if (indexResult.isNonTradingDay) {
+      // 走到這裡代表 TWSE/TPEx 有當日資料（前面沒提前結束），TAIEX 卻沒有 → 資料源不同步，印警告不中斷
+      console.warn(`[加權指數] ${todayStr} FinMind 尚無當日 TAIEX，跳過（大盤濾網會降級 step1-breadth-only）`);
+      warningCount++;
+    }
+  } catch (err) {
+    throw new PipelineStepError("補齊今日加權指數", `處理日期 ${todayStr} 失敗`, err);
   }
 
   // 2. 抓取今天的三大法人籌碼（TWSE + TPEx）
@@ -102,6 +121,7 @@ async function main() {
   }
 
   // 4. 重新計算技術指標（只算當天：每支撈最近 ~250 筆當輸入、只 upsert 最新一天，秒級）
+  //    where 有納入 TAIEX，所以第 1.5 步補好的當日 TAIEX close 會在這步一併算出 TechnicalIndicator。
   // 代價：pipeline 漏跑那天的技術指標不會自動補，需手動 calculate-technical-indicators.ts <code> 全歷史重算。
   try {
     const indicatorResult = await calculateTechnicalIndicators(undefined, { mode: "latest" });
@@ -153,6 +173,7 @@ async function main() {
   console.log(`\n===== 每日主流程結束 ${finishedAt.toISOString()} =====`);
   console.log(`總耗時: ${elapsedSeconds} 秒`);
   console.log(`今日新增報價筆數: ${quotesWritten}`);
+  console.log(`今日加權指數寫入筆數: ${indexWritten}`);
   console.log(`今日跳過權證/可轉債: ${quotesDerivativesSkipped} 筆`);
   console.log(`今日籌碼寫入筆數: ${institutionalWritten}`);
   console.log(`今日估值寫入筆數: ${valuationsWritten}`);

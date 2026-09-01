@@ -401,6 +401,23 @@
 
 ---
 
+**8/31 行情覆蓋調查 → 權證誤殺修正 + 下市標記 `delistedAt`（2026-09-01）**：`docs/PLAN.md`「股票資料品質修正」。起因：核對 8/31 行情發現 2,148 檔一般股票有 207 檔缺，逐檔追查（DB 比對 + `MI_INDEX` 核對 + FinMind 逐檔查 + 網路查證）分四類：
+
+- **權證過濾誤殺（bug，2 檔）**：`toSecurityType` 的「名稱含購/售 → warrant」排在「4 碼數字 → stock」之前，**2945 三商家購**與 **3085 新零售**被三支 pipeline 腳本（行情/法人/融資融券各持一份複製）每天跳過——行情停在 8/27（FinMind 回補塞的）、融資融券完全空白。**修法**：抽共用 `scripts/lib/security-type.ts`（三腳本改 import）、「4 碼數字 → stock」提前（權證代號一律 6 碼，無誤放風險；名稱判斷留作 put 權證等 fallback）。單測 `security-type.test.ts` 7 案；以 8/31 全市場 44,454 筆實資料跑新舊分類 diff，**僅 2945/3085 兩檔改變、零權證誤放**。
+- **早已下市殭屍（約 168 檔）**：99 檔從無行情（2020 回補起點前下市）+ 約 69 檔停在 2020~2026 年中（康友-KY、中壽、新光金、京城銀…）。
+- **當日零成交（約 29 檔，上櫃冷門股為主 + 正峰 1538）**：官方源開高低收 `--`，解析器跳過＝設計行為。FinMind 核對這些股 8/31 列存在但 `close=0`、量個位數～百股，沒死。
+- **停牌/換股（4 檔）**：三商壽 2867（8/20 停止買賣、9/1 併玉山金永久下市）、中光電 5371（8/24 停牌、9/3 轉中光電投控 3718 上櫃 1:1 換股）、巧新 1563（現金減資 25%，9/7 復牌）、沛爾生醫-創 6949（1 拆 20 面額變更，9/7 復牌）。
+
+**回補（修完過濾後執行）**：TWSE `fill-daily-quotes --date=2026-08-28/-08-31` 重跑（2945 兩日入庫 = bug 修好直接證據）；FinMind 補兩檔缺口至 9/1（3085 的 8/28、9/1 是零成交日，FinMind `close=0` 跳過不入庫，正確）；`calculate-technical-indicators.ts 2945 3085` 全歷史重算（3,223 筆）；`fill-margin-trading --backfill=45` 實得 45 個交易日（6/29~8/31）→ **3085 拿到完整 45 日；2945 在 `MI_MARGN` 個股明細裡不存在 = 非信用交易標的**，無資料是市場事實非 bug（`computeMarginSurgePercentile` 回 null → margin-chasing 永不觸發，行為正確）；法人 TWSE 8/28~9/1 三日重跑補齊，**3085 的 TPEx 法人缺口（7/9 起）FinMind 回 0 列補不到**，接受 degraded（修好過濾後每日更新自然接上）。
+
+**`Stock.delistedAt DateTime?`（migration `20260901084415`）**：null = 存續；值 = 最後行情日（從無行情 = `2020-01-01` sentinel）。維護腳本 `scripts/backfill/mark-delisted.ts`（手動月頻，**不進 daily-pipeline**——復牌股行情入庫不依賴 flag，`fill-daily-quotes` 是 API 回什麼 upsert 什麼；flag 消費者只有覆蓋率分母與 FinMind backfill 名單，遲鈍幾週無害）：門檻「最後行情距 DB 最新交易日 > 60 日曆日」雙向同步（標記 + 復牌自動清除）。首輪標記 170 檔、存續 1,978 檔。抽查：巧新/沛爾/2945/3085 正確存續；**三商壽/中光電最後行情才過 ~2 週未達 60 天門檻、本輪未標記**（PLAN §3 抽查預期與自訂規則矛盾，以規則為準，下次月跑自然入列）。
+
+**下游接線**：`getDbHealth` 分母改 `delistedAt: null`（8/31 行情覆蓋率 90.5% → **98.2%**，法人 94%、技術指標 98.3%、融資融券 94.1%；殘餘缺口＝零成交股＋停牌股）；`backfill-daily-quotes` / `backfill-institutional-trading` 撈清單排除已下市（省 FinMind 配額）；`run-signal-scan.ts` realtime 的 `Stock` 撈取加 `delistedAt: null`（省 MIS batch；eod 路徑從當日 `DailyQuote` 出發天然排除，不用動）。驗證：`tsc --noEmit` 乾淨、45 案單測全過。
+
+---
+
+**daily-pipeline 補當日 TAIEX（2026-09-01）**：起因是 `daily-pipeline.ts` 從沒有任何一步抓加權指數當日行情——`fill-daily-quotes.ts` 抓的是全市場個股，`MI_INDEX` 個股明細不含加權指數這筆，所以 TAIEX 的 `DailyQuote` 只會停在上次手動跑 `backfill-index-quotes.ts` 的那天，之後第 4 步技術指標對 TAIEX 沒新資料可算、第 5 步大盤濾網一直吃舊的 MA60。**選型**：實測 `MI_INDEX` 的 `tables[0]`「價格指數(臺灣證券交易所)」有帶「發行量加權股價指數」收盤，時效與個股報價同步，但**只有收盤沒有 OHL**；FinMind `TaiwanStockPrice?data_id=TAIEX` 有完整 OHLC，且 2026-09-01 當天盤後即有資料。選 FinMind——完整 OHLC 跟 `DailyQuote` 其他列一致、不用在 schema 搞特例，且與既有 `backfill-index-quotes.ts` 同 API 同 dataset。**改動**：`backfill-index-quotes.ts` 抽出 `export fillTodayIndex(isoDate, injectedPrisma?)`（比照 `fillOneDayTwse`：吃 isoDate、可傳 pipeline prisma 單例不 `$disconnect`、回 `{ processed, isNonTradingDay }`；FinMind 非交易日不回該日 row → `isNonTradingDay: true`），共用 helper `ensureIndexStock` / `upsertIndexRows`，全區間回補 `main()` 加 `import.meta.url === file://${process.argv[1]}` guard 避免被 import 時觸發。`daily-pipeline.ts` 新增**第 1.5 步**（報價後、籌碼前），**關鍵路徑**：FinMind 拋錯就 `throw PipelineStepError`；但「FinMind 尚無當日 TAIEX（資料源不同步）」只印警告 + `warningCount++` 不中斷（大盤濾網會自動降級 `step1-breadth-only`）。收尾 log 加「今日加權指數寫入筆數」。pipeline 步數描述由「七步」改「八步」。**驗證**：`tsc --noEmit` 乾淨；`backfill-index-quotes.ts` 全區間重跑寫入 1619 筆、DB 查得 2026-09-01 TAIEX `O 46177.11 / H 46948.72 / L 46081.11 / C 46948.72`。TAIEX 的 `TechnicalIndicator` 仍停在 08-31（`"latest"` 模式只 upsert 最新交易日，下次 pipeline 第 4 步會帶上 09-01）。**附帶發現（未修）**：`.env` 的 `FINMIND_API_KEY` 值前面多一個 `"` 引號，帶 token 呼叫會 400 `Token is illegal` → 一直在吃未註冊額度（300 次/小時）。
+
 尚未開始/明確不做：估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯（`topic_alignment` 因子固定中性分）、AnalysisResult 產出流程（Phase D）、`screening/`（統一入口 `run-signal-scan.ts`；舊三支已於 4.5.4 退役刪除）與 `backfill/` 各支皆為獨立手動執行（不在 `daily-pipeline.ts` 內）、`run-signal-scan.ts` 的階段權重 / 法人因子曲線校準（首版全拍腦袋，靠肉眼看單日排名 + 實盤觀察調）、**整個回測系統**（3.0～3.7 已從 `main` 移除、擱置，見上方；程式碼在 `feat/backtest-ui-3.6-3.7` 分支，OOM 待修）。`archive/` 的 `calculate-screen-score.ts` / `run-screener.ts` / `fetch-candidate-details.ts` / `top20-gainers.js` 已停用不維護。
 
 （每次進度更新，麻煩幫我一併更新這個區塊。）

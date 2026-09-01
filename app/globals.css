@@ -5,13 +5,13 @@
 :root {
   color-scheme: dark;
 
-  --background: #020617;
+  --background: #000102;
   --foreground: #f1f5f9;
-  --card: #0f172a;
+  --card: #0E0E0E;
   --card-foreground: #f1f5f9;
-  --muted: #1e293b;
-  --muted-foreground: #94a3b8;
-  --border: #1e293b;
+  --muted: #1A1A1A;
+  --muted-foreground: #787878;
+  --border: #1E2327;
   --input: #334155;
   --ring: #3b82f6;
 
@@ -19,13 +19,13 @@
   --primary-foreground: #ffffff;
 
   /* 台股漲跌：漲紅跌綠。與狀態色語意不同，刻意不複用。 */
-  --up: #fb7185;
-  --down: #34d399;
+  --up: #C43A25;
+  --down: #117C1F;
 
   /* 狀態語意，字/邊框/底用透明度變體。大盤號誌燈直接複用（多=success/中=warning/空=destructive）。 */
-  --destructive: #fb7185;
-  --warning: #fbbf24;
-  --success: #34d399;
+  --destructive: #C43A25;
+  --warning: #DC9247;
+  --success: #117C1F;
 }
 
 @theme inline {
