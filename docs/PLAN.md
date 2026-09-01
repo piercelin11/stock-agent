@@ -17,9 +17,10 @@ PLAN 3 加了 `intraday-scan.ts`（launchd 每 30 分自動跑 realtime 掃描�
 事故（PLAN 3 §4.3）的根因：`progress.json` 的 `done` 態無限期殘留，盤後進頁撿到幾小時前手動跑的
 realtime 殘檔。PLAN 3 §4.3 只用 `DONE_STALE_MS`(30 分) 擋掉，本份是徹底解法。
 
-**設計原則**：選股頁 = 「讀最新掃描結果顯示 + 一顆手動重跑按鈕」。「用哪份」由
-`resolveDataContext()` 決定，跟 watchlist 完全一致。realtime 掃描的產出者只剩 `intraday-scan.ts`
-（launchd）——前端不再自己 spawn。
+**設計原則**：選股頁 = 「進頁讀最新掃描結果顯示 + 一顆手動重跑按鈕」。「用哪份」由
+`resolveDataContext()` 決定，跟 watchlist 完全一致——**包含「進頁讀一次就定住、要看新的自己重整」**
+（watchlist 也是這樣，不自動輪詢）。realtime 掃描的產出者只剩 `intraday-scan.ts`（launchd）
+——前端不再自己 spawn、也不再自動刷新。
 
 ---
 
@@ -27,7 +28,7 @@ realtime 殘檔。PLAN 3 §4.3 只用 `DONE_STALE_MS`(30 分) 擋掉，本份是
 
 **動：**
 
-- `components/screening/ScreeningPanel.tsx`：**大幅精簡**（~696 行 → 估 ~380 行）。見 §1–§4。
+- `components/screening/ScreeningPanel.tsx`：**大幅精簡**（~696 行 → 估 ~330 行）。見 §1–§4。
 - `lib/actions/signal-scan.ts`：
   - `getScanMode()` → 改名/改回傳 `getScreeningContext()`，回
     `{ mode: DataMode; asOfDate; latestEodDate; hasScan: boolean }`（直接透傳 `resolveDataContext()`
@@ -39,11 +40,13 @@ realtime 殘檔。PLAN 3 §4.3 只用 `DONE_STALE_MS`(30 分) 擋掉，本份是
       最新 realtime 檔）→ `toView()`。無 JSON → null。
   - **刪除**：`startSignalScan()` / `getSignalScanProgress()` / `SignalScanProgress` 型別 /
     `readProgress()` / `PROGRESS_PATH` 常數 / `STALE_MS`。
+  - **刪除**：`getLatestScanMeta()`（自動刷新用，本份一併移除自動刷新——見 §4）。
   - `runSignalScanEod()`：body 併入 `getScreeningResult()` 的 eod 分支後，這個 export 可留作
     「手動強制重跑盤後」用（見 §3），或直接讓 `getScreeningResult()` 帶一個 `force?: "eod"|"realtime"` 參數。
     傾向後者（少一個 export）。
-  - `getLatestScanMeta()` / `getSignalScanResult()` / `readLatestRealtimeFile()`：**保留**
-    （自動刷新仍用）。
+  - `getSignalScanResult()` / `readLatestRealtimeFile()`：**保留**——`getScreeningResult()` 的
+    intraday/stale 分支讀最新 realtime JSON 時重用 `readLatestRealtimeFile()`。`getSignalScanResult()`
+    若最後只剩被 `getScreeningResult()` 內部呼叫，可併掉（實作判斷，傾向直接用 `readLatestRealtimeFile` + `toView`）。
 - `scripts/screening/_run-signal-scan.ts`：**刪除**（`git rm`）。唯一呼叫者是被刪的
   `startSignalScan()`。realtime 掃描的背景執行者只剩 `intraday-scan.ts`（launchd）。
 - `scripts/screening/run-signal-scan.ts`：`runRealtime` 內部的 `writeProgress()` /
@@ -75,8 +78,10 @@ realtime 殘檔。PLAN 3 §4.3 只用 `DONE_STALE_MS`(30 分) 擋掉，本份是
 
 **取代**：頁面標題下顯示一行當前狀態（由 `getScreeningContext()` 給）：
 - `eod` → 「盤後定案 · {asOfDate}」
-- `intraday` → 「盤中即時 · 每 30 分自動更新 · 截至 {asOfDate}」
+- `intraday` → 「盤中即時 · 背景每 30 分更新，重整頁面看最新 · 截至 {asOfDate}」
 - `stale` → 「盤後未跑，顯示最近一次掃描（{asOfDate}）」或「尚無掃描結果」
+
+（「重整頁面看最新」——本份移除自動刷新，跟 watchlist 一致，見 §4。）
 
 ---
 
@@ -163,17 +168,22 @@ export async function getScreeningResult(
 
 ---
 
-## 4. 自動刷新（保留，微調）
+## 4. 移除自動刷新
 
-PLAN 3 §4.2 的 `setInterval(60_000)` 自動刷新**保留**，但簡化守衛：
+PLAN 3 §4.2 加的 `setInterval(60_000)` 自動刷新——**整段刪除**。跟 watchlist 一致：進頁讀一次
+就定住，要看最新的自己重整頁面。
 
-- 舊守衛：`scanBusyRef.current`（手動掃描中）+ `viewRef.current.source !== "realtime"`。
-- 新：`scanBusy` state 已刪 → 改用 `isPending`（`useTransition`，手動重跑時為 true）。
-  守衛變成 `if (isPendingRef.current) return;` + `if (viewRef.current?.source !== "realtime") return;`。
-- 其餘不變：每 60 秒 `getLatestScanMeta()`（只讀最新 realtime `{timestamp}.json`），比 `view.queriedAt`
-  新 → `getSignalScanResult()` 重載。
-- **eod 模式下 `view.source === "eod"` → 守衛擋住 → 自動刷新不動作**。正確：盤後結果不該被
-  launchd 的 realtime 掃描蓋掉。
+刪掉：
+- 自動刷新的 `useEffect`（`setInterval` 每 60 秒 `getLatestScanMeta()` 比 timestamp 重載）。
+- `autoRefreshRef` / `viewRef` / `scanBusyRef`（`useRef` 鏡射 state，只為 interval callback 服務）。
+- `getLatestScanMeta()` action（`lib/actions/signal-scan.ts`，唯一呼叫者是這個自動刷新）。
+- 「每分鐘自動更新」小字（§1 的狀態行改成「背景每 30 分更新，重整頁面看最新」）。
+
+**理由**：
+- 選股頁通常是「想看的時候才去看」，不是開著當看盤軟體 → 自動輪詢價值低。
+- 自動刷新 + `getLatestScanMeta`（比 eod / realtime 檔的 timestamp）就是「昨」badge 事故的
+  一半根因（另一半是進頁撿殘檔，§2 已處理）。整段移除比留著加守衛乾淨。
+- 兩頁心智模型完全一致：都是 `resolveDataContext()` → 進頁讀一次。
 
 ---
 
@@ -193,19 +203,21 @@ PLAN 3 §4.2 的 `setInterval(60_000)` 自動刷新**保留**，但簡化守衛�
   - **盤後**（DB 有今日資料）：進 `/screening` → 自動顯示盤後掃描結果、狀態行「盤後定案 · {date}」、
     **無「昨」badge**、無 toggle、無進度條。按「重跑盤後掃描」→ 秒級刷新。
   - **盤中**（模擬：刪掉今日 DailyQuote 或改判斷）：進頁 → 若 `data/signal-scan-results/` 有今日
-    `{timestamp}.json` → 顯示它、狀態行「盤中即時 · 每 30 分自動更新」。按「立即掃描」→ 卡 ~30 秒
-    → 新結果。60 秒自動刷新：手動跑一次 `intraday-scan.ts` 產新檔 → 頁面自動換上。
+    `{timestamp}.json` → 顯示它、狀態行「盤中即時 · 背景每 30 分更新，重整看最新」。按「立即掃描」
+    → 卡 ~30 秒 → 新結果。**不會自動刷新**——手動跑 `intraday-scan.ts` 產新檔後，要重整頁面才換上。
   - **stale**（無任何掃描 JSON）：進頁 → 「尚無掃描結果」提示 + 「立即掃描」按鈕。
-  - 切走 `/screening` 再切回：不再有「接管輪詢」邏輯——就是重新跑一次 §3.1 的進頁載入。
+  - 切走 `/screening` 再切回：不再有「接管輪詢」邏輯——就是重新跑一次 §3.1 的進頁載入
+    （React 重新掛載元件會自然觸發）。
 - 更新 `docs/PROGRESS.md`：新增「選股頁簡化（PLAN 4）」段——記移除 toggle + 背景任務的理由
   （launchd 自動掃描後過時 + 「昨」badge 根因）、`getScreeningResult()` 單一入口、`_run-signal-scan.ts`
   刪除、「立即掃描」改同步卡 UI 的取捨。
 - 更新 `CLAUDE.md`：
   - `signal-scan.ts` action 段——`getScanMode` → `getScreeningContext`；新增 `getScreeningResult({force})`；
     刪 `startSignalScan` / `getSignalScanProgress` / `SignalScanProgress`。
-  - `/screening` 頁段——**大改**：移除 toggle / 背景任務 / 進度條的描述；改為「進頁 `getScreeningContext()`
-    → `getScreeningResult()` 依 `resolveDataContext().mode` 回結果；eod 同步跑、intraday/stale 讀
-    最新 realtime JSON；一顆按鈕手動重跑（realtime 同步卡 ~30 秒）；60 秒自動刷新僅 realtime 情境」。
+  - `/screening` 頁段——**大改**：移除 toggle / 背景任務 / 進度條 / 自動刷新的描述；改為「進頁
+    `getScreeningContext()` → `getScreeningResult()` 依 `resolveDataContext().mode` 回結果；eod
+    同步跑、intraday/stale 讀最新 realtime JSON；一顆按鈕手動重跑（realtime 同步卡 ~30 秒）；
+    **進頁讀一次就定住，要看最新自己重整**（跟 watchlist 一致，無自動輪詢）」。
   - 「背景任務」段——`_run-signal-scan.ts` + `startSignalScan()` 已移除；realtime 掃描的背景執行者
     只剩 `intraday-scan.ts`（launchd）。
   - `scripts/screening/` 段——`_run-signal-scan.ts` 移除。
@@ -217,18 +229,21 @@ PLAN 3 §4.2 的 `setInterval(60_000)` 自動刷新**保留**，但簡化守衛�
 ## 7. 風險 / 取捨（先講清楚）
 
 1. **「立即掃描」盤中會卡 UI ~30 秒**。舊設計 spawn 背景不卡。取捨：盤中主要靠 launchd 每 30 分
-   自動產出，手動按鈕變少用；且省掉「spawn 子進程 + 輪詢 progress.json + 接管」一大坨易錯的
-   狀態機（「昨」badge 就是它造成的）。淨值得。
+   自動產出，手動按鈕變少用；且省掉「spawn 子進程 + 輪詢 progress.json + 接管 + 自動刷新」一大坨
+   易錯的狀態機（「昨」badge 就是它造成的）。淨值得。
    - 若日後真的常需要「盤中不等 launchd、馬上要新的又不想卡 UI」→ 再考慮讓按鈕改觸發
-     `intraday-scan.ts` 的輕量 spawn（但**不做進度條、不接管**，按完就等 60 秒自動刷新撿新檔）。
-     本份先不做。
+     `intraday-scan.ts` 的輕量 spawn（不做進度條、不接管），按完提示「掃描已在背景執行，稍後
+     重整頁面查看」。本份先不做。
 
-2. **`getScreeningResult()` 在 eod 模式進頁會同步跑一次全市場掃描**（秒級，PLAN 2 實測 ~數秒）。
+2. **移除自動刷新後，盤中把頁面開著不會自己更新**。要看 launchd 每 30 分產出的新掃描得手動
+   重整。取捨：跟 watchlist 一致的心智模型 > 「開著當看盤軟體」的便利（選股頁不是那個用途）。
+
+3. **`getScreeningResult()` 在 eod 模式進頁會同步跑一次全市場掃描**（秒級，PLAN 2 實測 ~數秒）。
    比「讀一份現成 JSON」慢。但 eod 掃描本來就沒有落地 JSON 的機制（只有 realtime 會寫
    `{timestamp}.json`，eod 寫 `{YYYY-MM-DD}.json` 但那是 `run-signal-scan.ts` CLI 行為，Server Action
    路徑的 `runSignalScanEod` 現況也是每次同步跑）。維持現狀，不新增 eod 結果快取。
 
-3. **`run-signal-scan.ts` 的 `writeProgress` 逐批進度**：`_run-signal-scan.ts` 刪掉後，寫
+4. **`run-signal-scan.ts` 的 `writeProgress` 逐批進度**：`_run-signal-scan.ts` 刪掉後，寫
    `progress.json` 的只剩 `runRealtime` 自己（CLI / `intraday-scan.ts` 走這條）。前端不讀了。
    保留無害（CLI 手動跑時 stdout 也有進度）。要不要順手刪 `writeProgress` 留給實作判斷——
    傾向保留，減少 diff。
