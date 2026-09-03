@@ -10,6 +10,29 @@
 
 逐次的設計理由、實測數字、驗證過程全部記在 [docs/PROGRESS.md](PROGRESS.md)。
 
+---
+
+## 6. 盤中資料源強化（PLAN 5，接續四份 PLAN，2026-09-03）
+
+四份 PLAN 上線後盤中掃描能自動跑，但幾個粗糙處：realtime 掃描結果每次一個 `{timestamp}.json` 累積成垃圾（一週 ~50 個）；`fetchMisBatch` 一批 fetch 失敗就整批放棄（開盤前 / 睡眠喚醒時常整批掛，`failedCount` 120 的倍數）；進頁沒有「掃描明顯缺失就重抓」的機制。**已定案，待開 PLAN：**
+
+- [ ] **盤中 realtime 掃描改「單一檔覆蓋」**：`{YYYY-MM-DD}-intraday.json` 每 30 分原子覆蓋（先寫 `.tmp` 再 rename），取代累積的 `{timestamp}.json`。`readLatestRealtimeFile()` 改讀固定檔名，不再 `readdir + sort`。**不跟盤後的 `{YYYY-MM-DD}.json` 合併**——語意衝突（盤後定案 vs 即時估價）、`getScreeningResult` 的「有 `{date}.json` 就不重算」快取機制會誤讀、`data-context` 判 `intraday` 靠 `source === "realtime"` 分不出。兩檔名各自單一、各自覆蓋。
+- [ ] **進頁 fallback：DB → intraday JSON →（明顯缺失）主動重抓**：`getScreeningResult()` 的 realtime 分支——讀 `{date}-intraday.json`，若 `failedCount / totalStocks > 0.10`（缺超過 10%）→ 判定明顯缺失 → **直接同步 `runSignalScan(realtime)` 重跑並覆蓋**（方案 A：卡 UI ~30 秒 + loading 文案「盤中資料不完整，正在重新抓取全市場報價…（約 30 秒）」，不給跳過）。**用 `failedCount` 佔比判定，不用 `estimatedCount`**（缺 `z` 用 `high` 代入是 MIS 常態、每份都 1600+ 檔，拿來當觸發條件會每次進頁都重跑）。launchd 加重試後這個 fallback 觸發機率很低。**方案 C（背景 spawn + 前端輪詢）排除**——等於把 PLAN 4 剛清掉的背景任務 + `progress.json` 輪詢 + 「昨」badge 那套請回來，投報率不值。
+- [ ] **`fetchMisBatch` 加重試**：`scripts/lib/mis-quotes.ts`，`catch` / `!res.ok` 分支 `sleep(2000)` 重試 1–2 次。開盤前 / 睡眠喚醒的整批失敗多半重試一次就過。`intraday-scan.ts` 與手動盤中掃描共用這支，一起受益。
+- [x] **`com.piercelin.intradayscan.plist` 觸發時段改 10:00–13:30**（原 09:00–13:30）：開盤第一個小時 MIS 常不穩、量能估計不準。已改 8 個觸發點（整點 + 半點）、已 `launchctl reload` 部署（2026-09-03）。
+
+## 7. 觀察股手動分類（PLAN 6，2026-09-03）
+
+現在 `/watchlist` 的階段 tab（醞釀中 / 首次突破 / 延續爆發）是 `consecutiveAboveBand()` 即時自動判定分的。改成「使用者手動指定分類」，但**保留自動評估拿來比對**。**方向定案，細節待開 PLAN：**
+
+- [ ] **新增 `WatchlistItem.userStage`**（Prisma `enum SignalStage { preBreakout, breakoutDay, extended }`，nullable）。**`source` 欄位不動**——它的語意是「當初從哪個策略加入」（`"breakout"` / `"accumulation"` / `"manual"`，歷史遺留、跟 `SignalStage` 詞彙不同），不是「現在的階段分類」，塞進去語意錯亂。Prisma enum 值不能有 `-`，用 camelCase（`preBreakout` 等），在 action 邊界跟字串型 `SignalStage`（`"pre-breakout"`…）做一次 map 轉換。
+- [ ] **tab 分類改用 `userStage`**：`userStage != null` → 用它；`null`（尚未指定）→ fallback 用 `autoStage`（即時判定，現況邏輯，資料源同樣 eod/intraday/stale 三分支）。
+- [ ] **`autoStage` 仍每檔即時算**，但只拿來比對——不分 tab。`WatchlistCardRow` 多帶 `userStage` + `autoStage` 兩欄。
+- [ ] **手動分類 != 自動評估時的提示**：
+  - a. **卡片 chip**：卡片上加「自動判定：{X}」chip（用 `STAGE_PILL_CLASS` 那組色 + ⚠ 或箭頭），讓使用者知道「你放在醞釀中，系統覺得它已進延續爆發」。
+  - b. **tab label 數字**：`首次突破（8 · 2 異動）`——`2 異動` = 這 tab 裡 `autoStage` 跟 tab 不符的檔數。`WatchlistGallery` 的 `countByStage` 改成同時算「該 tab 檔數」與「不一致檔數」。
+- [ ] **卡片加改分類 UI**（stage 下拉 / 三顆按鈕）→ `updateWatchlistItem({ code, userStage })` → `revalidatePath("/watchlist")`。`updateWatchlistItem` action 早已存在（買入狀態 UI 移除後保留著），加 `userStage` 參數即可。
+
 **兩個 deferred 項**（不影響上述完成度，等時機再做）：
 
 - **盤後選股 v2 參數校準**：首版前 30 名偏大型股（「其他法人集中度」子項對權值股外資穩定流入給高分）。靠肉眼看單日排名 + 實盤觀察調 `signal-factors/accumulation.ts` 的 `CHIP_WEIGHTS` / `READINESS_FLOOR` / `MIN_AVG_VOLUME_SHARES`。同理 `run-signal-scan.ts` 的階段權重 / 法人因子曲線 / `margin-chasing` 觸發點（`surgePercentileThreshold` 等）也待累積資料後校準（約 2026-11）。
