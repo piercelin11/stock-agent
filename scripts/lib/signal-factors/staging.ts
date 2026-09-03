@@ -1,6 +1,6 @@
 // 階段判定 helper（ROADMAP 4.5.3 / PLAN §2.5 + §3.3）。
 //
-//   - consecutiveAboveBand：run-signal-scan.ts 打階段標籤（pre-breakout / breakout-day / extended）
+//   - consecutiveAboveBand：run-signal-scan.ts 打階段標籤（setup / breakoutDay / extended）
 //     的依據。breakout.ts 的 computeFirstBar 本體不改（它有「使用者明確要求保留的
 //     ≤2→50 / >2→20 緩衝」語意，PLAN 不動）。
 //   - computeBreakoutMarginMonotone：§2.5 單調遞增版（舊 computeBreakoutMargin 不動）。
@@ -35,7 +35,7 @@ export function computeBreakoutMarginMonotone(
 // §3.3 consecutiveAboveBand —— 「連續站上布林上軌天數」helper（階段判定依據）
 // ============================================================================
 //
-// run-signal-scan.ts 拿它打階段標籤（pre-breakout / breakout-day / extended）。
+// run-signal-scan.ts 拿它打階段標籤（setup / breakoutDay / extended）。
 // series[0] 是最新一筆（eod = 當日收盤；盤中 = 即時價或 h 代入 vs T-1 上軌），依日期新到舊排序。
 
 export interface AboveBandState {

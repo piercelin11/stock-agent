@@ -32,11 +32,6 @@ type StageFilter = SignalStage;
 // 順序固定：首次突破 → 延續爆發 → 醞釀中；預設選中「首次突破」。
 const STAGE_TABS: SignalStage[] = STAGE_ORDER;
 
-// stage → WatchlistItem.source 映射（schema 的 source enum 不動）
-function stageToSource(stage: SignalStage): "breakout" | "accumulation" {
-  return stage === "pre-breakout" ? "accumulation" : "breakout";
-}
-
 type Row = SignalScanView["results"][number];
 
 // 籌碼 chip（表格「籌碼」欄）：一句話結論。醞釀中階段後端無 inst → 呼叫端不渲染此欄內容。
@@ -178,7 +173,7 @@ export function ScreeningPanel() {
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
 
-  const [stageFilter, setStageFilter] = useState<StageFilter>("breakout-day");
+  const [stageFilter, setStageFilter] = useState<StageFilter>("breakoutDay");
   const [sortKey, setSortKey] = useState("rank");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [expandedCode, setExpandedCode] = useState<string | null>(null);
@@ -186,7 +181,7 @@ export function ScreeningPanel() {
   const [addMsg, setAddMsg] = useState<string | null>(null);
 
   function resetTableState() {
-    setStageFilter("breakout-day");
+    setStageFilter("breakoutDay");
     setSortKey("rank");
     setSortDir("asc");
     setExpandedCode(null);
@@ -281,24 +276,11 @@ export function ScreeningPanel() {
     setAddMsg(null);
     startTransition(async () => {
       try {
-        // 每檔用自己的 stage 對應 source；混階段時逐 source 分組呼叫。
-        const bySource = new Map<"breakout" | "accumulation", string[]>();
-        for (const code of selected) {
-          const row = allRows.find((r) => r.code === code);
-          if (!row) continue;
-          const src = stageToSource(row.stage);
-          const list = bySource.get(src) ?? [];
-          list.push(code);
-          bySource.set(src, list);
-        }
-        let added = 0;
-        let skipped = 0;
-        for (const [src, codes] of bySource) {
-          const res = await addToWatchlist({ codes, source: src });
-          added += res.added;
-          skipped += res.skipped;
-        }
-        setAddMsg(`已加入 ${added} 檔，略過 ${skipped} 檔（已在清單）`);
+        // PLAN 6 §2：廢除 source。加入時 addToWatchlist 自算 autoStage 寫進 userStage。
+        const res = await addToWatchlist({ codes: [...selected] });
+        setAddMsg(
+          `已加入 ${res.added} 檔，略過 ${res.skipped} 檔（已在清單）`,
+        );
         setSelected(new Set());
       } catch (e) {
         setAddMsg(`加入失敗：${e instanceof Error ? e.message : String(e)}`);

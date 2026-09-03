@@ -24,7 +24,7 @@ export function FactorList({ row }: { row: WatchlistCardRow }) {
   const volRatio =
     row.volumeRatio === null ? "—" : `x${row.volumeRatio.toFixed(1)}`;
 
-  if (row.stage === "pre-breakout") {
+  if (row.stage === "setup") {
     return (
       <div className="flex items-end justify-between gap-2">
         <Cell label={FACTOR_LABELS.volumeRatio}>{volRatio}</Cell>

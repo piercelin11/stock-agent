@@ -29,6 +29,13 @@ enum Market {
   TPEx
 }
 
+// 訊號三階段（PLAN 6：命名統一，camelCase == 字串識別字，省掉邊界 map）
+enum SignalStage {
+  setup // 醞釀中（還沒站上布林上軌）
+  breakoutDay // 首次突破（連續站上 1~2 日）
+  extended // 延續爆發（連續站上 > 2 日）
+}
+
 // 正式產業別（獨立 model，一支股票對應一個）
 model Sector {
   id            Int                    @id @default(autoincrement())
@@ -176,7 +183,9 @@ model WatchlistItem {
   targetPrice   Decimal?  @db.Decimal(10, 2) // 目標價（停利參考）
   stopLossPrice Decimal?  @db.Decimal(10, 2) // 停損價
 
-  source String? // 來源策略："breakout" | "accumulation" | "manual" | null（既有資料）
+  // 手動指定的階段分類（PLAN 6）。加入時寫入當下 autoStage；使用者可手動改。
+  // nullable：PLAN 6 之前加入的既有資料為 null，消費端一律 `userStage ?? autoStage` fallback。
+  userStage SignalStage?
 
   stock Stock @relation(fields: [stockCode], references: [code])
 }

@@ -67,7 +67,7 @@ function taipeiTodayIso(now: Date): string {
 // 對外型別（PLAN §3.1）
 // ============================================================================
 
-export type SignalStage = "pre-breakout" | "breakout-day" | "extended";
+export type SignalStage = "setup" | "breakoutDay" | "extended";
 export type SignalSource = "eod" | "realtime";
 
 export interface SignalResult {
@@ -403,7 +403,7 @@ function preBreakoutExtras(
 
 function breakoutTotalScore(
   scores: BreakoutFactorOutput["scores"],
-  stage: "breakout-day" | "extended",
+  stage: "breakoutDay" | "extended",
   config: SignalScanConfig,
 ): number {
   const w =
@@ -526,20 +526,20 @@ async function runEod(
     let stage: SignalStage;
     if (!aboveBand.ok) {
       // bollingerUpper 缺 → 無法判定站上與否，保守歸 pre-breakout（不進突破榜）
-      stage = "pre-breakout";
+      stage = "setup";
     } else if (!aboveBand.latestAboveBand) {
-      stage = "pre-breakout";
+      stage = "setup";
     } else if (volumeMa20 === null || volumeMa20 <= 0) {
       // exempt 檔沒有 volumeMa20（一般股票不會走到這，防呆）→ 無法算 breakout 分項，歸 pre-breakout
-      stage = "pre-breakout";
+      stage = "setup";
     } else if (aboveBand.consecutiveDays <= config.staging.extendedAfterDays) {
-      stage = "breakout-day";
+      stage = "breakoutDay";
     } else {
       stage = "extended";
     }
 
     let volumeRatio: number | null = null;
-    if (stage !== "pre-breakout") {
+    if (stage !== "setup") {
       volumeRatio = volumeMa20 != null && volumeMa20 > 0 ? q.volume / volumeMa20 : null;
       // 觸發量比：只對 breakout 階段套用「進榜門檻」，沒過就不進 results（exempt 檔豁免——
       // 否則觀察股突破了但量沒到 2 倍又消失）
@@ -569,8 +569,8 @@ async function runEod(
   const passedGate = staged.length;
 
   // 4. pre-breakout 需要 accumulation 因子（另撈三表），breakout 需要 institutionalFlow（另撈法人近 5 日）
-  const preCodes = staged.filter((s) => s.stage === "pre-breakout").map((s) => s.code);
-  const breakoutCodes = staged.filter((s) => s.stage !== "pre-breakout").map((s) => s.code);
+  const preCodes = staged.filter((s) => s.stage === "setup").map((s) => s.code);
+  const breakoutCodes = staged.filter((s) => s.stage !== "setup").map((s) => s.code);
 
   const volumeMa20ByCode = new Map<string, number | null>(
     staged.map((s) => [s.code, s.volumeMa20]),
@@ -603,7 +603,7 @@ async function runEod(
   const results: SignalResult[] = [];
 
   // 5a. pre-breakout（乘法，沿用 accumulation 合成）
-  const preStaged = staged.filter((s) => s.stage === "pre-breakout");
+  const preStaged = staged.filter((s) => s.stage === "setup");
   if (preStaged.length > 0) {
     const pb = config.preBreakout;
     const trustRaw = preStaged.map((s) =>
@@ -677,7 +677,7 @@ async function runEod(
       results.push({
         code: s.code,
         name: s.name,
-        stage: "pre-breakout",
+        stage: "setup",
         close: s.close,
         changePercent: s.changePercent,
         totalScore: finalScore,
@@ -715,7 +715,7 @@ async function runEod(
   }
 
   // 5b. breakout-day / extended（加權和，8 分項）
-  const breakoutStaged = staged.filter((s) => s.stage !== "pre-breakout");
+  const breakoutStaged = staged.filter((s) => s.stage !== "setup");
   for (const s of breakoutStaged) {
     const rs = rsByCode.get(s.code)!;
     const flowInput = flowInputByCode.get(s.code) ?? {
@@ -745,7 +745,7 @@ async function runEod(
       },
       config,
     );
-    const stage = s.stage as "breakout-day" | "extended";
+    const stage = s.stage as "breakoutDay" | "extended";
     const totalScore = breakoutTotalScore(factors.scores, stage, config);
     results.push({
       code: s.code,
@@ -770,8 +770,8 @@ async function runEod(
   const stats = {
     totalStocks,
     passedGate,
-    preBreakout: results.filter((r) => r.stage === "pre-breakout").length,
-    breakoutDay: results.filter((r) => r.stage === "breakout-day").length,
+    preBreakout: results.filter((r) => r.stage === "setup").length,
+    breakoutDay: results.filter((r) => r.stage === "breakoutDay").length,
     extended: results.filter((r) => r.stage === "extended").length,
     breakoutBelowVolume,
     watchlistExempt,
@@ -1064,18 +1064,18 @@ async function runRealtime(
     // 這裡先只用 T-1 一筆判 latestAboveBand，consecutiveDays 需要歷史序列（下面補撈）
     let stage: SignalStage;
     if (bollingerUpper === null) {
-      stage = "pre-breakout";
+      stage = "setup";
     } else if (row.close <= bollingerUpper) {
-      stage = "pre-breakout";
+      stage = "setup";
     } else if (volumeMa20 === null || volumeMa20 <= 0) {
       // exempt 檔沒有 T-1 volumeMa20（防呆）→ 無法算 breakout 分項，歸 pre-breakout
-      stage = "pre-breakout";
+      stage = "setup";
     } else {
-      stage = "breakout-day"; // 先暫定，consecutiveDays 補算後可能升 extended
+      stage = "breakoutDay"; // 先暫定，consecutiveDays 補算後可能升 extended
     }
 
     let volumeRatio: number | null = null;
-    if (stage !== "pre-breakout") {
+    if (stage !== "setup") {
       volumeRatio =
         volumeMa20 != null && volumeMa20 > 0
           ? row.estimatedFullDayVolume / volumeMa20
@@ -1102,8 +1102,8 @@ async function runRealtime(
 
   const passedGate = staged.length;
 
-  const preStaged = staged.filter((s) => s.stage === "pre-breakout");
-  const breakoutStaged = staged.filter((s) => s.stage !== "pre-breakout");
+  const preStaged = staged.filter((s) => s.stage === "setup");
+  const breakoutStaged = staged.filter((s) => s.stage !== "setup");
   const breakoutCodes = breakoutStaged.map((s) => s.code);
   const preCodes = preStaged.map((s) => s.code);
 
@@ -1226,7 +1226,7 @@ async function runRealtime(
       results.push({
         code: s.code,
         name: s.name,
-        stage: "pre-breakout",
+        stage: "setup",
         close: s.close,
         changePercent: s.changePercent,
         totalScore: finalScore,
@@ -1264,10 +1264,10 @@ async function runRealtime(
       ...(firstBarSeriesByStock.get(s.code) ?? []),
     ];
     const aboveBand = consecutiveAboveBand(stagingSeries);
-    const stage: "breakout-day" | "extended" =
+    const stage: "breakoutDay" | "extended" =
       aboveBand.ok && aboveBand.consecutiveDays > config.staging.extendedAfterDays
         ? "extended"
-        : "breakout-day";
+        : "breakoutDay";
 
     const rs = rsByCode.get(s.code)!;
     const flowInput = flowInputByCode.get(s.code) ?? {
@@ -1320,8 +1320,8 @@ async function runRealtime(
   const stats = {
     totalStocks,
     passedGate,
-    preBreakout: results.filter((r) => r.stage === "pre-breakout").length,
-    breakoutDay: results.filter((r) => r.stage === "breakout-day").length,
+    preBreakout: results.filter((r) => r.stage === "setup").length,
+    breakoutDay: results.filter((r) => r.stage === "breakoutDay").length,
     extended: results.filter((r) => r.stage === "extended").length,
     breakoutBelowVolume,
     failedCount,
@@ -1565,7 +1565,7 @@ async function fetchFirstBarSeriesToDate(
 // ============================================================================
 
 function rankWithinStages(results: SignalResult[]): void {
-  const stages: SignalStage[] = ["pre-breakout", "breakout-day", "extended"];
+  const stages: SignalStage[] = ["setup", "breakoutDay", "extended"];
   for (const stage of stages) {
     const group = results.filter((r) => r.stage === stage);
     group.sort((a, b) => b.totalScore - a.totalScore);
@@ -1607,7 +1607,7 @@ function printSummary(out: SignalScanOutput): void {
       (out.stats.estimatedCount ? ` · 估價 ${out.stats.estimatedCount}` : "") +
       (out.stats.skippedNoPriceCount ? ` · 無價跳過 ${out.stats.skippedNoPriceCount}` : ""),
   );
-  for (const stage of ["breakout-day", "extended", "pre-breakout"] as SignalStage[]) {
+  for (const stage of ["breakoutDay", "extended", "setup"] as SignalStage[]) {
     const rows = out.results.filter((r) => r.stage === stage).slice(0, 15);
     if (rows.length === 0) continue;
     console.log(`\n  [${stage}] 前 ${rows.length}：`);

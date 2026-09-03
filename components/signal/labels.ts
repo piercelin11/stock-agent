@@ -8,19 +8,19 @@ import type { SignalStage } from "../../lib/actions/signal-scan";
 // ---- stage（第一根突破 / 延續爆發 / 醞釀中）----
 
 /** tab 顯示順序：首次突破 → 延續爆發 → 醞釀中（screening 既有順序，watchlist 沿用）。 */
-export const STAGE_ORDER: SignalStage[] = ["breakout-day", "extended", "pre-breakout"];
+export const STAGE_ORDER: SignalStage[] = ["breakoutDay", "extended", "setup"];
 
 export const STAGE_LABELS: Record<SignalStage, string> = {
-  "pre-breakout": "醞釀中",
-  "breakout-day": "首次突破",
+  "setup": "醞釀中",
+  "breakoutDay": "首次突破",
   extended: "延續爆發",
 };
 
 /** 狀態 pill 底色（複用狀態語意 token；與台股漲跌色不同語意）。 */
 export const STAGE_PILL_CLASS: Record<SignalStage, string> = {
-  "breakout-day": "bg-destructive/10 text-destructive",
+  "breakoutDay": "bg-destructive/10 text-destructive",
   extended: "bg-warning/10 text-warning",
-  "pre-breakout": "bg-muted text-muted-foreground",
+  "setup": "bg-muted text-muted-foreground",
 };
 
 // ---- 因子標籤 ----

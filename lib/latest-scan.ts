@@ -76,7 +76,7 @@ function buildLatestScan(out: SignalScanOutput, fallbackDate: string): LatestSca
     resultByCode.set(r.code, r);
     const rs = r.scores?.["relativeStrength"];
     if (typeof rs === "number") prByCode.set(r.code, rs);
-    if (r.stage === "pre-breakout") {
+    if (r.stage === "setup") {
       preInstByCode.set(r.code, {
         trustScore:
           typeof r.scores?.["trustScore"] === "number" ? r.scores["trustScore"] : null,

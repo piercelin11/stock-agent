@@ -15,7 +15,7 @@ import { BreakoutFactorBars } from "./BreakoutFactorBars";
 type Row = SignalScanView["results"][number];
 
 export function SignalDetail({ row }: { row: Row }) {
-  const isPre = row.stage === "pre-breakout";
+  const isPre = row.stage === "setup";
   const rising = row.changePercent >= 0;
 
   return (
