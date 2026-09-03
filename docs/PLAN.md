@@ -1,410 +1,405 @@
-# PLAN 6：三階段命名統一 + 廢除 source + 觀察股手動分類
+# PLAN 7：觀察股卡片資料跨分類 100% 統一
 
-一份 PLAN 三件事，**commit 分兩個**（先重構 §1–§2、再功能 §3，出問題好回溯）。
+**一句話**：`/watchlist` 卡片不管落在哪個階段 tab（不管是 `autoStage` 自動判定、還是使用者手動改 `userStage`），
+卡片上的所有區塊——法人籌碼區塊、底排因子——都要有完整資料，不再因為「這檔在掃描 JSON 裡是另一個階段」而空白。
 
-**分支**：`feat/watchlist-manual-stage`。merge 時機等使用者發話。
+**分支**：接續 `feat/watchlist-manual-stage`（PLAN 6 已 commit 在上面），或使用者指定新分支。
+**merge 時機等使用者發話。**
 
-**需求來源**：PLAN 5 收尾後的討論（2026-09-03）。ROADMAP §7 已記完整決定，本份是實作規格。
-
-**背景**：
-- 全專案三階段用**兩套詞**：程式碼識別字 `"pre-breakout"` / `"breakout-day"` / `"extended"`（含連字號的字串值）、UI 中文「醞釀中 / 首次突破 / 延續爆發」（`labels.ts` 單一出處）。`WatchlistItem.source` 又是**第三套** `"breakout"` / `"accumulation"` / `"manual"`（歷史遺留，只寫入無讀取）。
-- `/watchlist` 階段 tab 是 `consecutiveAboveBand()` 即時自動判定分的。使用者要「手動指定分類」，但保留自動評估拿來比對（「我昨天挑的醞釀股今天發動了，看卡片標示就知道」）。
+**需求來源**：PLAN 6 收尾後的討論（2026-09-03）。使用者觀察到觀察股卡片「強度 PR 全空白」，
+追查後確認：`buildCardRow` 按 `stage` 分支只算一半欄位、另一半留 `null` → 前端空白；
+且 setup 階段的 `SignalResult.scores` 根本沒寫 `relativeStrength` key。使用者要求「手動換分類後資訊 100% 一致」。
 
 ---
 
-## 0. 邊界
+## 0. 背景與根因
 
-### 動（§1–§2 重構 commit）
+### 現況：`buildCardRow` 按 stage 分支，只算一半
 
-- **`prisma/schema.prisma`**：
-  - 新增 `enum SignalStage { setup breakoutDay extended }`。
-  - `WatchlistItem`：**移除 `source String?`**；**新增 `userStage SignalStage?`**（nullable）。
-  - migration（`pnpm prisma migrate dev --name watchlist-userstage-drop-source`）。
-- **`scripts/lib/signal-factors/staging.ts`**：`consecutiveAboveBand` 相關若有 `SignalStage` 型別
-  或字串值——改。註解裡的 `pre-breakout / breakout-day / extended` 順手更新（非必須）。
-  **實際檢查**：grep 顯示 staging.ts 只有註解提到，沒有字串值——若確認只有註解，本檔只改註解。
-- **`scripts/screening/run-signal-scan.ts`**：
-  - `export type SignalStage = "pre-breakout" | "breakout-day" | "extended"` → `"setup" | "breakoutDay" | "extended"`。
-  - 所有 `stage = "pre-breakout"` / `"breakout-day"` 賦值、`s.stage === "pre-breakout"` /
-    `!== "pre-breakout"` 比對、`stage as "breakout-day" | "extended"` type assertion → 換新值。
-  - **JSON 輸出的 `stage` 欄位值跟著變**（`SignalResult.stage`）。
-  - **不要動** `config.preBreakout`（設定物件屬性名）、`stats.preBreakout` / `stats.breakoutDay`
-    （統計欄位名）、`preBreakoutExtras()`（函式名）——那些是 camelCase 識別字，不是 `SignalStage` 值，
-    跟本次改名無關。只改「`stage` 這個欄位會出現的字串值」。
-- **`lib/actions/signal-scan.ts`**：`export type { SignalStage }` re-export——型別跟著 run-signal-scan
-  變，不用改 code。
-- **`lib/latest-scan.ts`**：`if (r.stage === "pre-breakout")` → `=== "setup"`。
-- **`lib/actions/watchlist.ts`**：
-  - 第 16 行 `export type SignalStage = "pre-breakout" | "breakout-day" | "extended"`——**刪掉這份
-    本地 union**，改 `import type { SignalStage } from "./signal-scan"`（或直接從 run-signal-scan，
-    看 bundle 考量——現在刻意不 import run-signal-scan 本體，但 `import type` 會被 erase，安全）。
-  - `stage` 計算的三元判斷（第 216–221）：`"pre-breakout"` / `"breakout-day"` / `"extended"` → 新值。
-  - `if (stage === "pre-breakout")`（第 239）→ `=== "setup"`。
-  - `WatchlistCardRow.source` 欄位移除、`return` 的 `source: item.source` 移除。
-  - `addToWatchlist` 的 `source?` 參數移除、`createMany` 裡 `...(input.source ? {...} : {})` 移除。
-- **`components/signal/labels.ts`**：`STAGE_ORDER` 陣列值、`STAGE_LABELS` key、`STAGE_PILL_CLASS` key
-  → 新值。中文標籤（`"醞釀中"` 等）**不變**。
-- **`components/signal/FactorList.tsx`**：`row.stage === "pre-breakout"` → `=== "setup"`。
-- **`components/signal/pre-breakout-chip.ts`** / **`PreBreakoutInstitutional.tsx`**：grep 命中——
-  檢查是否有 `SignalStage` 值比對，有就改（多半是型別 import + 中文，可能不用動）。
-- **`components/watchlist/WatchlistCard.tsx`**：`row.stage === "pre-breakout"`（第 31、97）→ `=== "setup"`。
-- **`components/watchlist/WatchlistGallery.tsx`**：`useState<SignalStage>("breakout-day")` 預設值、
-  `countByStage` 的 `Record<SignalStage, ...>` key（`"breakout-day"` / `"extended"` / `"pre-breakout"`）→ 新值。
-- **`components/screening/ScreeningPanel.tsx`**：
-  - `stageToSource()` 函式**整個刪除**（§2 廢 source）+ 加入 watchlist 時的 `bySource` 分組邏輯簡化成
-    直接 `addToWatchlist({ codes: [...selected] })`（不再帶 source）。
-  - `useState<StageFilter>("breakout-day")` 預設、`setStageFilter("breakout-day")` reset、
-    `stageFilter === "pre-breakout"` 之類比對 → 新值。
-  - 第 357 `view.stats.preBreakout` / `breakoutDay` / `extended`——**那是 stats 欄位名，不動**。
-- **`components/screening/SignalDetail.tsx`**：`row.stage === "pre-breakout"`（第 18）→ `=== "setup"`。
+[lib/actions/watchlist.ts](../lib/actions/watchlist.ts) `buildCardRow()` 在 `if (stage === "setup") { ... } else { ... }`：
 
-### 動（§3 功能 commit）
+| 欄位 | setup 分支 | breakout 分支 |
+|---|---|---|
+| `preInst`（20 格日曆 + 兩條進度條） | ✅ 算 | ❌ `null` |
+| `inst`（法人 diverging bar） | ❌ `null` | ✅ 算 |
+| `factors`（距年高、突破幅度、強度 PR） | ❌ `null` | ✅ 算 |
 
-- **`lib/actions/watchlist.ts`**：
-  - `addToWatchlist`：加入時算 `autoStage` 寫進 `userStage`（見 §3.2）。
-  - `buildCardRow`：`autoStage` = 現在的 `stage` 計算結果；`stage`（決定卡片因子）= `userStage ?? autoStage`；
-    `WatchlistCardRow` 加 `userStage` + `autoStage` 兩欄。
-  - `listWatchlist`：`findMany` 的 `select` 加 `userStage`（不然 `item.userStage` 拿不到）。
-  - `updateWatchlistItem`：input 加 `userStage?: SignalStage`，`data` 組裝加對應處理。
-- **`components/watchlist/WatchlistGallery.tsx`**：
-  - `countByStage` 改成 `Record<SignalStage, { total: number; mismatch: number }>`。
-  - tab 分類：`rows.filter(r => (r.userStage ?? r.autoStage) === stage)`。
-  - tab label：`{STAGE_LABELS[s]}（{c.total}{c.mismatch > 0 ? ` · ${c.mismatch} 異動` : ""}）`。
-- **`components/watchlist/WatchlistCard.tsx`**：
-  - `userStage !== autoStage` → 加「自動判定：{STAGE_LABELS[autoStage]}」chip。
-  - 加改分類 UI（3 顆按鈕）→ `updateWatchlistItem({ code, userStage })`。
+`stage = item.userStage ?? autoStage`。使用者把一檔實際 `autoStage="setup"` 的股票手動改成
+`userStage="breakoutDay"` → `stage` 變 `breakoutDay` → 走 else 分支 → 要 `inst` / `factors`，
+但這檔在掃描 JSON 裡是 setup 列、`prByCode` 沒有它 → `factors.relativeStrength` = `null` → 卡片「強度 PR」空白。
+反方向（breakout 股改 setup）→ 要 `preInst` 的兩條進度條分數（`trustScore` / `otherInstScore`）→
+掃描 JSON 的 pre-breakout 名單沒有它 → 進度條無值。
+
+### 三個層次的缺口（討論結論）
+
+1. **值已算好、只是沒帶過去** — `relativeStrength`：`run-signal-scan.ts` 對**全市場 gate 前**算好
+   `rsByCode`，但 setup 分支組 `SignalResult.scores` 時沒放這個 key（setup 合成公式不吃 RS）。
+   → **補 1 行**（eod + realtime 兩路徑各一）。
+2. **值沒算、但輸入資料 `buildCardRow` 手上已有** — `inst` / `factors.proximityLongPct` /
+   `factors.breakoutMarginPct`：三個共用 DB 查詢（`indicatorWindow` / `instWindow` / `quoteWindow`）
+   **在 `if/else` 之前就撈了、不分 stage**。把計算移出分支即可，**0 新查詢**。
+   例外：`otherInstRatio`（外資分子）需要「20 日外資+自營 ÷ 20 日成交量」，`instWindow` 目前只帶
+   投信 + `foreignNetBuy`，缺 `dealerNetBuy` 與 20 日量序列 → **小幅擴充查詢**。
+3. **值沒算、輸入也要另外撈、且需要全市場母體** — `preInst.trustScore` / `otherInstScore`
+   （兩條進度條寬度）：是**全 setup 候選池的 rankScore 百分位**，watchlist 幾檔算不出，只能讀掃描 JSON；
+   而突破股不在 setup 母體。→ **要改 `run-signal-scan.ts`**：對 breakout 階段那 ~20 檔也算 accumulation
+   籌碼分。因為突破+延續合計才 ~20 檔（vs setup ~495），**成本增加是個位數秒，realtime 掃描不需要為此加嚴 gate**。
+
+### 為什麼「統一欄位」不會簡化 `run-signal-scan.ts`
+
+`totalScore` 的合成公式**按階段本質不同**（setup = 乘法 `chipScore × readinessCoef`；
+breakout = 8 分項加權和），這個 `if` 拿不掉。統一的只是「輸出物件多帶哪些欄位」，不是「分數怎麼算」。
+`SignalResult` 型別**早已把 `inst` / `factors` / `preInst` 定義成 optional**，
+`breakoutExtras()` / `preBreakoutExtras()` 兩個 helper 也都存在——本 PLAN 只是讓它們對「另一階段」也跑。
+
+---
+
+## 1. 邊界
+
+### 動
+
+- **`scripts/screening/run-signal-scan.ts`**
+  - eod 路徑（`runEod`，約 L602–L780）+ realtime 路徑（`runRealtime`，約 L1145–L1316）：
+    - **setup `scores` 補 `relativeStrength`**（值取 `rsByCode.get(s.code)?.score`）。
+    - **breakout 階段補 accumulation 籌碼分**（`trustScore` / `otherInstScore` / `preInst`），
+      用「插值不進母體」法（見 §3）。
+  - fetch 段：`fetchAccumulationRawInputs` 的 code 清單從 `preCodes` 擴為 `[...preCodes, ...breakoutCodes]`。
+  - 新增小 helper `percentileOf(value, sortedPopulation)`（15~20 行，二分查找回百分位）。
+  - **`SignalResult` 型別不動**（`inst` / `factors` / `preInst` 已是 optional，且結構相容）。
+- **`lib/actions/watchlist.ts`**
+  - `buildCardRow()`：**移除 `if (stage === "setup") { ... } else { ... }` 骨架**，
+    `inst` / `factors` / `preInst` 三者無條件計算並回傳。
+  - `instWindow` 查詢擴充：加 `dealerNetBuy`；另加一個近 20 日 `DailyQuote.volume` 序列查詢
+    （或併進既有的 `quoteWindow`，它已 `take: max(SPARK_WINDOW, proximityLongWindow+1)` ≥ 20，
+    直接從 `quoteWindow` 取前 20 筆 volume 即可 → **不用新查詢**，確認 `quoteWindow` select 有 `volume`：
+    目前 select 是 `{ date, close }`，**需加 `volume`**）。
+  - **`WatchlistCardRow` 的 `inst` / `factors` / `preInst` 去掉 `| null`**（見 §4）——
+    統一後 `buildCardRow` 每條路徑都給值，型別收緊讓 TS 擋「某路徑漏給」。degraded 情形
+    用欄位內部的 `degraded: boolean` 表達，不再整個 null。
+- **`lib/latest-scan.ts`**
+  - `buildLatestScan()` 建 `preInstByCode` 的 `if (r.stage === "setup")` 守衛**放寬**：
+    breakout 階段的 `r` 現在也帶 `preInst`（含 `trustScore` / `otherInstScore`）→ 也要進 `preInstByCode`。
+  - `prByCode` 現在 setup 列也有 `relativeStrength` → 自然被收進來，**這行不用改**。
+- **`components/signal/PreBreakoutInstitutional.tsx`**
+  - `inScan`（`preInst.trustScore !== null`）分支簡化：統一後所有階段的觀察股都有進度條分數，
+    「不在掃描名單」的降級文案（L77–L79 tooltip、L85 外資列 `inScan &&` 守衛）保留但預期極少觸發
+    （只剩「該檔完全不在最近一次掃描結果」，例如剛加入、掃描還沒跑過）。
+- **`components/watchlist/WatchlistCard.tsx`**
+  - L113–L119 的「`row.stage === "setup" ? <PreBreakoutInstitutional> : <InstitutionalFlowPanel>`」
+    **維持**——這是「醞釀看籌碼累積 / 突破看流向」的刻意設計，兩個元件視覺本就不同。
+  - `inst` / `factors` / `preInst` 去 nullable 後，**刪掉冗餘的 null 檢查**：
+    - L36–L41 `chip`：`row.inst ? resolveInstChip(row.inst, []) : null` → `resolveInstChip(row.inst, [])`。
+    - L113–L119：內層 `row.preInst ? <…> : null` / `row.inst ? <…> : null` 拿掉，直接
+      `row.stage === "setup" ? <PreBreakoutInstitutional preInst={row.preInst}/> : <InstitutionalFlowPanel inst={row.inst}/>`。
+- **`components/signal/FactorList.tsx`**
+  - setup 分支（L27–L33）目前只有「量增」一個 Cell。**維持**——這是 PLAN 3 的刻意決定
+    （醞釀中卡片底排不放 K棒/力道/位階）。**本 PLAN 不在 setup 底排加「距年高 / 強度 PR / 突破%」**，
+    因為那些對「使用者手動歸類為醞釀」的股票語意仍怪（未突破，突破% 為負）。
+    → **底排因子維持按 `row.stage` 分支**；統一的是「法人籌碼區塊」+ `factors` 物件本身有值。
+  - breakout 分支（L35–L69）：`const f = row.factors` 去 nullable 後，`f == null || …` /
+    `f == null ? "—" : …`（L38、L45–46、L63–64）的 `f == null` 半邊是死碼，簡化成只留
+    `f.relativeStrength === null` 的判斷。功能不變。
 
 ### 不動
 
-- `scripts/lib/signal-factors/config.ts` / `institutional.ts`：grep 命中的是 `config.preBreakout`
-  屬性名、`preBreakout:` config key——**不是 `SignalStage` 值**，不碰。
-- `run-signal-scan.ts` 的評分邏輯、gate、豁免、`stats` 欄位名（`preBreakout` / `breakoutDay`）。
-- `lib/data-context.ts` / PLAN 5 的 intraday 檔機制。
-- 中文標籤（`STAGE_LABELS` 的 value）。
-- `WatchlistItem` 的買入狀態欄位（`isPurchased` 等，早已無 UI 但保留）。
+- **`prisma/schema.prisma`**：無 migration。純計算層與前端。
+- **`totalScore` 合成 / `rankWithinStages` / gate 門檻**：一律不動。統一欄位 ≠ 改分數。
+- **`run-signal-scan.ts` 的 `stats.*`**：`preBreakout` / `breakoutDay` / `extended` 計數語意不變
+  （仍是 `results.filter(r => r.stage === ...)`）。
+- **`/screening` 頁與 `components/screening/*`**：使用者無法在 screening 頁改股票分類，
+  展開列一律按 `SignalResult.stage` 渲染。breakout 列現在多帶 `preInst`、setup 列多帶 `relativeStrength`,
+  但 `SignalDetail.tsx` 按 stage 選元件的邏輯不變 → **screening 頁視覺不變**（多出來的欄位它不讀）。
+- **加嚴 setup gate（布林帶寬收斂 / close > ma60）**：本 PLAN 明確**不做**。討論確認：那是獨立優化，
+  且觀察股豁免 gate，跟本需求無關。要做另開 PLAN。
+- **進度條改畫 netRatio 絕對值 / 換手率正規化**：討論過但本 PLAN**不做**（維持全市場 rankScore 百分位）。
+  若日後要改視覺，另開 PLAN。
 
 ---
 
-## 1. 命名統一（`SignalStage` 值：`setup` / `breakoutDay` / `extended`）
+## 2. `lib/actions/watchlist.ts` 改法
 
-### 1.1 對照表
+### 2.1 查詢擴充
 
-| 舊值（字串，含連字號） | 新值 | 中文（不變） |
-|---|---|---|
-| `"pre-breakout"` | `"setup"` | 醞釀中 |
-| `"breakout-day"` | `"breakoutDay"` | 首次突破 |
-| `"extended"` | `"extended"` | 延續爆發 |
+`buildCardRow` 開頭 `Promise.all` 內：
 
-- `breakoutDay` 而非 `breakout`——避免跟即將廢除的 `source` 值 `"breakout"` 視覺混淆、保留
-  「首次 vs 延續」語意。
-- Prisma enum 值不能有連字號，camelCase 是唯一選項。
+- `quoteWindow` 的 `select` 從 `{ date: true, close: true }` → 加 `volume: true`
+  （`take` 已 ≥ 20，取前 20 筆當「20 日成交量序列」，新到舊）。
+- `instWindow`（`take: PRE_INST_WINDOW` = 20）的 `select` 加 `dealerNetBuy: true`。
 
-### 1.2 做法：全域 grep 替換
+→ **0 個新查詢**（都是既有查詢加欄位）。
 
-三個獨立的替換（分開做，避免誤傷）：
+### 2.2 移除 stage 分支，三者無條件算
+
+現在（L238–L331 概念）：
+
+```ts
+let inst = null; let factors = null; let preInst = null;
+if (stage === "setup") {
+  // 算 preInst（日曆 + 讀 scan 的 trustScore/otherInstScore）
+} else {
+  // 算 inst（computeInstitutionalFlow）
+  // 算 factors（computeProximityToHigh + breakoutMarginPct + prByCode 的 relativeStrength）
+}
+```
+
+改為：
+
+```ts
+// ── preInst（20 格日曆 + 兩條進度條）── 一律算
+const trustSeriesNewToOld = instWindow.map(r => Number(r.investmentTrustNetBuy ?? 0));
+const foreignPlusDealerNewToOld = instWindow.map(
+  r => Number(r.foreignNetBuy ?? 0) + Number(r.dealerNetBuy ?? 0),
+);
+const vol20NewToOld = quoteWindow.slice(0, PRE_INST_WINDOW).map(q => Number(q.volume));
+// 日曆
+const dataDays = trustSeriesNewToOld.length;
+const buyDayFlags = trustSeriesNewToOld.map(v => v > 0);
+// ...consecutiveBuyDays 同現行...
+// 分數 / detail：優先讀最近掃描結果（現在 breakout 列也有 preInst → 都讀得到）
+const fromScan = scan?.preInstByCode.get(code) ?? null;
+// trustNetRatio / otherInstRatio：掃描結果有就用，否則 action 現算
+let trustNetRatio = fromScan?.trustNetRatio ?? null;
+if (trustNetRatio === null && dataDays >= PRE_INST_MIN_DAYS && sharesOutstanding) {
+  trustNetRatio = trustSeriesNewToOld.reduce((s,v)=>s+v,0) / Number(sharesOutstanding);
+}
+let otherInstRatio = fromScan?.otherInstRatio ?? null;
+if (otherInstRatio === null && dataDays >= PRE_INST_MIN_DAYS) {
+  const { ratio } = computeOtherInstitutionRatio(
+    foreignPlusDealerNewToOld, vol20NewToOld,
+    PRE_INST_WINDOW, /* minDaysRatio 用 accumulation.ts 的預設 */,
+  );
+  otherInstRatio = ratio;
+}
+preInst = {
+  buyDayFlags: buyDayFlags.reverse(),
+  buyDays, consecutiveBuyDays, dataDays,
+  trustScore: fromScan?.trustScore ?? null,      // 進度條寬度——仍只來自 scan（全市場母體）
+  otherInstScore: fromScan?.otherInstScore ?? null,
+  trustNetRatio, otherInstRatio,
+  degraded: dataDays < PRE_INST_MIN_DAYS,
+};
+
+// ── inst（法人 diverging bar）── 一律算
+const bollingerUpper = indicatorWindow[0]?.bollingerUpper ?? null;
+const trustSeries = instWindow.map(r => Number(r.investmentTrustNetBuy ?? 0));
+const foreignSeries = instWindow.map(r => Number(r.foreignNetBuy ?? 0));
+const instToday = institutional && isoDate(institutional.date) === refDate ? institutional : null;
+const flow = computeInstitutionalFlow({ /* 同現行 */ });
+inst = { trustRatio: flow.trustRatio, foreignRatio: flow.foreignRatio,
+         todayTrustDir: flow.todayTrustDir, todayForeignDir: flow.todayForeignDir };
+
+// ── factors（距年高 / 突破幅度 / 強度 PR）── 一律算
+const closeHistory = quoteWindow.slice(1).map(q => q.close);
+const prox = computeProximityToHigh(close, closeHistory, score.proximityShortWindow, score.proximityLongWindow);
+const breakoutMarginPct = bollingerUpper && bollingerUpper > 0
+  ? ((close - bollingerUpper) / bollingerUpper) * 100 : 0;   // setup 股票此值為負，屬正常
+const pr = scan?.prByCode.get(code);
+factors = {
+  proximityLongPct: prox.longPct,
+  breakoutMarginPct,
+  relativeStrength: typeof pr === "number" ? pr : null,
+  relativeStrengthStale: scan != null && scan.scanDate !== refDate,
+};
+```
+
+### 2.3 import 補充
+
+`lib/actions/watchlist.ts` 頂部加：
+
+```ts
+import { computeOtherInstitutionRatio } from "../../scripts/lib/signal-factors";
+```
+
+（`computeInstitutionalFlow` / `computeProximityToHigh` 已 import。`minInstitutionalDaysRatio` 的預設值
+從 `scripts/lib/signal-factors` 的 `DEFAULT_ACCUMULATION_CONFIG` 取，或直接沿用 `PRE_INST_MIN_DAYS`
+的既有語意 —— 確認 `PRE_INST_MIN_DAYS = ceil(20 * 0.5) = 10` 與 accumulation 的 `minInstitutionalDaysRatio`
+一致，一致就直接傳 `PRE_INST_WINDOW` + 讓函式內部用同一 ratio。）
+
+---
+
+## 3. `scripts/screening/run-signal-scan.ts` 改法
+
+### 3.1 setup `scores` 補 `relativeStrength`（eod + realtime）
+
+eod 路徑 `preStaged.forEach` 的 `results.push({ ... scores: { trustScore, otherInstScore, ... } })`：
+
+```ts
+scores: {
+  trustScore, otherInstScore, squeezeScore, quietVolumeScore, chipScore, readinessCoef,
+  relativeStrength: rsByCode.get(s.code)?.score ?? config.breakout.naScore,  // ← 加這行
+},
+```
+
+realtime 路徑同一處（L1235 附近）同樣加。
+
+- `rsByCode` 在兩條路徑都已對全市場 gate 前算好（eod L473、realtime 對應處）。
+- **不影響 `totalScore`**：setup 的 `combineFinalScore(chipScore, readinessCoef)` 不讀 `scores.relativeStrength`。
+- `lib/latest-scan.ts` 的 `prByCode` 從 `r.scores["relativeStrength"]` 建 → setup 列自動被收進來。
+
+### 3.2 breakout 階段補 accumulation 籌碼分（插值法）
+
+**目標**：`breakoutDay` / `extended` 的 `SignalResult` 也帶 `preInst`（含 `trustScore` / `otherInstScore`），
+讓使用者把突破股手動歸類到「醞釀中」tab 時，`PreBreakoutInstitutional` 的兩條進度條有值。
+
+**母體策略：插值不進母體**（討論結論——避免「百分位語意改變」污染既有 setup 分數）：
+
+1. fetch 段：`fetchAccumulationRawInputs(prisma, date, [...preCodes, ...breakoutCodes], ...)`
+   （多 ~20 檔的 20 日投信/外資/量能序列 + 布林帶寬歷史，量小）。
+2. setup 迴圈**照舊**：`rankScore` 的母體仍是 `preStaged`（495 檔），
+   `trustNetRatioScores` / `otherInstScores` 一如現行。
+3. **新增**：把 setup 母體的 `trustRaw.map(t => t.netRatio)`、`otherRaw.map(o => o.ratio)`
+   各自 `.filter(非null).sort()` 存成 `sortedTrustNetRatio` / `sortedOtherInstRatio`（升冪）。
+4. breakout 迴圈內，對每檔 breakout 股：
+   - `computeTrustRawMetrics(accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [], shares, ...)` → `t`
+   - `computeOtherInstitutionRatio(fi.foreignPlusDealerNewestFirst, fi.instVolumeNewestFirst, ...)` → `o`
+   - `trustScore`：
+     - `buyFreqScore` = `percentileOf(t.buyFrequency, sortedTrustBuyFreq)`（同樣 sort setup 的 buyFrequency）
+     - `netRatioScore` = `t.netRatio === null ? null : percentileOf(t.netRatio, sortedTrustNetRatio)`
+     - `combineTrustScore(buyFreqScore, netRatioScore, pb.trustSubWeights)`
+     - `t.degraded` → `pb.neutralScore`（同 setup 邏輯）
+   - `otherInstScore` = `o.ratio === null ? pb.neutralScore : percentileOf(o.ratio, sortedOtherInstRatio)`
+   - `...preBreakoutExtras(accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [], trustScore, otherInstScore,
+      t.netRatio, o.ratio, ceil(pb.institutionalWindowDays * pb.minInstitutionalDaysRatio))`
+      加進該 breakout 股的 `results.push({ ... })`。
+   - **`totalScore` / `scores`（8 分項）/ `rank` 一律不動**——`preInst` 是純附加回傳欄位。
+
+**語意**：breakout 股拿到的 `trustScore` = 「這檔的投信 20 日買超佔比，若拿去跟今天所有醞釀股比，排第幾百分位」。
+正是使用者切到「醞釀中」tab 檢視它時想看的。setup 股的分數一個都沒變。
+
+### 3.3 新 helper `percentileOf`
+
+```ts
+/** value 落在已升冪排序的 population 中的百分位（0~100）。population 空 → 回 naScore。 */
+function percentileOf(value: number, sortedAsc: number[], naScore: number): number {
+  if (sortedAsc.length === 0) return naScore;
+  // 二分找第一個 > value 的位置 = 有幾個 <= value
+  let lo = 0, hi = sortedAsc.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sortedAsc[mid]! <= value) lo = mid + 1; else hi = mid;
+  }
+  return (lo / sortedAsc.length) * 100;
+}
+```
+
+放在 `run-signal-scan.ts` 檔內（跟 `breakoutTotalScore` 等私有 helper 一起）。
+與 `rankScore` 的百分位定義對齊（`rankScore` 是 `(rank+1)/N*100`，`percentileOf` 是 `count(<=v)/N*100`，
+語意都是「贏過多少比例」，差一個名次的邊界不影響 UI 呈現）。
+
+### 3.4 `lib/latest-scan.ts`
+
+`buildLatestScan()`：
+
+```ts
+for (const r of out.results ?? []) {
+  resultByCode.set(r.code, r);
+  const rs = r.scores?.["relativeStrength"];
+  if (typeof rs === "number") prByCode.set(r.code, rs);   // setup 列現在也命中
+  if (r.preInst) {                                        // ← 從「r.stage === setup」改成「有 preInst 就收」
+    preInstByCode.set(r.code, {
+      trustScore: r.preInst.trustScore ?? null,
+      otherInstScore: r.preInst.otherInstScore ?? null,
+      trustNetRatio: r.preInst.trustNetRatio ?? null,
+      otherInstRatio: r.preInst.otherInstRatio ?? null,
+    });
+  }
+}
+```
+
+（現行是讀 `r.scores?.["trustScore"]` 等——改成直接讀 `r.preInst.*`，因為 breakout 的
+`r.scores` 是 8 分項、沒有 `trustScore`，但 `r.preInst` 有。setup 的 `r.preInst` 也有，一致。）
+
+---
+
+## 4. 型別收緊
+
+統一後「某階段一定沒有這欄位」的理由消失，收緊讓 TS 擋「`buildCardRow` 漏給」：
+
+- **`lib/actions/watchlist.ts` `WatchlistCardRow`：`inst` / `factors` / `preInst` 從 `X | null` → `X`**。
+  - `buildCardRow` 現在每條 return 路徑都給值。degraded 情形用欄位內部的 `degraded: boolean`
+    表達，**不再整個 null**——實作時確認每條路徑（含資料嚴重不足）給的是 degraded 骨架而非 `null`。
+  - 連帶簡化前端冗餘 null 檢查（見 §1 的 `WatchlistCard.tsx` / `FactorList.tsx` 條目）——
+    約 10~15 行，方向是刪死碼、變乾淨，非新增。
+- **`SignalResult`（`run-signal-scan.ts`）：`inst` / `factors` / `preInst` 維持 optional**
+  —— `/screening` 的 `SignalDetail` 按 stage 只讀其一，且 JSON 體積考量（setup 列不需要
+  `factors` 的 6 個突破欄位）。取捨：**JSON 保持精簡，watchlist 缺的那一半由 `buildCardRow` 自己補**。
+  唯一新增的是 breakout 列多一個 `preInst`（~10 個小欄位 × ~20 檔，可忽略）。
+
+---
+
+## 5. Commit 切分
+
+單一主題，建議 **1 個 commit**（改動集中、互相依賴——latest-scan 讀的欄位靠 run-signal-scan 產出）：
 
 ```
-"pre-breakout"  →  "setup"        （只在 SignalStage 值的 context——賦值 / 比對 / 陣列 / Record key）
-"breakout-day"  →  "breakoutDay"
-（extended 不動）
+feat: 觀察股卡片跨分類資料統一——buildCardRow 去 stage 分支 + breakout 補醞釀籌碼分
 ```
 
-**注意誤傷點**：
-- `config.preBreakout` / `d.preBreakout` / `pb?.xxx ?? d.preBreakout.xxx`（config.ts）——**保持不動**，
-  那是既有的 config 屬性名，跟 SignalStage 值無關。grep `"pre-breakout"`（帶引號、帶連字號）
-  只會命中字串值，不會命中 `preBreakout` 識別字——所以按「帶引號的字串」replace 是安全的。
-- `stats.preBreakout` / `stats.breakoutDay`（run-signal-scan.ts 的 `SignalScanOutput.stats`）——
-  同理，那是 camelCase 欄位名，不帶引號連字號，不會被誤中。
-- `preBreakoutExtras()` 函式名——同理。
+若想分兩個：
+- commit 1：`run-signal-scan.ts` + `lib/latest-scan.ts`（產資料端：setup 補 RS、breakout 補 preInst）
+- commit 2：`lib/actions/watchlist.ts` + 前端元件（消費端：去分支、型別收緊）
 
-### 1.3 改完立刻重跑掃描覆蓋舊 JSON
+---
 
-`data/signal-scan-results/*.json` 裡 `"stage": "pre-breakout"` 會過時 → 前端讀進來
-`STAGE_LABELS["pre-breakout"]` 是 `undefined` → tab / pill 顯示壞掉。
+## 6. 驗證
 
-- 改完（在 `feat/watchlist-manual-stage` 分支）跑一次：
-  ```
-  pnpm tsx scripts/screening/run-signal-scan.ts --source=eod
-  ```
-  覆蓋 `data/signal-scan-results/{今日}.json`（新的 `stage` 值）。
-- realtime 檔（`{今日}-intraday.json`）：等下次 launchd 自動覆蓋，或手動
-  `pnpm tsx scripts/screening/run-signal-scan.ts --source=realtime`。
-- **不做「讀舊值轉換」**（YAGNI——掃描 JSON 本來每天重生；舊 `{timestamp}.json` 是 PLAN 5 前的死檔，
-  gitignored，不管）。
-- **merge 到 main 後也要在 main 上重跑一次 eod**（分支上跑的 `{今日}.json` 若沒 commit 進去——
-  `data/` gitignored，所以 merge 後 main 的 working dir 還是舊 JSON，得重跑）。收尾清單列出。
-
-### 1.4 驗證命名統一
+### 6.1 靜態
 
 - `pnpm exec tsc --noEmit` 乾淨。
-- `pnpm tsx --test scripts/lib/signal-factors/factors.test.ts`（若測試裡有 `"pre-breakout"` 斷言，
-  一併改）。
-- `grep -rn '"pre-breakout"\|"breakout-day"' --include="*.ts" --include="*.tsx"` → **應回空**
-  （除了可能的註解，註解可留可改）。
-- 重跑 eod 掃描 → `python3 -c "import json; d=json.load(open('data/signal-scan-results/{今日}.json')); print(set(r['stage'] for r in d['results']))"` → 應是 `{'setup', 'breakoutDay', 'extended'}`。
-- `curl http://localhost:3000/screening` / `/watchlist` → tab 中文正常、pill 正常。
+- `pnpm tsx --test scripts/lib/signal-factors/factors.test.ts`（既有 31 案不回歸；
+  若加 `percentileOf` 單測放這裡或 `run-signal-scan` 旁）。
+
+### 6.2 掃描產出
+
+- `pnpm tsx scripts/screening/run-signal-scan.ts --date=<最近交易日>` 重跑 eod。
+- 檢查 `data/signal-scan-results/<date>.json`：
+  - 每個 `stage === "setup"` 的 `results[].scores.relativeStrength` 有數字（不再 undefined）。
+  - 每個 `stage === "breakoutDay" | "extended"` 的 `results[]` 多了 `preInst` 物件，
+    `preInst.trustScore` / `otherInstScore` 是 0~100 數字。
+  - `stats` 計數不變、`totalScore` 與改動前逐檔比對**完全一致**（本 PLAN 不動分數）。
+    → 用 `git stash` 前後各跑一次 diff `results[].totalScore`。
+
+### 6.3 watchlist 頁（需 dev server，curl 或使用者確認）
+
+- 取一檔實際 `autoStage="setup"` 的觀察股，`/watchlist` 手動點「延續爆發」按鈕改 `userStage`：
+  - 卡片切到「延續爆發」tab，法人 diverging bar 有柱、底排「強度 PR」有 `PRxx`、
+    「距年高」有 %、「突破」顯示**負** %（如 `-2.3%`，正常——未站上上軌）。
+  - 標頭「⚠ 自動判定：醞釀中」chip 仍在。
+- 取一檔實際 `autoStage="breakoutDay"` 的觀察股，手動改成「醞釀中」：
+  - 卡片切到「醞釀中」tab，`PreBreakoutInstitutional` 的 20 格日曆有格、
+    **投信進度條有寬度、外資進度條有寬度**（不再是空的或「不在掃描名單」）。
+- 改回原分類 → 卡片內容與改動前一致（無回歸）。
+
+### 6.4 screening 頁（curl 或使用者確認）
+
+- `/screening` 三個 tab 展開列視覺**與改動前一致**（多出來的 JSON 欄位它不讀）。
+- 特別確認 breakout 展開列沒有因為多了 `preInst` 而誤渲染醞釀元件。
 
 ---
 
-## 2. 廢除 `WatchlistItem.source`
+## 7. 風險與回退
 
-`source` 現況：**只有寫入、零讀取**。
-- 寫入：`addToWatchlist({ source })` ← `ScreeningPanel` 的 `stageToSource()` 算出來傳。
-- 讀取：`WatchlistCardRow.source` 帶著它回前端，但 `WatchlistCard` / `WatchlistGallery` **不讀**；
-  `scripts/` 沒有任何檔讀 `WatchlistItem.source`。當初「記錄從哪個策略加入、日後分析」意圖從沒實現。
+| 風險 | 說明 | 對策 |
+|---|---|---|
+| `totalScore` 意外變動 | 若插值法不小心把 breakout 股塞進 setup 的 `rankScore` 母體 | §6.2 逐檔 diff `totalScore`；插值一定用 `percentileOf`（獨立函式、不 push 進 `rankScore` 輸入陣列） |
+| `otherInstRatio` 在 watchlist 現算與掃描不一致 | `buildCardRow` 用 `quoteWindow` 的 `volume` 當分母、掃描用 `instVolumeNewestFirst` | 優先讀 `fromScan?.otherInstRatio`；現算只在該檔不在掃描結果時 fallback，且 tooltip 標「近日資料」 |
+| setup 底排要不要加突破因子的爭議 | 使用者可能回頭想要 setup tab 也顯示「距年高 / 強度 PR」 | 本 PLAN `factors` 物件已一律有值，前端 `FactorList` setup 分支加 Cell 是 5 行的事，留給後續 |
+| nullable 收緊漏掉某條 return 路徑 | `buildCardRow` degraded 分支給了 `null` 而非 degraded 骨架 → 收緊後編譯報錯（正是要的，但實作時要處理） | 逐條檢查 `buildCardRow` return 路徑；degraded 一律回 `{ ...骨架, degraded: true }` |
 
-`userStage`（§3）是上位替代（三階段之一，比 `breakout` / `accumulation` 二分精確）。
-
-### 2.1 移除清單
-
-- `schema.prisma`：`WatchlistItem` 刪 `source String?` 那行。migration（跟 §1.1 的 enum + userStage
-  同一個 migration）。
-- `lib/actions/watchlist.ts`：
-  - `WatchlistCardRow` 介面刪 `source: string | null`。
-  - `buildCardRow` return 刪 `source: item.source`。
-  - `addToWatchlist` 的 `input: { codes, source? }` → `{ codes }`；`createMany` 的
-    `...(input.source ? { source: input.source } : {})` 刪掉。
-- `components/screening/ScreeningPanel.tsx`：
-  - `stageToSource()` 函式刪除。
-  - `addSelected()`（或加入邏輯）裡的 `bySource` 分組刪掉 → 直接
-    `await addToWatchlist({ codes: [...selected] })`。
-- 既有 DB 資料的 `source` 值：migration drop column 時自然消失，不需另外清。
-
-### 2.2 驗證
-
-- `tsc` 乾淨。
-- `curl -X`（或 UI 操作）「選股頁勾選加入 watchlist」→ 加入成功、不再帶 source。
-- Prisma Studio / query 確認 `WatchlistItem` 沒有 `source` 欄位、有 `userStage`。
+**回退**：純計算 + 前端，無 migration。`git revert` 單 commit 即復原；
+`data/signal-scan-results/*.json` 重跑一次掃描即回舊格式（setup 無 `relativeStrength`、breakout 無 `preInst`）。
 
 ---
 
-## 3. `userStage` 手動分類（功能 commit）
+## 8. 對 CLAUDE.md / docs 的後續更新（實作完成後）
 
-### 3.1 型別
-
-- `WatchlistCardRow` 加：
-  ```ts
-  userStage: SignalStage;   // 加入時就寫入（addToWatchlist 算 autoStage），理論上恆有值
-  autoStage: SignalStage;   // 即時判定（現在的 stage 計算），只拿來比對 + chip
-  ```
-  （`stage` 欄位可保留當「卡片實際採用的 = userStage ?? autoStage」，或直接刪 `stage` 用 `userStage`
-  ——傾向保留 `stage` 少改前端，值 = `userStage ?? autoStage`。）
-
-### 3.2 `addToWatchlist` 加入時算 `autoStage`
-
-現在 `addToWatchlist` 只 `createMany({ data: codes.map(code => ({ stockCode: code })) })`。改成：
-
-```ts
-export async function addToWatchlist(input: { codes: string[] }): Promise<{ added: number; skipped: number }> {
-  const requested = [...new Set(input.codes)];
-  if (requested.length === 0) return { added: 0, skipped: 0 };
-
-  const existing = await prisma.stock.findMany({
-    where: { code: { in: requested } },
-    select: { code: true },
-  });
-  const validCodes = existing.map((s) => s.code);
-  if (validCodes.length === 0) return { added: 0, skipped: requested.length };
-
-  // 加入當下算即時 autoStage（比照 buildCardRow 的 stage 計算，但這裡是批量、簡化版）。
-  const autoStageByCode = await computeAutoStages(validCodes);
-
-  const result = await prisma.watchlistItem.createMany({
-    data: validCodes.map((code) => ({
-      stockCode: code,
-      userStage: autoStageByCode.get(code) ?? "setup", // 算不出（缺指標）→ 預設 setup
-    })),
-    skipDuplicates: true,
-  });
-
-  revalidatePath("/watchlist");
-  return { added: result.count, skipped: requested.length - result.count };
-}
-```
-
-`computeAutoStages(codes)`：新的私有 helper（`watchlist.ts` 內）。
-
-```ts
-async function computeAutoStages(codes: string[]): Promise<Map<string, SignalStage>> {
-  // 用 DB 資料（不打 MIS——加入動作不該卡）：每檔撈近 N 筆 DailyQuote.close + TechnicalIndicator.bollingerUpper，
-  // consecutiveAboveBand 算連續站上上軌天數 → setup / breakoutDay / extended。
-  // 缺指標的檔 → 不放進 Map（呼叫端 fallback "setup"）。
-}
-```
-
-- **只用 DB 資料**（`eod` 視角）——加入 watchlist 的動作在盤中也不該打 MIS 卡住。用 DB 最新一筆
-  quote + 指標算即時階段。盤中加入的檔，autoStage 可能跟盤中即時判定略有出入（用的是 T-1 收盤），
-  可接受——反正隔天 `buildCardRow` 會重算 `autoStage` 並比對。
-- `consecutiveAboveBand` 從 `scripts/lib/signal-factors/staging` import（`watchlist.ts` 已有 import 它）。
-
-### 3.3 `buildCardRow`：`stage` = `userStage ?? autoStage`
-
-```ts
-// 現在：
-// const stage: SignalStage = aboveBand.consecutiveDays <= 0 ? "pre-breakout" : ...;
-// 改成：
-const autoStage: SignalStage =
-  aboveBand.consecutiveDays <= 0
-    ? "setup"
-    : aboveBand.consecutiveDays <= 2
-      ? "breakoutDay"
-      : "extended";
-const stage: SignalStage = item.userStage ?? autoStage;   // 卡片因子渲染看這個
-```
-
-下面 `if (stage === "setup")` / breakout 分支的因子計算**完全不動**——只是 `stage` 的來源變了。
-
-`return` 加 `userStage: item.userStage ?? autoStage`、`autoStage`。
-
-### 3.4 `listWatchlist` 撈 `userStage`
-
-`prisma.watchlistItem.findMany` 現在 `include: { stock: {...} }`——`userStage` 是 `WatchlistItem`
-自己的欄位，`findMany` 預設就會帶（除非有 `select`）。**確認沒有 `select` 縮限**——現在是 `include`
-不是 `select`，所以 `item.userStage` 自動有。無需改（除非 tsc 抱怨型別，那就 `select` 明列）。
-
-### 3.5 `updateWatchlistItem` 加 `userStage`
-
-```ts
-export async function updateWatchlistItem(input: {
-  code: string;
-  userStage?: SignalStage;          // 新增
-  isPurchased?: boolean;
-  // ... 既有欄位不動
-}): Promise<void> {
-  const data: Record<string, unknown> = {};
-  if (input.userStage !== undefined) data["userStage"] = input.userStage;
-  // ... 既有
-  if (Object.keys(data).length === 0) return;
-  await prisma.watchlistItem.update({ where: { stockCode: input.code }, data });
-  revalidatePath("/watchlist");
-}
-```
-
-- **邊界 map**：`SignalStage` 字串值（`"setup"` 等）== Prisma enum `SignalStage` 的成員名
-  （§1.1 特意讓它們一致：`setup` / `breakoutDay` / `extended`）→ **不需要 map**，直接傳。
-  （這就是為什麼 §1.1 選 camelCase 而非 `pre_breakout` snake_case——省掉轉換層。）
-
-### 3.6 `WatchlistGallery`：tab 分類 + 異動數字
-
-```ts
-// countByStage：{ total, mismatch }
-const countByStage = useMemo(() => {
-  const m: Record<SignalStage, { total: number; mismatch: number }> = {
-    setup: { total: 0, mismatch: 0 },
-    breakoutDay: { total: 0, mismatch: 0 },
-    extended: { total: 0, mismatch: 0 },
-  };
-  for (const r of rows) {
-    const tab = r.userStage ?? r.autoStage;
-    m[tab].total += 1;
-    if (r.autoStage !== (r.userStage ?? r.autoStage)) m[tab].mismatch += 1;
-  }
-  return m;
-}, [rows]);
-
-const shown = useMemo(
-  () => rows.filter((r) => (r.userStage ?? r.autoStage) === stage),
-  [rows, stage],
-);
-```
-
-tab label：
-```tsx
-{STAGE_LABELS[s]}（{countByStage[s].total}
-{countByStage[s].mismatch > 0 ? ` · ${countByStage[s].mismatch} 異動` : ""}）
-```
-
-`useState<SignalStage>` 預設值 `"breakoutDay"`（原 `"breakout-day"`）。
-
-### 3.7 `WatchlistCard`：不一致 chip + 改分類 UI
-
-**不一致 chip**（`row.userStage !== row.autoStage` 時）：
-```tsx
-{row.userStage !== row.autoStage ? (
-  <span className={cn("rounded px-1.5 py-0.5 text-xs", STAGE_PILL_CLASS[row.autoStage])}>
-    ⚠ 自動判定：{STAGE_LABELS[row.autoStage]}
-  </span>
-) : null}
-```
-放在卡片標頭區，跟現有的 stage pill（顯示 `row.stage` = userStage 的）並排。
-
-**改分類 UI**：卡片底部或標頭加三顆小按鈕（`setup` / `breakoutDay` / `extended`），當前 `userStage`
-高亮：
-```tsx
-<div className="flex gap-1">
-  {STAGE_ORDER.map((s) => (
-    <button
-      key={s}
-      onClick={() => startTransition(() => updateWatchlistItem({ code: row.stockCode, userStage: s }))}
-      disabled={isPending}
-      className={cn(
-        "rounded px-2 py-0.5 text-xs",
-        row.userStage === s ? STAGE_PILL_CLASS[s] : "bg-muted text-muted-foreground/70 hover:text-foreground",
-      )}
-    >
-      {STAGE_LABELS[s]}
-    </button>
-  ))}
-</div>
-```
-`WatchlistCard` 已是 `"use client"`、已有 `useTransition`（remove 按鈕在用）——沿用。
-
-### 3.8 驗證功能
-
-- `tsc` 乾淨。
-- **加入時 autoStage 寫入**：選股頁勾一檔醞釀中的股票加入 → Prisma Studio 看 `userStage = "setup"`。
-  勾一檔突破的 → `userStage = "breakoutDay"`。
-- **手動改分類**：watchlist 卡片按「延續爆發」→ 該卡片移到「延續爆發」tab、`userStage` 更新、
-  卡片因子變成 breakout 版（法人 diverging bar + PR）。
-- **不一致提示**：手動把一檔 `autoStage = extended` 的股票改成 `userStage = setup` →
-  a. 該卡片出現「⚠ 自動判定：延續爆發」chip
-  b. 「醞釀中」tab label 變「醞釀中（N · 1 異動）」
-- **盤中閃動接受**：盤中一檔 `userStage = setup` 的股票即時衝上上軌（`autoStage` 變 `breakoutDay`）
-  → 異動數 +1；盤中回落 → 復原。不修。
-- `curl http://localhost:3000/watchlist` 三 tab 點過、空 tab 提示正常。
-
----
-
-## 4. 收尾
-
-- 兩個 commit：
-  1. `refactor: 三階段命名統一 setup/breakoutDay/extended + 廢除 WatchlistItem.source`（§1 + §2）
-  2. `feat: 觀察股手動分類 userStage + 自動判定不一致提示`（§3）
-- `pnpm prisma migrate dev` 的 migration 檔進 commit 1。
-- **重跑掃描**：commit 1 之後在分支跑 `run-signal-scan.ts --source=eod`；**merge 到 main 後在
-  main 再跑一次**（`data/` gitignored，分支跑的 JSON 不進 git）。
-- 更新 `docs/PROGRESS.md`：新增「三階段命名統一 + 觀察股手動分類（PLAN 6）」段——命名對照、
-  廢 source 的依據（零讀取）、`userStage` 加入時算 autoStage 的理由、不一致提示設計、
-  camelCase enum 省掉邊界 map。
-- 更新 `CLAUDE.md`：
-  - 三階段相關描述——`pre-breakout` / `breakout-day` → `setup` / `breakoutDay`（全文 grep）。
-  - `WatchlistItem` schema 段——移除 `source`、新增 `userStage SignalStage?`（enum）。
-  - `/watchlist` 頁段——tab 改用 `userStage`（加入時 = 當下 autoStage）、`autoStage` 即時算只比對、
-    不一致提示 a/b、卡片改分類 UI。
-  - `addToWatchlist` / `updateWatchlistItem` 描述——`source` 參數移除、`userStage` 加入。
-  - `run-signal-scan.ts` 段——`SignalStage` 值改名、JSON `stage` 欄位值改名。
-- 更新 `README.md`：若提及三階段名稱 / 觀察清單分類，同步。
-- `docs/ROADMAP.md`：§7 全部 checkbox 打勾。**若這是「資料源統一」這條線最後一份**，回覆時提醒
-  使用者可規劃下一輪（對照 ROADMAP §5 盤中提醒 / 兩個 deferred 項）。
-- `git rm` 無。
-
----
-
-## 5. 風險 / 取捨
-
-1. **命名統一是大範圍機械改動**（10+ 檔）。緩解：分三個獨立 grep replace（`"pre-breakout"` /
-   `"breakout-day"` 帶引號，不誤中 `config.preBreakout` / `stats.breakoutDay` 識別字）；
-   `tsc` + 掃描 JSON 重跑 + 三頁點過三重驗證；commit 跟功能分開，壞了好回溯。
-
-2. **舊掃描 JSON 過時**：改完到重跑之間，`/screening` / `/watchlist` 讀舊 `stage` 值會壞
-   （`STAGE_LABELS[undefined]`）。所以「改完立刻重跑」是收尾必做項，不是選配。merge 到 main 後
-   也要再跑一次。
-
-3. **`addToWatchlist` 加入時算 autoStage 多一次 DB 查詢**（撈 quote + 指標）。批量加入（勾 10 檔）
-   = 一次 `findMany`，可接受。加入動作本來就不是高頻。
-
-4. **`userStage` 理論上恆有值**（加入時就寫），但 schema nullable + 既有 watchlist 資料
-   （PLAN 6 之前加的）`userStage` 會是 null。緩解：`buildCardRow` / `WatchlistGallery` 一律
-   `userStage ?? autoStage`。或 migration 時對既有列跑一次 backfill（算當下 autoStage 填進去）
-   ——傾向不 backfill，`?? autoStage` fallback 就夠，既有資料看到卡片後使用者自己釘。
-   （若既有 watchlist 有很多檔，可加一個一次性 script 填。看使用者當下 watchlist 檔數決定。）
+- **CLAUDE.md**
+  - `/watchlist` 頁段落：「醞釀中卡片已無 K棒/力道/位階」保留；新增「`buildCardRow` 不再按 stage
+    分支——`inst` / `factors` / `preInst` 一律計算，使用者手動改 `userStage` 後三區塊都有資料」。
+  - `SignalResult` 段落：「`preInst?` 只在 setup 有值」→ 改為「setup + breakout 皆有；breakout 的
+    `preInst.trustScore` / `otherInstScore` 是對 setup 母體的插值百分位（不進母體、不影響 setup 分數）」。
+  - `lib/latest-scan.ts` 段落：`preInstByCode` 來源從「只 setup」→「有 `preInst` 的都收」。
+  - `signal-factors` 段落：`run-signal-scan.ts` 新增私有 `percentileOf` helper。
+- **docs/PROGRESS.md**：新增「PLAN 7：觀察股卡片跨分類統一」段，記實測（逐檔 `totalScore` diff = 0、
+  breakout 股改醞釀 tab 進度條有值的截圖/描述）。
+- **docs/ROADMAP.md**：若 ROADMAP 有對應 todo 打勾；無則在 watchlist 相關段補一行。
