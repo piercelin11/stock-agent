@@ -1,281 +1,410 @@
-# PLAN 5：盤中資料源強化
+# PLAN 6：三階段命名統一 + 廢除 source + 觀察股手動分類
 
-四份 PLAN（資料源統一 + 盤中即時性）+ 「昨」badge 修正上線後，盤中掃描能自動跑，但三個粗糙處：
+一份 PLAN 三件事，**commit 分兩個**（先重構 §1–§2、再功能 §3，出問題好回溯）。
 
-1. **realtime 掃描結果累積成垃圾**：每次一個 `{timestamp}.json`，launchd 每 30 分 + 手動重跑 →
-   一週 ~50 個檔（今天目錄已 5 個、昨天 4 個）。`readLatestRealtimeFile()` 每次 `readdir + sort + at(-1)`。
-2. **`fetchMisBatch` 一批失敗就整批放棄**：開盤前 / 睡眠喚醒時 MIS 常整批掛（`failedCount` 是
-   120 的倍數）。09-02 早上那次 7 批全掛（`failedCount: 840 / totalStocks: 1099`）。
-3. **進頁沒有「掃描明顯缺失就重抓」的機制**：`getScreeningResult()` 的 realtime 分支只是讀最新
-   `{timestamp}.json`，不管那份缺多少。
+**分支**：`feat/watchlist-manual-stage`。merge 時機等使用者發話。
 
-**分支**：`feat/intraday-source`。merge 時機等使用者發話。
+**需求來源**：PLAN 5 收尾後的討論（2026-09-03）。ROADMAP §7 已記完整決定，本份是實作規格。
 
-**需求來源**：PLAN 4 收尾後的討論（2026-09-03）。ROADMAP §6 已記完整決定。
+**背景**：
+- 全專案三階段用**兩套詞**：程式碼識別字 `"pre-breakout"` / `"breakout-day"` / `"extended"`（含連字號的字串值）、UI 中文「醞釀中 / 首次突破 / 延續爆發」（`labels.ts` 單一出處）。`WatchlistItem.source` 又是**第三套** `"breakout"` / `"accumulation"` / `"manual"`（歷史遺留，只寫入無讀取）。
+- `/watchlist` 階段 tab 是 `consecutiveAboveBand()` 即時自動判定分的。使用者要「手動指定分類」，但保留自動評估拿來比對（「我昨天挑的醞釀股今天發動了，看卡片標示就知道」）。
 
 ---
 
 ## 0. 邊界
 
-**動：**
+### 動（§1–§2 重構 commit）
 
-- `scripts/screening/run-signal-scan.ts`：
-  - `runRealtime` 寫檔的檔名從 `{timestamp}.json` 改成 **`{台北今日 YYYY-MM-DD}-intraday.json`**
-    （兩處 `const timestamp = now.toISOString()...; writeResult(timestamp, ...)`）。
-  - `writeResult` 改用原子寫（先寫 `.tmp` 再 `renameSync`）——每 30 分覆蓋同一檔，避免輪詢讀到寫一半。
-    （eod 路徑的 `writeResult(dateStr, ...)` 也順便套原子寫，無害。）
-- `scripts/lib/mis-quotes.ts`：`fetchMisBatch` 的 `catch` / `!res.ok` 分支加 `sleep` 重試（見 §2）。
-- `lib/actions/signal-scan.ts`：
-  - `readLatestRealtimeFile()` 改成讀固定檔名 `{台北今日}-intraday.json`（不再 `readdir + sort`）。
-  - `getScreeningResult()` 的 realtime 分支加「明顯缺失 → 同步重抓」（見 §3）。
-- `components/screening/ScreeningPanel.tsx`：進頁 / 重抓時的 loading 文案配合 §3（「盤中資料不完整，
-  正在重新抓取…」）。
+- **`prisma/schema.prisma`**：
+  - 新增 `enum SignalStage { setup breakoutDay extended }`。
+  - `WatchlistItem`：**移除 `source String?`**；**新增 `userStage SignalStage?`**（nullable）。
+  - migration（`pnpm prisma migrate dev --name watchlist-userstage-drop-source`）。
+- **`scripts/lib/signal-factors/staging.ts`**：`consecutiveAboveBand` 相關若有 `SignalStage` 型別
+  或字串值——改。註解裡的 `pre-breakout / breakout-day / extended` 順手更新（非必須）。
+  **實際檢查**：grep 顯示 staging.ts 只有註解提到，沒有字串值——若確認只有註解，本檔只改註解。
+- **`scripts/screening/run-signal-scan.ts`**：
+  - `export type SignalStage = "pre-breakout" | "breakout-day" | "extended"` → `"setup" | "breakoutDay" | "extended"`。
+  - 所有 `stage = "pre-breakout"` / `"breakout-day"` 賦值、`s.stage === "pre-breakout"` /
+    `!== "pre-breakout"` 比對、`stage as "breakout-day" | "extended"` type assertion → 換新值。
+  - **JSON 輸出的 `stage` 欄位值跟著變**（`SignalResult.stage`）。
+  - **不要動** `config.preBreakout`（設定物件屬性名）、`stats.preBreakout` / `stats.breakoutDay`
+    （統計欄位名）、`preBreakoutExtras()`（函式名）——那些是 camelCase 識別字，不是 `SignalStage` 值，
+    跟本次改名無關。只改「`stage` 這個欄位會出現的字串值」。
+- **`lib/actions/signal-scan.ts`**：`export type { SignalStage }` re-export——型別跟著 run-signal-scan
+  變，不用改 code。
+- **`lib/latest-scan.ts`**：`if (r.stage === "pre-breakout")` → `=== "setup"`。
+- **`lib/actions/watchlist.ts`**：
+  - 第 16 行 `export type SignalStage = "pre-breakout" | "breakout-day" | "extended"`——**刪掉這份
+    本地 union**，改 `import type { SignalStage } from "./signal-scan"`（或直接從 run-signal-scan，
+    看 bundle 考量——現在刻意不 import run-signal-scan 本體，但 `import type` 會被 erase，安全）。
+  - `stage` 計算的三元判斷（第 216–221）：`"pre-breakout"` / `"breakout-day"` / `"extended"` → 新值。
+  - `if (stage === "pre-breakout")`（第 239）→ `=== "setup"`。
+  - `WatchlistCardRow.source` 欄位移除、`return` 的 `source: item.source` 移除。
+  - `addToWatchlist` 的 `source?` 參數移除、`createMany` 裡 `...(input.source ? {...} : {})` 移除。
+- **`components/signal/labels.ts`**：`STAGE_ORDER` 陣列值、`STAGE_LABELS` key、`STAGE_PILL_CLASS` key
+  → 新值。中文標籤（`"醞釀中"` 等）**不變**。
+- **`components/signal/FactorList.tsx`**：`row.stage === "pre-breakout"` → `=== "setup"`。
+- **`components/signal/pre-breakout-chip.ts`** / **`PreBreakoutInstitutional.tsx`**：grep 命中——
+  檢查是否有 `SignalStage` 值比對，有就改（多半是型別 import + 中文，可能不用動）。
+- **`components/watchlist/WatchlistCard.tsx`**：`row.stage === "pre-breakout"`（第 31、97）→ `=== "setup"`。
+- **`components/watchlist/WatchlistGallery.tsx`**：`useState<SignalStage>("breakout-day")` 預設值、
+  `countByStage` 的 `Record<SignalStage, ...>` key（`"breakout-day"` / `"extended"` / `"pre-breakout"`）→ 新值。
+- **`components/screening/ScreeningPanel.tsx`**：
+  - `stageToSource()` 函式**整個刪除**（§2 廢 source）+ 加入 watchlist 時的 `bySource` 分組邏輯簡化成
+    直接 `addToWatchlist({ codes: [...selected] })`（不再帶 source）。
+  - `useState<StageFilter>("breakout-day")` 預設、`setStageFilter("breakout-day")` reset、
+    `stageFilter === "pre-breakout"` 之類比對 → 新值。
+  - 第 357 `view.stats.preBreakout` / `breakoutDay` / `extended`——**那是 stats 欄位名，不動**。
+- **`components/screening/SignalDetail.tsx`**：`row.stage === "pre-breakout"`（第 18）→ `=== "setup"`。
 
-**不動：**
+### 動（§3 功能 commit）
 
-- `data/signal-scan-results/{YYYY-MM-DD}.json`（eod 盤後檔）：**完全不動**。盤中檔用
-  `-intraday` 後綴獨立，不合併——語意衝突（盤後定案 vs 即時估價）、`getScreeningResult` 的
-  「有 `{date}.json` 就不重算」快取會誤讀、`data-context` 判 `intraday` 靠 `source === "realtime"` 分不出。
-- `lib/data-context.ts`：`resolveDataContext()` 三態邏輯不動。`readLatestScan({ preferRealtime })`
-  （`lib/latest-scan.ts`）它內部讀「最新 `{timestamp}.json`」的邏輯——**見 §1.3，要一起改**。
-- `scripts/pipeline/intraday-scan.ts` / `com.piercelin.intradayscan.plist`：不動（plist 時段已於
-  2026-09-03 改成 10:00–13:30 並部署，ROADMAP §6 記錄）。
-- `_run-signal-scan.ts`：已於 PLAN 4 刪除。
-- 評分邏輯、gate、豁免、`watchlistQuotes`、階段判定：不動。
-- 三階段命名（`pre-breakout` 等）：**PLAN 6 才統一**，本份不碰。
+- **`lib/actions/watchlist.ts`**：
+  - `addToWatchlist`：加入時算 `autoStage` 寫進 `userStage`（見 §3.2）。
+  - `buildCardRow`：`autoStage` = 現在的 `stage` 計算結果；`stage`（決定卡片因子）= `userStage ?? autoStage`；
+    `WatchlistCardRow` 加 `userStage` + `autoStage` 兩欄。
+  - `listWatchlist`：`findMany` 的 `select` 加 `userStage`（不然 `item.userStage` 拿不到）。
+  - `updateWatchlistItem`：input 加 `userStage?: SignalStage`，`data` 組裝加對應處理。
+- **`components/watchlist/WatchlistGallery.tsx`**：
+  - `countByStage` 改成 `Record<SignalStage, { total: number; mismatch: number }>`。
+  - tab 分類：`rows.filter(r => (r.userStage ?? r.autoStage) === stage)`。
+  - tab label：`{STAGE_LABELS[s]}（{c.total}{c.mismatch > 0 ? ` · ${c.mismatch} 異動` : ""}）`。
+- **`components/watchlist/WatchlistCard.tsx`**：
+  - `userStage !== autoStage` → 加「自動判定：{STAGE_LABELS[autoStage]}」chip。
+  - 加改分類 UI（3 顆按鈕）→ `updateWatchlistItem({ code, userStage })`。
 
----
+### 不動
 
-## 1. 盤中 realtime 掃描改「單一檔覆蓋」
-
-### 1.1 檔名
-
-`data/signal-scan-results/{台北今日 YYYY-MM-DD}-intraday.json`
-
-- 台北今日 = `runRealtime` 已有的 `dateStr = taipeiTodayIso(now)`。
-- launchd 每 30 分跑 → 覆蓋同一天的這個檔。跨日自然換新檔名（前一天的 `-intraday.json` 留著，
-  gitignored、無害，可日後加清理但 YAGNI）。
-
-### 1.2 `run-signal-scan.ts` 改動
-
-- `runRealtime` 兩處寫檔（正常結束 + `prevDate === null` 的 early return）：
-  ```ts
-  // 舊：const timestamp = now.toISOString().slice(0, 19).replaceAll(":", "-");
-  //     writeResult(timestamp, output, config);
-  // 新：
-  writeResult(`${dateStr}-intraday`, output, config);
-  ```
-- `writeResult` 改原子寫：
-  ```ts
-  function writeResult(nameStamp: string, out: SignalScanOutput, config: SignalScanConfig): void {
-    mkdirSync(RESULT_DIR, { recursive: true });
-    const outputPath = join(RESULT_DIR, `${nameStamp}.json`);
-    const body = JSON.stringify({ ...out, params: config }, null, 2);
-    writeFileSync(`${outputPath}.tmp`, body);
-    renameSync(`${outputPath}.tmp`, outputPath);
-    console.log(`\n結果已寫入 ${outputPath}`);
-  }
-  ```
-  （`renameSync` 已從 `node:fs` import——檔頭已有 `mkdirSync, writeFileSync, renameSync`。）
-- **eod 路徑 `writeResult(dateStr, ...)` 不用改檔名**（`{date}.json` 維持），但套原子寫沒差。
-
-### 1.3 `lib/latest-scan.ts` 的 `readLatestScan({ preferRealtime })`
-
-現在它讀「`data/signal-scan-results/` 裡最新的 `{timestamp}.json`」（`readdir` 過濾
-`/^\d{4}-\d{2}-\d{2}T.*\.json$/` 再 sort）。改成讀固定檔名：
-
-- `readLatestScan({ preferRealtime: true })` 的 realtime 部分 → 讀 `{台北今日}-intraday.json`。
-  沒有 → 該來源視為不存在（回 null / 跳過），比照現況「沒有 `{timestamp}.json`」的處理。
-- **注意**：`readLatestScan` 收 `now?` 嗎？現在沒有——它是純讀檔。要拿「台北今日」得在
-  `latest-scan.ts` 自己算（`new Date(Date.now() + 8*3600_000).toISOString().slice(0,10)`，比照
-  其他檔）。或讓呼叫端（`data-context.ts` 已有 `taipeiNow`）傳日期字串進去。傾向後者——
-  `readLatestScan({ preferRealtime: true, todayIso })`，`data-context` 傳 `t.iso`。
-- **跨日殘留防呆**：若 `{昨天}-intraday.json` 還在、`{今天}-intraday.json` 沒有（今天 launchd
-  還沒跑第一次）→ 讀不到今天的 → `data-context` 走 `stale`（正確，今天還沒有盤中資料）。
-  不要 fallback 去讀昨天的 `-intraday`。
-
-### 1.4 `signal-scan.ts` 的 `readLatestRealtimeFile()`
-
-```ts
-// 舊：readdir RESULT_DIR，過濾 {timestamp}.json，sort，at(-1)，讀。
-// 新：
-function readLatestRealtimeFile(): SignalScanOutput | null {
-  const todayIso = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
-  const path = join(RESULT_DIR, `${todayIso}-intraday.json`);
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(readFileSync(path, "utf8")) as SignalScanOutput;
-  } catch {
-    return null;
-  }
-}
-```
-
-`getScreeningResult()` / `getScreeningContext()` 呼叫它的地方不用改。
+- `scripts/lib/signal-factors/config.ts` / `institutional.ts`：grep 命中的是 `config.preBreakout`
+  屬性名、`preBreakout:` config key——**不是 `SignalStage` 值**，不碰。
+- `run-signal-scan.ts` 的評分邏輯、gate、豁免、`stats` 欄位名（`preBreakout` / `breakoutDay`）。
+- `lib/data-context.ts` / PLAN 5 的 intraday 檔機制。
+- 中文標籤（`STAGE_LABELS` 的 value）。
+- `WatchlistItem` 的買入狀態欄位（`isPurchased` 等，早已無 UI 但保留）。
 
 ---
 
-## 2. `fetchMisBatch` 加重試
+## 1. 命名統一（`SignalStage` 值：`setup` / `breakoutDay` / `extended`）
 
-`scripts/lib/mis-quotes.ts`，`fetchMisBatch`：
+### 1.1 對照表
 
-- 現在：一次 `fetch` → `!res.ok` 或 `catch` → `return { quotes: [], failed: true }`。
-- 改：包一層重試迴圈。
+| 舊值（字串，含連字號） | 新值 | 中文（不變） |
+|---|---|---|
+| `"pre-breakout"` | `"setup"` | 醞釀中 |
+| `"breakout-day"` | `"breakoutDay"` | 首次突破 |
+| `"extended"` | `"extended"` | 延續爆發 |
 
-```ts
-const BATCH_RETRIES = 2;        // 總嘗試 2 次（原 1 次 + 重試 1 次）
-const BATCH_RETRY_DELAY_MS = 2000;
+- `breakoutDay` 而非 `breakout`——避免跟即將廢除的 `source` 值 `"breakout"` 視覺混淆、保留
+  「首次 vs 延續」語意。
+- Prisma enum 值不能有連字號，camelCase 是唯一選項。
 
-export async function fetchMisBatch(codes: {...}[]): Promise<{ quotes: MisQuote[]; failed: boolean }> {
-  const url = ...; // 組 URL（不變）
+### 1.2 做法：全域 grep 替換
 
-  for (let attempt = 1; attempt <= BATCH_RETRIES; attempt++) {
-    try {
-      const res = await fetch(url.toString(), { headers: { "User-Agent": "Mozilla/5.0" } });
-      if (!res.ok) {
-        if (attempt < BATCH_RETRIES) {
-          console.warn(`⚠ MIS 批次 ${res.status}，${BATCH_RETRY_DELAY_MS}ms 後重試（${codes.length} 檔）`);
-          await sleep(BATCH_RETRY_DELAY_MS);
-          continue;
-        }
-        console.warn(`⚠ MIS 批次請求失敗: ${res.status} ${res.statusText}（${codes.length} 檔）`);
-        return { quotes: [], failed: true };
-      }
-      const body = ...;  // 解析（不變）
-      return { quotes, failed: false };
-    } catch (err) {
-      if (attempt < BATCH_RETRIES) {
-        console.warn(`⚠ MIS 批次例外，${BATCH_RETRY_DELAY_MS}ms 後重試: ${err instanceof Error ? err.message : err}（${codes.length} 檔）`);
-        await sleep(BATCH_RETRY_DELAY_MS);
-        continue;
-      }
-      console.warn(`⚠ MIS 批次請求例外: ${err instanceof Error ? err.message : String(err)}（${codes.length} 檔）`);
-      return { quotes: [], failed: true };
-    }
-  }
-  return { quotes: [], failed: true }; // 理論上到不了
-}
+三個獨立的替換（分開做，避免誤傷）：
+
+```
+"pre-breakout"  →  "setup"        （只在 SignalStage 值的 context——賦值 / 比對 / 陣列 / Record key）
+"breakout-day"  →  "breakoutDay"
+（extended 不動）
 ```
 
-- `sleep` helper 檔頭已有。
-- **成本**：最壞情況每批多 2 秒。16 批全失敗 = 多 32 秒。但正常只 1–2 批偶爾失敗 → 多 2–4 秒。
-  可接受（掃描本來 20–30 秒）。
-- **共用**：`intraday-scan.ts`（launchd）、`getScreeningResult({ force: "realtime" })`（手動立即掃描）
-  都走 `fetchAllMisQuotes` → `fetchMisBatch`，一起受益。
+**注意誤傷點**：
+- `config.preBreakout` / `d.preBreakout` / `pb?.xxx ?? d.preBreakout.xxx`（config.ts）——**保持不動**，
+  那是既有的 config 屬性名，跟 SignalStage 值無關。grep `"pre-breakout"`（帶引號、帶連字號）
+  只會命中字串值，不會命中 `preBreakout` 識別字——所以按「帶引號的字串」replace 是安全的。
+- `stats.preBreakout` / `stats.breakoutDay`（run-signal-scan.ts 的 `SignalScanOutput.stats`）——
+  同理，那是 camelCase 欄位名，不帶引號連字號，不會被誤中。
+- `preBreakoutExtras()` 函式名——同理。
+
+### 1.3 改完立刻重跑掃描覆蓋舊 JSON
+
+`data/signal-scan-results/*.json` 裡 `"stage": "pre-breakout"` 會過時 → 前端讀進來
+`STAGE_LABELS["pre-breakout"]` 是 `undefined` → tab / pill 顯示壞掉。
+
+- 改完（在 `feat/watchlist-manual-stage` 分支）跑一次：
+  ```
+  pnpm tsx scripts/screening/run-signal-scan.ts --source=eod
+  ```
+  覆蓋 `data/signal-scan-results/{今日}.json`（新的 `stage` 值）。
+- realtime 檔（`{今日}-intraday.json`）：等下次 launchd 自動覆蓋，或手動
+  `pnpm tsx scripts/screening/run-signal-scan.ts --source=realtime`。
+- **不做「讀舊值轉換」**（YAGNI——掃描 JSON 本來每天重生；舊 `{timestamp}.json` 是 PLAN 5 前的死檔，
+  gitignored，不管）。
+- **merge 到 main 後也要在 main 上重跑一次 eod**（分支上跑的 `{今日}.json` 若沒 commit 進去——
+  `data/` gitignored，所以 merge 後 main 的 working dir 還是舊 JSON，得重跑）。收尾清單列出。
+
+### 1.4 驗證命名統一
+
+- `pnpm exec tsc --noEmit` 乾淨。
+- `pnpm tsx --test scripts/lib/signal-factors/factors.test.ts`（若測試裡有 `"pre-breakout"` 斷言，
+  一併改）。
+- `grep -rn '"pre-breakout"\|"breakout-day"' --include="*.ts" --include="*.tsx"` → **應回空**
+  （除了可能的註解，註解可留可改）。
+- 重跑 eod 掃描 → `python3 -c "import json; d=json.load(open('data/signal-scan-results/{今日}.json')); print(set(r['stage'] for r in d['results']))"` → 應是 `{'setup', 'breakoutDay', 'extended'}`。
+- `curl http://localhost:3000/screening` / `/watchlist` → tab 中文正常、pill 正常。
 
 ---
 
-## 3. 進頁 fallback：明顯缺失 → 同步重抓
+## 2. 廢除 `WatchlistItem.source`
 
-### 3.1 判定「明顯缺失」
+`source` 現況：**只有寫入、零讀取**。
+- 寫入：`addToWatchlist({ source })` ← `ScreeningPanel` 的 `stageToSource()` 算出來傳。
+- 讀取：`WatchlistCardRow.source` 帶著它回前端，但 `WatchlistCard` / `WatchlistGallery` **不讀**；
+  `scripts/` 沒有任何檔讀 `WatchlistItem.source`。當初「記錄從哪個策略加入、日後分析」意圖從沒實現。
 
-`SignalScanOutput.stats` 有 `failedCount`（整批失敗的檔數）+ `totalStocks`。
+`userStage`（§3）是上位替代（三階段之一，比 `breakout` / `accumulation` 二分精確）。
 
-```
-明顯缺失 ⟺ failedCount / totalStocks > 0.10
-```
+### 2.1 移除清單
 
-- **只用 `failedCount` 佔比**。**不用 `estimatedCount`**——缺 `z` 用 `high` 代入是 MIS 端點
-  常態（每份都 1600+ 檔 estimated），拿來當觸發條件會每次進頁都重跑。
-- 今天實測對照：`120/1776 = 6.8%` → 不觸發（1 批掛可接受）；`840/1099 = 76%` → 觸發。
-- `totalStocks === 0`（整份空 / 非交易日）→ 不套這個判定（走既有的 `isNonTradingDay` / 空結果處理）。
+- `schema.prisma`：`WatchlistItem` 刪 `source String?` 那行。migration（跟 §1.1 的 enum + userStage
+  同一個 migration）。
+- `lib/actions/watchlist.ts`：
+  - `WatchlistCardRow` 介面刪 `source: string | null`。
+  - `buildCardRow` return 刪 `source: item.source`。
+  - `addToWatchlist` 的 `input: { codes, source? }` → `{ codes }`；`createMany` 的
+    `...(input.source ? { source: input.source } : {})` 刪掉。
+- `components/screening/ScreeningPanel.tsx`：
+  - `stageToSource()` 函式刪除。
+  - `addSelected()`（或加入邏輯）裡的 `bySource` 分組刪掉 → 直接
+    `await addToWatchlist({ codes: [...selected] })`。
+- 既有 DB 資料的 `source` 值：migration drop column 時自然消失，不需另外清。
 
-### 3.2 `getScreeningResult()` realtime 分支改動
+### 2.2 驗證
+
+- `tsc` 乾淨。
+- `curl -X`（或 UI 操作）「選股頁勾選加入 watchlist」→ 加入成功、不再帶 source。
+- Prisma Studio / query 確認 `WatchlistItem` 沒有 `source` 欄位、有 `userStage`。
+
+---
+
+## 3. `userStage` 手動分類（功能 commit）
+
+### 3.1 型別
+
+- `WatchlistCardRow` 加：
+  ```ts
+  userStage: SignalStage;   // 加入時就寫入（addToWatchlist 算 autoStage），理論上恆有值
+  autoStage: SignalStage;   // 即時判定（現在的 stage 計算），只拿來比對 + chip
+  ```
+  （`stage` 欄位可保留當「卡片實際採用的 = userStage ?? autoStage」，或直接刪 `stage` 用 `userStage`
+  ——傾向保留 `stage` 少改前端，值 = `userStage ?? autoStage`。）
+
+### 3.2 `addToWatchlist` 加入時算 `autoStage`
+
+現在 `addToWatchlist` 只 `createMany({ data: codes.map(code => ({ stockCode: code })) })`。改成：
 
 ```ts
-// signal-scan.ts，getScreeningResult()，mode === "realtime" 且 !opts.force 的分支：
-const rt = readLatestRealtimeFile();
-if (!rt) return null;                       // 沒有今日 intraday 檔 → 前端顯示「尚無掃描結果」
+export async function addToWatchlist(input: { codes: string[] }): Promise<{ added: number; skipped: number }> {
+  const requested = [...new Set(input.codes)];
+  if (requested.length === 0) return { added: 0, skipped: 0 };
 
-const total = rt.stats.totalStocks ?? 0;
-const failed = rt.stats.failedCount ?? 0;
-const grosslyIncomplete = total > 0 && failed / total > 0.10;
+  const existing = await prisma.stock.findMany({
+    where: { code: { in: requested } },
+    select: { code: true },
+  });
+  const validCodes = existing.map((s) => s.code);
+  if (validCodes.length === 0) return { added: 0, skipped: requested.length };
 
-if (grosslyIncomplete) {
-  // 方案 A：直接同步重跑一次，覆蓋 {date}-intraday.json，回新結果。
-  //   卡 Server Action ~30 秒（+ fetchMisBatch 重試最壞再多幾秒）。前端 loading 文案負責解釋。
-  const out = await runSignalScan(new Date(), { prisma, source: "realtime" });
-  return toView(out);
+  // 加入當下算即時 autoStage（比照 buildCardRow 的 stage 計算，但這裡是批量、簡化版）。
+  const autoStageByCode = await computeAutoStages(validCodes);
+
+  const result = await prisma.watchlistItem.createMany({
+    data: validCodes.map((code) => ({
+      stockCode: code,
+      userStage: autoStageByCode.get(code) ?? "setup", // 算不出（缺指標）→ 預設 setup
+    })),
+    skipDuplicates: true,
+  });
+
+  revalidatePath("/watchlist");
+  return { added: result.count, skipped: requested.length - result.count };
 }
-return toView(rt);
 ```
 
-- `runSignalScan(realtime)` 內部就會寫 `{date}-intraday.json`（§1.2 改好），所以重跑 = 覆蓋。
-- **`opts.force === "realtime"`（使用者按「立即掃描」）路徑不變**——本來就是同步重跑。
-- **不做背景 spawn + 輪詢**（方案 C 排除，見 ROADMAP §6）。
+`computeAutoStages(codes)`：新的私有 helper（`watchlist.ts` 內）。
 
-### 3.3 前端 loading 文案
+```ts
+async function computeAutoStages(codes: string[]): Promise<Map<string, SignalStage>> {
+  // 用 DB 資料（不打 MIS——加入動作不該卡）：每檔撈近 N 筆 DailyQuote.close + TechnicalIndicator.bollingerUpper，
+  // consecutiveAboveBand 算連續站上上軌天數 → setup / breakoutDay / extended。
+  // 缺指標的檔 → 不放進 Map（呼叫端 fallback "setup"）。
+}
+```
 
-`ScreeningPanel.tsx` 進頁 `getScreeningResult()` 正在跑時（`loading` state）：
+- **只用 DB 資料**（`eod` 視角）——加入 watchlist 的動作在盤中也不該打 MIS 卡住。用 DB 最新一筆
+  quote + 指標算即時階段。盤中加入的檔，autoStage 可能跟盤中即時判定略有出入（用的是 T-1 收盤），
+  可接受——反正隔天 `buildCardRow` 會重算 `autoStage` 並比對。
+- `consecutiveAboveBand` 從 `scripts/lib/signal-factors/staging` import（`watchlist.ts` 已有 import 它）。
 
-- 現況文案（PLAN 4）：大概是「載入中…」之類。
-- 加判斷：如果 `ctx.mode` 是 `intraday` / `stale`，loading 文案顯示
-  **「盤中資料不完整或尚未產出，正在抓取全市場即時報價…（約 20–30 秒）」**。
-- 因為進頁時前端還不知道「這次是直接讀檔（快）還是要重抓（慢）」，文案寫成涵蓋兩種情況的
-  中性版本即可。或：`getScreeningContext()` 多回一個 `willRefetch: boolean`（context 端先讀一次
-  `{date}-intraday.json` 判 `failedCount` 佔比），前端據此決定顯示「載入中」還是「重新抓取中（約 30 秒）」。
-  傾向後者——體感差很多（讀檔 <1 秒 vs 重抓 30 秒），值得讓文案準確。
-- `getScreeningContext()` 加 `willRefetch`：
-  ```ts
-  // context 端：mode 非 eod 時，讀 {date}-intraday.json 判斷
-  const rt = readLatestRealtimeFile();
-  const willRefetch =
-    ctx.mode !== "eod" &&
-    (!rt || (rt.stats.totalStocks > 0 && (rt.stats.failedCount ?? 0) / rt.stats.totalStocks > 0.10));
-  ```
-  （`!rt` 也算 `willRefetch` = true？——沒有 intraday 檔時 `getScreeningResult` 回 null，不會重抓，
-  前端顯示「尚無掃描結果 + 立即掃描按鈕」。所以 `willRefetch` 只在「有檔但缺很多」時 true。
-  `!rt` 時 `willRefetch = false`。修正上面的 `!rt ||` → 拿掉。）
+### 3.3 `buildCardRow`：`stage` = `userStage ?? autoStage`
+
+```ts
+// 現在：
+// const stage: SignalStage = aboveBand.consecutiveDays <= 0 ? "pre-breakout" : ...;
+// 改成：
+const autoStage: SignalStage =
+  aboveBand.consecutiveDays <= 0
+    ? "setup"
+    : aboveBand.consecutiveDays <= 2
+      ? "breakoutDay"
+      : "extended";
+const stage: SignalStage = item.userStage ?? autoStage;   // 卡片因子渲染看這個
+```
+
+下面 `if (stage === "setup")` / breakout 分支的因子計算**完全不動**——只是 `stage` 的來源變了。
+
+`return` 加 `userStage: item.userStage ?? autoStage`、`autoStage`。
+
+### 3.4 `listWatchlist` 撈 `userStage`
+
+`prisma.watchlistItem.findMany` 現在 `include: { stock: {...} }`——`userStage` 是 `WatchlistItem`
+自己的欄位，`findMany` 預設就會帶（除非有 `select`）。**確認沒有 `select` 縮限**——現在是 `include`
+不是 `select`，所以 `item.userStage` 自動有。無需改（除非 tsc 抱怨型別，那就 `select` 明列）。
+
+### 3.5 `updateWatchlistItem` 加 `userStage`
+
+```ts
+export async function updateWatchlistItem(input: {
+  code: string;
+  userStage?: SignalStage;          // 新增
+  isPurchased?: boolean;
+  // ... 既有欄位不動
+}): Promise<void> {
+  const data: Record<string, unknown> = {};
+  if (input.userStage !== undefined) data["userStage"] = input.userStage;
+  // ... 既有
+  if (Object.keys(data).length === 0) return;
+  await prisma.watchlistItem.update({ where: { stockCode: input.code }, data });
+  revalidatePath("/watchlist");
+}
+```
+
+- **邊界 map**：`SignalStage` 字串值（`"setup"` 等）== Prisma enum `SignalStage` 的成員名
+  （§1.1 特意讓它們一致：`setup` / `breakoutDay` / `extended`）→ **不需要 map**，直接傳。
+  （這就是為什麼 §1.1 選 camelCase 而非 `pre_breakout` snake_case——省掉轉換層。）
+
+### 3.6 `WatchlistGallery`：tab 分類 + 異動數字
+
+```ts
+// countByStage：{ total, mismatch }
+const countByStage = useMemo(() => {
+  const m: Record<SignalStage, { total: number; mismatch: number }> = {
+    setup: { total: 0, mismatch: 0 },
+    breakoutDay: { total: 0, mismatch: 0 },
+    extended: { total: 0, mismatch: 0 },
+  };
+  for (const r of rows) {
+    const tab = r.userStage ?? r.autoStage;
+    m[tab].total += 1;
+    if (r.autoStage !== (r.userStage ?? r.autoStage)) m[tab].mismatch += 1;
+  }
+  return m;
+}, [rows]);
+
+const shown = useMemo(
+  () => rows.filter((r) => (r.userStage ?? r.autoStage) === stage),
+  [rows, stage],
+);
+```
+
+tab label：
+```tsx
+{STAGE_LABELS[s]}（{countByStage[s].total}
+{countByStage[s].mismatch > 0 ? ` · ${countByStage[s].mismatch} 異動` : ""}）
+```
+
+`useState<SignalStage>` 預設值 `"breakoutDay"`（原 `"breakout-day"`）。
+
+### 3.7 `WatchlistCard`：不一致 chip + 改分類 UI
+
+**不一致 chip**（`row.userStage !== row.autoStage` 時）：
+```tsx
+{row.userStage !== row.autoStage ? (
+  <span className={cn("rounded px-1.5 py-0.5 text-xs", STAGE_PILL_CLASS[row.autoStage])}>
+    ⚠ 自動判定：{STAGE_LABELS[row.autoStage]}
+  </span>
+) : null}
+```
+放在卡片標頭區，跟現有的 stage pill（顯示 `row.stage` = userStage 的）並排。
+
+**改分類 UI**：卡片底部或標頭加三顆小按鈕（`setup` / `breakoutDay` / `extended`），當前 `userStage`
+高亮：
+```tsx
+<div className="flex gap-1">
+  {STAGE_ORDER.map((s) => (
+    <button
+      key={s}
+      onClick={() => startTransition(() => updateWatchlistItem({ code: row.stockCode, userStage: s }))}
+      disabled={isPending}
+      className={cn(
+        "rounded px-2 py-0.5 text-xs",
+        row.userStage === s ? STAGE_PILL_CLASS[s] : "bg-muted text-muted-foreground/70 hover:text-foreground",
+      )}
+    >
+      {STAGE_LABELS[s]}
+    </button>
+  ))}
+</div>
+```
+`WatchlistCard` 已是 `"use client"`、已有 `useTransition`（remove 按鈕在用）——沿用。
+
+### 3.8 驗證功能
+
+- `tsc` 乾淨。
+- **加入時 autoStage 寫入**：選股頁勾一檔醞釀中的股票加入 → Prisma Studio 看 `userStage = "setup"`。
+  勾一檔突破的 → `userStage = "breakoutDay"`。
+- **手動改分類**：watchlist 卡片按「延續爆發」→ 該卡片移到「延續爆發」tab、`userStage` 更新、
+  卡片因子變成 breakout 版（法人 diverging bar + PR）。
+- **不一致提示**：手動把一檔 `autoStage = extended` 的股票改成 `userStage = setup` →
+  a. 該卡片出現「⚠ 自動判定：延續爆發」chip
+  b. 「醞釀中」tab label 變「醞釀中（N · 1 異動）」
+- **盤中閃動接受**：盤中一檔 `userStage = setup` 的股票即時衝上上軌（`autoStage` 變 `breakoutDay`）
+  → 異動數 +1；盤中回落 → 復原。不修。
+- `curl http://localhost:3000/watchlist` 三 tab 點過、空 tab 提示正常。
 
 ---
 
 ## 4. 收尾
 
-- `pnpm exec tsc --noEmit` 乾淨。
-- `pnpm tsx --test scripts/lib/signal-factors/factors.test.ts`（不受影響）。
-- **驗證**：
-  - **單一檔覆蓋**：手動跑兩次 `pnpm tsx scripts/pipeline/intraday-scan.ts`（非交易時段會 skip，
-    可暫時註解時段判斷）→ `data/signal-scan-results/` 只多一個 `{今日}-intraday.json`、第二次覆蓋
-    不新增檔。原子寫：跑的過程中 `ls` 看得到短暫的 `.tmp`。
-  - **`readLatestRealtimeFile` / `readLatestScan`**：改讀固定檔名後，`getScreeningContext()` /
-    `resolveDataContext()` 在 `intraday` 模式仍正確拿到那份。跨日殘留：把檔案改名成
-    `{昨天}-intraday.json` → 進頁應走 `stale`，不誤讀昨天的。
-  - **`fetchMisBatch` 重試**：不好造網路失敗，靠 code review 確認重試迴圈邏輯 + 至少跑一次
-    完整掃描確認沒把正常流程改壞（`failed: false` 時第一次就 return，不進重試）。
-  - **明顯缺失重抓**：造一份 `failedCount` 佔比 > 10% 的假 `{今日}-intraday.json`（手改 stats）→
-    進 `/screening` → 應觸發同步重跑（loading 顯示「重新抓取中（約 30 秒）」）→ 跑完覆蓋、
-    `failedCount` 正常。造一份 `failedCount` 佔比 6%（1 批）的 → 進頁應**直接讀檔顯示**，不重抓。
-  - **盤中真實驗證**：下個交易日 10:00 後開著電腦，看 `logs/intraday_scan_stdout.log` 的
-    `failedCount`（期望比之前低，重試生效）、`data/signal-scan-results/` 不再累積時間戳檔。
-- 更新 `docs/PROGRESS.md`：新增「盤中資料源強化（PLAN 5）」段——單一檔覆蓋（+ 不合併盤後檔的
-  理由）、`fetchMisBatch` 重試、明顯缺失 `failedCount>10%` → 方案 A 同步重抓（為何不用 estimatedCount /
-  為何不用背景 spawn）、實測數字。
+- 兩個 commit：
+  1. `refactor: 三階段命名統一 setup/breakoutDay/extended + 廢除 WatchlistItem.source`（§1 + §2）
+  2. `feat: 觀察股手動分類 userStage + 自動判定不一致提示`（§3）
+- `pnpm prisma migrate dev` 的 migration 檔進 commit 1。
+- **重跑掃描**：commit 1 之後在分支跑 `run-signal-scan.ts --source=eod`；**merge 到 main 後在
+  main 再跑一次**（`data/` gitignored，分支跑的 JSON 不進 git）。
+- 更新 `docs/PROGRESS.md`：新增「三階段命名統一 + 觀察股手動分類（PLAN 6）」段——命名對照、
+  廢 source 的依據（零讀取）、`userStage` 加入時算 autoStage 的理由、不一致提示設計、
+  camelCase enum 省掉邊界 map。
 - 更新 `CLAUDE.md`：
-  - `run-signal-scan.ts` 段——realtime 輸出檔名 `{timestamp}.json` → `{date}-intraday.json`（單一檔
-    每 30 分原子覆蓋）；`writeResult` 原子寫。
-  - `lib/latest-scan.ts` / `signal-scan.ts` action 段——`readLatestRealtimeFile` / `readLatestScan`
-    改讀固定 `{今日}-intraday.json`；`getScreeningResult` realtime 分支加「`failedCount/totalStocks
-    > 10%` → 同步重抓覆蓋」；`getScreeningContext` 加 `willRefetch`。
-  - `scripts/lib/mis-quotes.ts` 段——`fetchMisBatch` 加 `BATCH_RETRIES=2` / `BATCH_RETRY_DELAY_MS=2000`。
-  - `com.piercelin.intradayscan.plist` 段——時段 09:00–13:30 → 10:00–13:30（順手修正，2026-09-03 已部署）。
-- 更新 `README.md`：若「使用方式」提及盤中掃描產出檔名 / 選股頁行為，同步。
-- `docs/ROADMAP.md`：§6 四個 checkbox 完成的打勾（plist 那項已 `[x]`）；PLAN 5 完成後在回覆裡
-  提醒使用者可接著開 PLAN 6。
+  - 三階段相關描述——`pre-breakout` / `breakout-day` → `setup` / `breakoutDay`（全文 grep）。
+  - `WatchlistItem` schema 段——移除 `source`、新增 `userStage SignalStage?`（enum）。
+  - `/watchlist` 頁段——tab 改用 `userStage`（加入時 = 當下 autoStage）、`autoStage` 即時算只比對、
+    不一致提示 a/b、卡片改分類 UI。
+  - `addToWatchlist` / `updateWatchlistItem` 描述——`source` 參數移除、`userStage` 加入。
+  - `run-signal-scan.ts` 段——`SignalStage` 值改名、JSON `stage` 欄位值改名。
+- 更新 `README.md`：若提及三階段名稱 / 觀察清單分類，同步。
+- `docs/ROADMAP.md`：§7 全部 checkbox 打勾。**若這是「資料源統一」這條線最後一份**，回覆時提醒
+  使用者可規劃下一輪（對照 ROADMAP §5 盤中提醒 / 兩個 deferred 項）。
 - `git rm` 無。
 
 ---
 
 ## 5. 風險 / 取捨
 
-1. **明顯缺失重抓會卡 Server Action ~30 秒**（+ `fetchMisBatch` 重試最壞再多 ~30 秒 = 最壞 ~60 秒）。
-   `willRefetch` 讓前端文案先講清楚「約 30 秒」，但使用者不能跳過。取捨：launchd 加重試後
-   `failedCount > 10%` 會變罕見（今天 12:30 後三份都 0 失敗批），這條 fallback 一週觸發不到一次。
-   為「罕見情況」加背景 spawn + 輪詢（方案 C）= 把 PLAN 4 剛清掉的複雜度和「昨」bug 面請回來，不值。
+1. **命名統一是大範圍機械改動**（10+ 檔）。緩解：分三個獨立 grep replace（`"pre-breakout"` /
+   `"breakout-day"` 帶引號，不誤中 `config.preBreakout` / `stats.breakoutDay` 識別字）；
+   `tsc` + 掃描 JSON 重跑 + 三頁點過三重驗證；commit 跟功能分開，壞了好回溯。
 
-2. **`fetchMisBatch` 重試把最壞情況掃描時間拉長**（16 批全失敗從 ~24 秒變 ~56 秒）。但「16 批全失敗」
-   本來就是「MIS 整個掛 / 沒網路」，那種情況掃出來也是空的，多等 32 秒無實質差別。正常情況
-   （1–2 批偶爾失敗）只多 2–4 秒。
+2. **舊掃描 JSON 過時**：改完到重跑之間，`/screening` / `/watchlist` 讀舊 `stage` 值會壞
+   （`STAGE_LABELS[undefined]`）。所以「改完立刻重跑」是收尾必做項，不是選配。merge 到 main 後
+   也要再跑一次。
 
-3. **`{date}-intraday.json` 跨日殘留**：前一天的檔留在目錄裡。`readLatestScan` / `readLatestRealtimeFile`
-   都讀「今日」固定檔名，讀不到就當沒有 → 走 `stale`，不會誤讀昨天的。舊檔是死檔，gitignored，
-   要清另開小工作（`data/` 清理），本份不做。
+3. **`addToWatchlist` 加入時算 autoStage 多一次 DB 查詢**（撈 quote + 指標）。批量加入（勾 10 檔）
+   = 一次 `findMany`，可接受。加入動作本來就不是高頻。
+
+4. **`userStage` 理論上恆有值**（加入時就寫），但 schema nullable + 既有 watchlist 資料
+   （PLAN 6 之前加的）`userStage` 會是 null。緩解：`buildCardRow` / `WatchlistGallery` 一律
+   `userStage ?? autoStage`。或 migration 時對既有列跑一次 backfill（算當下 autoStage 填進去）
+   ——傾向不 backfill，`?? autoStage` fallback 就夠，既有資料看到卡片後使用者自己釘。
+   （若既有 watchlist 有很多檔，可加一個一次性 script 填。看使用者當下 watchlist 檔數決定。）
