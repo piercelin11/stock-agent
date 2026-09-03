@@ -54,6 +54,18 @@
 - **盤後選股 v2 參數校準**：首版前 30 名偏大型股（「其他法人集中度」子項對權值股外資穩定流入給高分）。靠肉眼看單日排名 + 實盤觀察調 `signal-factors/accumulation.ts` 的 `CHIP_WEIGHTS` / `READINESS_FLOOR` / `MIN_AVG_VOLUME_SHARES`。同理 `run-signal-scan.ts` 的階段權重 / 法人因子曲線 / `margin-chasing` 觸發點（`surgePercentileThreshold` 等）也待累積資料後校準（約 2026-11）。
 - **融資融券歷史回補到 2020**：目前只回補約 45 個交易日。要補全 6 年需另寫 `scripts/backfill/backfill-margin-trading.ts`（FinMind `TaiwanStockMarginPurchaseShortSale` 逐支）。
 
+## 8. 觀察股卡片跨分類資料 100% 統一（PLAN 7，2026-09-03）
+
+使用者觀察到觀察股卡片「強度 PR 全空白」——`buildCardRow` 按 `stage` 分支只算一半欄位、另一半留 `null`；且 setup 的 `SignalResult.scores` 根本沒寫 `relativeStrength` key。要求「手動換分類後資訊 100% 一致」。**單一 commit**（產資料端 + 消費端互相依賴）。
+
+- [x] **`run-signal-scan.ts` setup `scores` 補 `relativeStrength`**（eod + realtime）——值 = gate 前全市場算好的 `rsByCode`，合成公式不吃、只給 `prByCode` 收。
+- [x] **`run-signal-scan.ts` breakout 階段補 `preInst`**——私有 `buildBreakoutPreInst()` 對 ~20 檔算 accumulation 籌碼分，私有 `percentileOf()` 對 setup 母體升冪陣列插值、**不 push 進 setup rankScore 母體**（不污染 setup 分數）。`fetchAccumulationRawInputs` code 清單擴為 `[...preCodes, ...breakoutCodes]`。
+- [x] **`lib/latest-scan.ts` `preInstByCode` 守衛放寬**：從「只 setup」→「有 `r.preInst` 就收」，改讀 `r.preInst.*`。
+- [x] **`lib/actions/watchlist.ts` `buildCardRow` 移除 `if (stage === "setup") else` 骨架**：`inst` / `factors` / `preInst` 無條件計算。`instWindow` 查詢加 `dealerNetBuy`、`quoteWindow` 取前 20 筆 `volume` 當 `otherInstRatio` 現算分母（0 新查詢）。
+- [x] **`WatchlistCardRow` 的 `inst` / `factors` / `preInst` 去 `| null`**（每條路徑都給值，degraded 用欄位內 `degraded: boolean` 表達）。前端 `WatchlistCard` / `FactorList` 刪冗餘 null 檢查。
+- [x] **驗證**：`--date=2026-09-03` 重跑 eod，逐檔 `totalScore` diff = 0、rank / stage / stats 全不變；495 setup 全帶 RS、20 breakout 全帶 `preInst.trustScore`(0~100)。tsc 乾淨、`factors.test.ts` 38 案通過。
+- **不做**（獨立優化，另開 PLAN）：加嚴 setup gate（布林帶寬收斂 / close > ma60）、setup 底排加突破因子、進度條改畫 netRatio 絕對值。
+
 ---
 
 ## 5. 盤中提醒
