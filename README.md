@@ -12,7 +12,7 @@
 
 ### `scripts/pipeline/`
 
-- `intraday-scan.ts`：盤中掃描薄殼（launchd 觸發，非 daily-pipeline 的一步）。內部判「台北平日 09:00–13:30？」否則靜默 exit 0；是則跑 `run-signal-scan.ts` 的 realtime 路徑，寫 `data/signal-scan-results/{timestamp}.json`（**不寫資料庫**）。搭配 `com.piercelin.intradayscan.plist`（台北平日 09:00–13:30 整點 + 半點共 10 次觸發，週末靠腳本內部 skip）。下游：選股頁每 60 秒輪詢自動刷新表格、觀察清單頁盤中即時報價與強度 PR 的來源。
+- `intraday-scan.ts`：盤中掃描薄殼（launchd 觸發，非 daily-pipeline 的一步）。內部判「台北平日 09:00–13:30？」否則靜默 exit 0；是則跑 `run-signal-scan.ts` 的 realtime 路徑，寫 `data/signal-scan-results/{台北今日}-intraday.json`（**不寫資料庫**；單一檔每 30 分原子覆蓋，不再累積時間戳檔）。搭配 `com.piercelin.intradayscan.plist`（台北平日 10:00–13:30 整點 + 半點觸發，週末靠腳本內部 skip）。下游：選股頁 / 觀察清單頁 `intraday` 模式進頁讀這份（選股頁若該份缺失 > 10% 會同步重抓）。
 - `daily-pipeline.ts`：每日排程主控腳本，只做「當日資料獲取 + 核心指標計算」八步：補齊今日報價（TWSE 關鍵路徑；TPEx 非關鍵路徑，失敗只警告、隔天再抓）→ 補今日加權指數 TAIEX 行情（FinMind，關鍵路徑）→ 抓今日三大法人籌碼 → 抓今日估值（本益比/股價淨值比/殖利率）→ 抓今日融資融券餘額（非關鍵路徑，證交所通常傍晚才出）→ 算技術指標 → 算大盤濾網（市場狀態燈號，非關鍵路徑，失敗只警告）→ 算產業熱度。跑完無致命錯誤時寫 `data/daily-pipeline-runs/{date}.ok` 標記，同日重跑會秒退（供 launchd 17:00 / 17:30 / 18:00 三次觸發的補跑機制用）。歷史缺漏回補、跑選股皆為個別手動執行。抓取步驟的對外請求走 `scripts/lib/http.ts` 的 `fetchJson`（pipeline 對政府端點用 5 次 retry + 冷連線預熱），單一暫時性網路錯誤不會讓整條 pipeline 中斷。
 - `fill-daily-quotes.ts`：補齊全市場報價——TWSE 用證交所 `MI_INDEX` 報表 API，支援指定任意單一天（可補歷史缺漏）；TPEx 用櫃買中心 OpenAPI，不支援指定日期，只能補「目前最新一天」。皆會自動新增資料庫沒有的股票記錄。
 - `fill-institutional-trading.ts`：抓取指定日期的 TWSE（`T86`）+ TPEx（`tpex_3insti_daily_trading`）三大法人買賣超寫入 `InstitutionalTrading`。TWSE 支援任意歷史日期，TPEx 不支援日期參數、永遠回傳「目前最新一天」。
@@ -99,7 +99,7 @@ pnpm prisma db seed
 # 由 launchd（com.piercelin.dailypipeline.plist）每天 17:00 / 17:30 / 18:00 觸發；當日已成功則補跑秒退
 pnpm tsx scripts/pipeline/daily-pipeline.ts
 
-# 盤中掃描（launchd com.piercelin.intradayscan.plist 台北平日 09:00–13:30 整點+半點觸發；非交易時段跑會靜默 exit 0）
+# 盤中掃描（launchd com.piercelin.intradayscan.plist 台北平日 10:00–13:30 整點+半點觸發；非交易時段跑會靜默 exit 0）
 pnpm tsx scripts/pipeline/intraday-scan.ts
 
 # --- pipeline 各步驟也可單獨執行 ---

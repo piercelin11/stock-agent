@@ -1,6 +1,6 @@
 "use server";
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { prisma } from "../prisma";
 import {
@@ -23,7 +23,8 @@ import { resolveDataContext, type DataMode } from "../data-context";
 //                       runSignalScan 算一次（秒級）並寫入。daily-pipeline 不會自動產出這份檔
 //                       （run-signal-scan.ts 獨立手動執行，不進 pipeline）——只有「當天第一次
 //                       進選股頁」或手動重跑會觸發計算，同一天內之後進頁都是讀檔，不重算。
-//     intraday/stale → 讀最新 realtime {timestamp}.json（launchd 的 intraday-scan.ts 產出）。
+//     intraday/stale → 讀今日 realtime {date}-intraday.json（launchd 的 intraday-scan.ts 每 30 分
+//                       原子覆蓋同一檔，PLAN 5）；那份 failedCount 佔比 > 10% 時同步重跑覆蓋。
 //   手動重跑：getScreeningResult({ force }) —— eod 一律重算並覆寫該檔；realtime 同步卡 UI ~30 秒
 //     （不再 spawn 背景子進程 + 輪詢 progress.json，PLAN 4 移除那套狀態機）。
 //
@@ -63,19 +64,32 @@ function toView(out: SignalScanOutput): SignalScanView {
   return view;
 }
 
-/** 最新 realtime 掃描檔（{timestamp}.json）。壞檔 / 無檔回 null。 */
+/**
+ * 今日 realtime 掃描檔。PLAN 5 §1.4：固定檔名 {台北今日}-intraday.json（每 30 分原子覆蓋），
+ * 不再 readdir + sort 時間戳。跨日殘留：讀不到「今日」的就回 null（走 stale / 尚無結果），
+ * 不 fallback 去讀昨天的 -intraday。壞檔 / 無檔回 null。
+ */
 function readLatestRealtimeFile(): SignalScanOutput | null {
-  if (!existsSync(RESULT_DIR)) return null;
-  const files = readdirSync(RESULT_DIR)
-    .filter((f) => /^\d{4}-\d{2}-\d{2}T.*\.json$/.test(f))
-    .sort();
-  const latest = files.at(-1);
-  if (!latest) return null;
+  const todayIso = new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
+  const path = join(RESULT_DIR, `${todayIso}-intraday.json`);
+  if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(join(RESULT_DIR, latest), "utf8")) as SignalScanOutput;
+    return JSON.parse(readFileSync(path, "utf8")) as SignalScanOutput;
   } catch {
     return null;
   }
+}
+
+// PLAN 5 §3.1：realtime 掃描「明顯缺失」判定——failedCount（整批失敗檔數）佔比 > 10%。
+//   只用 failedCount 佔比。不用 estimatedCount——缺 z 用 high 代入是 MIS 端點常態
+//   （每份 1600+ 檔 estimated），拿來當觸發條件會每次進頁都重跑。
+//   totalStocks === 0（整份空 / 非交易日）→ 不套此判定（走既有空結果 / isNonTradingDay 處理）。
+const GROSSLY_INCOMPLETE_RATIO = 0.1;
+
+function isGrosslyIncomplete(out: SignalScanOutput): boolean {
+  const total = out.stats.totalStocks ?? 0;
+  const failed = out.stats.failedCount ?? 0;
+  return total > 0 && failed / total > GROSSLY_INCOMPLETE_RATIO;
 }
 
 /** eod 掃描檔（{date}.json，無時間戳）。壞檔 / 無檔回 null。 */
@@ -95,22 +109,30 @@ function readEodFile(dateStr: string): SignalScanOutput | null {
 //
 // 直接透傳 resolveDataContext() 的關鍵欄位 + hasScan（「有沒有可顯示的掃描結果」）。
 //   eod            → hasScan = 有 latestEodDate（進頁讀 {date}.json，沒有才同步算一次，見下）。
-//   intraday/stale → hasScan = data/signal-scan-results/ 有 realtime {timestamp}.json。
+//   intraday/stale → hasScan = data/signal-scan-results/ 有今日 {date}-intraday.json；
+//                    willRefetch = 有該檔但 failedCount 佔比 > 10%（進頁會同步重抓 ~30 秒）。
 
 export async function getScreeningContext(): Promise<{
   mode: DataMode;
   asOfDate: string;
   latestEodDate: string | null;
   hasScan: boolean;
+  willRefetch: boolean;
 }> {
   const ctx = await resolveDataContext(prisma);
-  const hasScan =
-    ctx.mode === "eod" ? Boolean(ctx.latestEodDate) : readLatestRealtimeFile() !== null;
+  const rt = ctx.mode === "eod" ? null : readLatestRealtimeFile();
+  const hasScan = ctx.mode === "eod" ? Boolean(ctx.latestEodDate) : rt !== null;
+  // PLAN 5 §3.3：進頁時前端還不知道「這次是讀檔（<1 秒）還是要重抓（~30 秒）」。
+  //   context 端先判：非 eod + 有 intraday 檔 + failedCount 佔比 > 10% → willRefetch = true，
+  //   前端 loading 文案改成「重新抓取中（約 30 秒）」。
+  //   無 intraday 檔（!rt）→ getScreeningResult 回 null、不重抓 → willRefetch = false。
+  const willRefetch = ctx.mode !== "eod" && rt !== null && isGrosslyIncomplete(rt);
   return {
     mode: ctx.mode,
     asOfDate: ctx.asOfDate,
     latestEodDate: ctx.latestEodDate || null,
     hasScan,
+    willRefetch,
   };
 }
 
@@ -155,14 +177,22 @@ export async function getScreeningResult(
     return toView(out);
   }
 
-  // realtime：force 時同步跑一次全市場 MIS 掃描（卡 UI ~30 秒，寫 {timestamp}.json）；
-  // 不 force 時讀 launchd 產出的最新 realtime {timestamp}.json（intraday / stale 的一般進頁路徑）。
+  // realtime：force 時同步跑一次全市場 MIS 掃描（卡 UI ~30 秒，寫 {date}-intraday.json）；
+  // 不 force 時讀 launchd 產出的今日 realtime {date}-intraday.json（intraday / stale 的一般進頁路徑）。
   if (opts.force === "realtime") {
     const out = await runSignalScan(new Date(), { prisma, source: "realtime" });
     return toView(out);
   }
   const rt = readLatestRealtimeFile();
-  return rt ? toView(rt) : null;
+  if (!rt) return null; // 沒有今日 intraday 檔 → 前端顯示「尚無掃描結果」
+  // PLAN 5 §3.2：明顯缺失（failedCount 佔比 > 10%）→ 同步重跑一次覆蓋 {date}-intraday.json，
+  //   回新結果。卡 Server Action ~30 秒（+ fetchMisBatch 重試最壞再多幾秒）；前端 loading
+  //   文案（willRefetch）負責解釋。不做背景 spawn + 輪詢（PLAN 4 剛清掉那套，不請回來）。
+  if (isGrosslyIncomplete(rt)) {
+    const out = await runSignalScan(new Date(), { prisma, source: "realtime" });
+    return toView(out);
+  }
+  return toView(rt);
 }
 
 // ============================================================================

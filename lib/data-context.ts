@@ -75,7 +75,7 @@ export async function resolveDataContext(
   const latestEodDate = latest ? latest.date.toISOString().slice(0, 10) : "";
 
   const t = taipeiNow(now);
-  const latestScan = readLatestScan({ preferRealtime: true });
+  const latestScan = readLatestScan({ preferRealtime: true, todayIso: t.iso });
 
   if (latestEodDate && latestEodDate === t.iso) {
     return { mode: "eod", asOfDate: t.iso, latestEodDate, latestScan };

@@ -2,11 +2,12 @@
 //
 // launchd（com.piercelin.intradayscan.plist）每日 09:00–13:30 整點 / 半點觸發。
 // 內部判「台北平日 09:00–13:30？」否 → console.log + return（靜默，exit 0）；
-// 是 → runSignalScan(new Date(), { source: "realtime" }) 寫 {timestamp}.json（runSignalScan 本體負責）。
+// 是 → runSignalScan(new Date(), { source: "realtime" }) 寫 {台北今日}-intraday.json（runSignalScan
+//      本體負責；PLAN 5 起單一檔每 30 分原子覆蓋，不再累積時間戳檔）。
 // **不寫 DB。** 盤中衍生值不落地，遵循專案「衍生值不落地」哲學。
 //
 // PLAN 4 起這是 realtime 掃描唯一的背景執行者——前端不再自己 spawn（_run-signal-scan.ts +
-// startSignalScan() 已刪）。選股頁進頁只讀最新 {timestamp}.json；「立即掃描」按鈕改成 Server
+// startSignalScan() 已刪）。選股頁進頁只讀今日 {date}-intraday.json；「立即掃描」按鈕改成 Server
 // Action 內同步跑（卡 UI ~30 秒），也不 spawn。
 //   （runSignalScan 的 runRealtime 內部仍會 writeProgressDone() 寫 progress.json，無害——
 //    前端不讀了，只剩 CLI 手動跑時的紀錄。）
