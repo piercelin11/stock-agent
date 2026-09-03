@@ -934,8 +934,7 @@ async function runRealtime(
   if (prevDate === null) {
     warnings.push("資料庫無 DailyQuote，無法取得 T-1 布林上軌 / 均量");
     const out = emptyOutput(dateStr, "realtime", now, warnings, false, elapsedRatio);
-    const timestamp = now.toISOString().slice(0, 19).replaceAll(":", "-");
-    writeResult(timestamp, out, config);
+    writeResult(`${dateStr}-intraday`, out, config);
     writeProgressDone(out);
     return out;
   }
@@ -1375,8 +1374,9 @@ async function runRealtime(
   };
 
   printSummary(output);
-  const timestamp = now.toISOString().slice(0, 19).replaceAll(":", "-");
-  writeResult(timestamp, output, config);
+  // PLAN 5 §1.1：realtime 寫固定檔名 {台北今日}-intraday.json（每 30 分原子覆蓋），
+  // 不再每次一個 {timestamp}.json 累積成垃圾。
+  writeResult(`${dateStr}-intraday`, output, config);
   writeProgressDone(output);
   return output;
 }
@@ -1625,7 +1625,11 @@ function printSummary(out: SignalScanOutput): void {
 function writeResult(nameStamp: string, out: SignalScanOutput, config: SignalScanConfig): void {
   mkdirSync(RESULT_DIR, { recursive: true });
   const outputPath = join(RESULT_DIR, `${nameStamp}.json`);
-  writeFileSync(outputPath, JSON.stringify({ ...out, params: config }, null, 2));
+  // PLAN 5 §1.2：原子寫（先寫 .tmp 再 renameSync）——realtime 每 30 分覆蓋同一 {date}-intraday.json，
+  // 避免進頁輪詢讀到寫一半。eod 路徑套上也無害。
+  const body = JSON.stringify({ ...out, params: config }, null, 2);
+  writeFileSync(`${outputPath}.tmp`, body);
+  renameSync(`${outputPath}.tmp`, outputPath);
   console.log(`\n結果已寫入 ${outputPath}`);
 }
 

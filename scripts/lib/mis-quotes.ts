@@ -14,6 +14,11 @@ export const MIS_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp";
 export const BATCH_SIZE = 120;
 export const BATCH_DELAY_MS = 1500;
 
+// PLAN 5 §2：一批失敗（!res.ok / 例外）就重試。開盤前 / 睡眠喚醒時 MIS 常整批掛，
+// 一次重試就能救回大多數（launchd 冷進程 / 短暫網路抖動）。
+export const BATCH_RETRIES = 2; // 總嘗試 2 次（原 1 次 + 重試 1 次）
+export const BATCH_RETRY_DELAY_MS = 2000;
+
 const MARKET_OPEN_HOUR = 9;
 const MARKET_CLOSE_HOUR = 13;
 const MARKET_CLOSE_MINUTE = 30;
@@ -86,51 +91,68 @@ export async function fetchMisBatch(codes: { code: string; market: Market }[]): 
   url.searchParams.set("json", "1");
   url.searchParams.set("delay", "0");
 
-  try {
-    const res = await fetch(url.toString(), { headers: { "User-Agent": "Mozilla/5.0" } });
-    if (!res.ok) {
-      console.warn(`⚠ MIS 批次請求失敗: ${res.status} ${res.statusText}（${codes.length} 檔）`);
+  const parsePositive = (raw: string | undefined): number | null => {
+    if (raw === undefined || raw === "-") return null;
+    const parsed = parseFloat(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  };
+
+  for (let attempt = 1; attempt <= BATCH_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url.toString(), { headers: { "User-Agent": "Mozilla/5.0" } });
+      if (!res.ok) {
+        if (attempt < BATCH_RETRIES) {
+          console.warn(
+            `⚠ MIS 批次 ${res.status}，${BATCH_RETRY_DELAY_MS}ms 後重試（${codes.length} 檔）`,
+          );
+          await sleep(BATCH_RETRY_DELAY_MS);
+          continue;
+        }
+        console.warn(`⚠ MIS 批次請求失敗: ${res.status} ${res.statusText}（${codes.length} 檔）`);
+        return { quotes: [], failed: true };
+      }
+      const body = (await res.json()) as { msgArray?: MisRawRow[] };
+      const rows = body.msgArray ?? [];
+
+      const quotes: MisQuote[] = [];
+      for (const row of rows) {
+        // 缺 z 不再跳過——保留這筆，price = null，呼叫端決定代入策略（PLAN §4 的 MIS z bug）。
+        const price = parsePositive(row.z);
+
+        // MIS 的 v 欄位單位是「張」，換算成「股」以跟 DailyQuote.volume / gate 的股數單位一致
+        const volumeRaw = row.v;
+        const cumulativeVolumeLots =
+          volumeRaw === undefined || volumeRaw === "-" ? 0 : parseFloat(volumeRaw) || 0;
+        const cumulativeVolume = cumulativeVolumeLots * 1000;
+
+        quotes.push({
+          code: row.c,
+          name: row.n,
+          price,
+          prevClose: parsePositive(row.y),
+          cumulativeVolume,
+          date: parseMisDate(row.d),
+          open: parsePositive(row.o),
+          high: parsePositive(row.h),
+          low: parsePositive(row.l),
+        });
+      }
+      return { quotes, failed: false };
+    } catch (err) {
+      if (attempt < BATCH_RETRIES) {
+        console.warn(
+          `⚠ MIS 批次例外，${BATCH_RETRY_DELAY_MS}ms 後重試: ${err instanceof Error ? err.message : String(err)}（${codes.length} 檔）`,
+        );
+        await sleep(BATCH_RETRY_DELAY_MS);
+        continue;
+      }
+      console.warn(
+        `⚠ MIS 批次請求例外: ${err instanceof Error ? err.message : String(err)}（${codes.length} 檔）`,
+      );
       return { quotes: [], failed: true };
     }
-    const body = (await res.json()) as { msgArray?: MisRawRow[] };
-    const rows = body.msgArray ?? [];
-
-    const parsePositive = (raw: string | undefined): number | null => {
-      if (raw === undefined || raw === "-") return null;
-      const parsed = parseFloat(raw);
-      return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-    };
-
-    const quotes: MisQuote[] = [];
-    for (const row of rows) {
-      // 缺 z 不再跳過——保留這筆，price = null，呼叫端決定代入策略（PLAN §4 的 MIS z bug）。
-      const price = parsePositive(row.z);
-
-      // MIS 的 v 欄位單位是「張」，換算成「股」以跟 DailyQuote.volume / gate 的股數單位一致
-      const volumeRaw = row.v;
-      const cumulativeVolumeLots =
-        volumeRaw === undefined || volumeRaw === "-" ? 0 : parseFloat(volumeRaw) || 0;
-      const cumulativeVolume = cumulativeVolumeLots * 1000;
-
-      quotes.push({
-        code: row.c,
-        name: row.n,
-        price,
-        prevClose: parsePositive(row.y),
-        cumulativeVolume,
-        date: parseMisDate(row.d),
-        open: parsePositive(row.o),
-        high: parsePositive(row.h),
-        low: parsePositive(row.l),
-      });
-    }
-    return { quotes, failed: false };
-  } catch (err) {
-    console.warn(
-      `⚠ MIS 批次請求例外: ${err instanceof Error ? err.message : String(err)}（${codes.length} 檔）`,
-    );
-    return { quotes: [], failed: true };
   }
+  return { quotes: [], failed: true }; // 理論上到不了（迴圈每個分支都 return / continue）
 }
 
 /**

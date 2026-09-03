@@ -14,11 +14,11 @@
 
 ## 6. 盤中資料源強化（PLAN 5，接續四份 PLAN，2026-09-03）
 
-四份 PLAN 上線後盤中掃描能自動跑，但幾個粗糙處：realtime 掃描結果每次一個 `{timestamp}.json` 累積成垃圾（一週 ~50 個）；`fetchMisBatch` 一批 fetch 失敗就整批放棄（開盤前 / 睡眠喚醒時常整批掛，`failedCount` 120 的倍數）；進頁沒有「掃描明顯缺失就重抓」的機制。**已定案，待開 PLAN：**
+四份 PLAN 上線後盤中掃描能自動跑，但幾個粗糙處：realtime 掃描結果每次一個 `{timestamp}.json` 累積成垃圾（一週 ~50 個）；`fetchMisBatch` 一批 fetch 失敗就整批放棄（開盤前 / 睡眠喚醒時常整批掛，`failedCount` 120 的倍數）；進頁沒有「掃描明顯缺失就重抓」的機制。**PLAN 5 已完成（2026-09-03）：**
 
-- [ ] **盤中 realtime 掃描改「單一檔覆蓋」**：`{YYYY-MM-DD}-intraday.json` 每 30 分原子覆蓋（先寫 `.tmp` 再 rename），取代累積的 `{timestamp}.json`。`readLatestRealtimeFile()` 改讀固定檔名，不再 `readdir + sort`。**不跟盤後的 `{YYYY-MM-DD}.json` 合併**——語意衝突（盤後定案 vs 即時估價）、`getScreeningResult` 的「有 `{date}.json` 就不重算」快取機制會誤讀、`data-context` 判 `intraday` 靠 `source === "realtime"` 分不出。兩檔名各自單一、各自覆蓋。
-- [ ] **進頁 fallback：DB → intraday JSON →（明顯缺失）主動重抓**：`getScreeningResult()` 的 realtime 分支——讀 `{date}-intraday.json`，若 `failedCount / totalStocks > 0.10`（缺超過 10%）→ 判定明顯缺失 → **直接同步 `runSignalScan(realtime)` 重跑並覆蓋**（方案 A：卡 UI ~30 秒 + loading 文案「盤中資料不完整，正在重新抓取全市場報價…（約 30 秒）」，不給跳過）。**用 `failedCount` 佔比判定，不用 `estimatedCount`**（缺 `z` 用 `high` 代入是 MIS 常態、每份都 1600+ 檔，拿來當觸發條件會每次進頁都重跑）。launchd 加重試後這個 fallback 觸發機率很低。**方案 C（背景 spawn + 前端輪詢）排除**——等於把 PLAN 4 剛清掉的背景任務 + `progress.json` 輪詢 + 「昨」badge 那套請回來，投報率不值。
-- [ ] **`fetchMisBatch` 加重試**：`scripts/lib/mis-quotes.ts`，`catch` / `!res.ok` 分支 `sleep(2000)` 重試 1–2 次。開盤前 / 睡眠喚醒的整批失敗多半重試一次就過。`intraday-scan.ts` 與手動盤中掃描共用這支，一起受益。
+- [x] **盤中 realtime 掃描改「單一檔覆蓋」**：`{YYYY-MM-DD}-intraday.json` 每 30 分原子覆蓋（`writeResult` 先寫 `.tmp` 再 `renameSync`），取代累積的 `{timestamp}.json`。`readLatestRealtimeFile()`（`signal-scan.ts`）與 `readLatestScan({ preferRealtime })`（`latest-scan.ts`，新增 `todayIso` 參數由 `data-context` 傳 `t.iso`）都改讀固定檔名，不再 `readdir + sort`。跨日殘留防呆：讀不到「今日」的就當沒有 → 走 `stale`，不 fallback 讀昨天的 `-intraday`。**不跟盤後的 `{YYYY-MM-DD}.json` 合併**——語意衝突（盤後定案 vs 即時估價）、`getScreeningResult` 的「有 `{date}.json` 就不重算」快取機制會誤讀、`data-context` 判 `intraday` 靠 `source === "realtime"` 分不出。兩檔名各自單一、各自覆蓋。舊 `{timestamp}.json` 是死檔（gitignored），要清另開小工作。
+- [x] **進頁 fallback：DB → intraday JSON →（明顯缺失）主動重抓**：`getScreeningResult()` 的 realtime 分支——讀 `{date}-intraday.json`，若 `failedCount / totalStocks > 0.10`（缺超過 10%）→ 判定明顯缺失 → **直接同步 `runSignalScan(realtime)` 重跑並覆蓋**（方案 A：卡 UI ~30 秒；`getScreeningContext()` 新增 `willRefetch` 讓進頁 loading 文案準確顯示「盤中資料不完整，正在重新抓取…（約 20–30 秒）」，不給跳過）。**用 `failedCount` 佔比判定，不用 `estimatedCount`**（缺 `z` 用 `high` 代入是 MIS 常態、每份都 1600+ 檔，拿來當觸發條件會每次進頁都重跑）。launchd 加重試後這個 fallback 觸發機率很低。**方案 C（背景 spawn + 前端輪詢）排除**——等於把 PLAN 4 剛清掉的背景任務 + `progress.json` 輪詢 + 「昨」badge 那套請回來，投報率不值。
+- [x] **`fetchMisBatch` 加重試**：`scripts/lib/mis-quotes.ts`，`catch` / `!res.ok` 分支 `sleep(2000)` 後重試（`BATCH_RETRIES=2` 總嘗試 2 次、`BATCH_RETRY_DELAY_MS=2000`）。開盤前 / 睡眠喚醒的整批失敗多半重試一次就過。`intraday-scan.ts` 與手動盤中掃描共用這支，一起受益。最壞情況（16 批全失敗）多 ~32 秒，正常（1–2 批偶爾失敗）多 2–4 秒。
 - [x] **`com.piercelin.intradayscan.plist` 觸發時段改 10:00–13:30**（原 09:00–13:30）：開盤第一個小時 MIS 常不穩、量能估計不準。已改 8 個觸發點（整點 + 半點）、已 `launchctl reload` 部署（2026-09-03）。
 
 ## 7. 三階段命名統一 + 觀察股手動分類（PLAN 6，2026-09-03）

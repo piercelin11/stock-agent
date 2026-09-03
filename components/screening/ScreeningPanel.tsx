@@ -21,7 +21,7 @@ import { SignalDetail } from "./SignalDetail";
 //
 // 進頁：getScreeningContext() → 狀態行文案；getScreeningResult() → 依 mode 回結果
 //   eod            → 同步跑一次盤後掃描（秒級），使用者不用按任何按鈕。
-//   intraday/stale → 讀 launchd 產出的最新 realtime {timestamp}.json。
+//   intraday/stale → 讀 launchd 產出的今日 realtime {date}-intraday.json（每 30 分覆蓋，PLAN 5）。
 // 一顆按鈕手動重跑：eod =「重跑盤後掃描」（秒級）；realtime =「立即掃描」（同步卡 UI ~30 秒）。
 
 type SortDir = "asc" | "desc";
@@ -168,6 +168,7 @@ interface ScreeningCtx {
   asOfDate: string;
   latestEodDate: string | null;
   hasScan: boolean;
+  willRefetch: boolean; // PLAN 5 §3.3：進頁時已知這次要同步重抓（~30 秒）而非讀檔（<1 秒）
 }
 
 export function ScreeningPanel() {
@@ -327,7 +328,11 @@ export function ScreeningPanel() {
       {/* 狀態行 + 手動重跑按鈕 */}
       <div className="flex flex-wrap items-center gap-4">
         {loading || !ctx ? (
-          <span className="text-sm text-muted-foreground/70">載入中…</span>
+          <span className="text-sm text-muted-foreground/70">
+            {ctx?.willRefetch
+              ? "盤中資料不完整，正在重新抓取全市場即時報價…（約 20–30 秒）"
+              : "載入中…"}
+          </span>
         ) : (
           <>
             <Button onClick={rerun} disabled={isPending}>

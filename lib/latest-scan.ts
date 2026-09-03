@@ -40,8 +40,12 @@ export interface LatestScan {
 
 export interface ReadLatestScanOptions {
   // 預設（false）：只讀 {YYYY-MM-DD}.json（eod 定案）——給 watchlist / dashboard 的「強度 PR」「醞釀籌碼」用。
-  // true（PLAN 3 的 intraday 模式）：比較 {YYYY-MM-DD}.json 與最新 {timestamp}.json 的 queriedAt，回較新者。
+  // true（PLAN 3 的 intraday 模式）：比較 {YYYY-MM-DD}.json 與 {台北今日}-intraday.json 的 queriedAt，回較新者。
   preferRealtime?: boolean;
+  // PLAN 5 §1.3：realtime 掃描檔改成固定檔名 {台北今日}-intraday.json（不再 readdir + sort 時間戳）。
+  // readLatestScan 是純讀檔、沒有 now——由呼叫端（data-context 已有 taipeiNow）傳「台北今日」進來。
+  // 省略時本檔自算（UTC+8 偏移，比照其他檔）。
+  todayIso?: string;
 }
 
 /** 讀單一掃描結果檔並解析成 SignalScanOutput（含 params，忽略即可）。壞檔回 null。 */
@@ -53,16 +57,15 @@ export function parseScanFile(path: string): SignalScanOutput | null {
   }
 }
 
-function listResultFiles(): {
-  eodFiles: string[];
-  realtimeFiles: string[];
-} {
-  if (!existsSync(RESULT_DIR)) return { eodFiles: [], realtimeFiles: [] };
-  const all = readdirSync(RESULT_DIR);
-  return {
-    eodFiles: all.filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f)).sort(),
-    realtimeFiles: all.filter((f) => /^\d{4}-\d{2}-\d{2}T.*\.json$/.test(f)).sort(),
-  };
+function listEodFiles(): string[] {
+  if (!existsSync(RESULT_DIR)) return [];
+  return readdirSync(RESULT_DIR)
+    .filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f))
+    .sort();
+}
+
+function taipeiTodayIso(): string {
+  return new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10);
 }
 
 function buildLatestScan(out: SignalScanOutput, fallbackDate: string): LatestScan {
@@ -107,8 +110,7 @@ function buildLatestScan(out: SignalScanOutput, fallbackDate: string): LatestSca
 }
 
 export function readLatestScan(options: ReadLatestScanOptions = {}): LatestScan | null {
-  const { eodFiles, realtimeFiles } = listResultFiles();
-
+  const eodFiles = listEodFiles();
   const latestEodName = eodFiles.at(-1);
   const latestEod = latestEodName
     ? parseScanFile(join(RESULT_DIR, latestEodName))
@@ -119,21 +121,20 @@ export function readLatestScan(options: ReadLatestScanOptions = {}): LatestScan 
     return buildLatestScan(latestEod, latestEodName.replace(".json", ""));
   }
 
-  // preferRealtime：比較最新 eod 與最新 realtime 的 queriedAt，回較新者
-  const latestRtName = realtimeFiles.at(-1);
-  const latestRt = latestRtName
-    ? parseScanFile(join(RESULT_DIR, latestRtName))
-    : null;
+  // preferRealtime：比較最新 eod 與「今日 realtime」的 queriedAt，回較新者。
+  // PLAN 5 §1.3：realtime 檔改成固定檔名 {台北今日}-intraday.json（每 30 分覆蓋同一檔）。
+  //   跨日殘留防呆：若 {昨天}-intraday.json 還在、{今天} 沒有 → 讀不到今天的 → 不 fallback
+  //   去讀昨天的（今天 launchd 還沒跑第一次，走 stale 才正確）。
+  const todayIso = options.todayIso ?? taipeiTodayIso();
+  const rtPath = join(RESULT_DIR, `${todayIso}-intraday.json`);
+  const latestRt = existsSync(rtPath) ? parseScanFile(rtPath) : null;
 
   const candidates: { out: SignalScanOutput; fallbackDate: string }[] = [];
   if (latestEod && latestEodName) {
     candidates.push({ out: latestEod, fallbackDate: latestEodName.replace(".json", "") });
   }
-  if (latestRt && latestRtName) {
-    candidates.push({
-      out: latestRt,
-      fallbackDate: latestRtName.slice(0, 10),
-    });
+  if (latestRt) {
+    candidates.push({ out: latestRt, fallbackDate: todayIso });
   }
   if (candidates.length === 0) return null;
 
