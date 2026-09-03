@@ -12,8 +12,9 @@ import {
   DEFAULT_INSTITUTIONAL_FLOW_CONFIG,
 } from "../../scripts/lib/signal-factors/index";
 
-// 與 run-signal-scan.ts 的 SignalStage 同義；此處不 import 該模組（避免把整個掃描管線拉進 bundle）。
-export type SignalStage = "pre-breakout" | "breakout-day" | "extended";
+// SignalStage 型別走 signal-scan re-export（`import type` 會被 erase，不會把掃描管線拉進 bundle）。
+import type { SignalStage } from "./signal-scan";
+export type { SignalStage };
 import { SPARK_WINDOW, type SparkPoint } from "../dashboard-spark";
 import { buildSparkSeries } from "../spark-series";
 
@@ -42,9 +43,10 @@ export interface WatchlistCardRow {
   stockCode: string;
   name: string;
   addedAt: string;
-  source: string | null;
 
-  stage: SignalStage; // consecutiveAboveBand() 即時判定
+  stage: SignalStage; // 卡片因子實際採用的階段 = userStage ?? autoStage
+  userStage: SignalStage; // 手動分類（加入時 = 當下 autoStage；理論上恆有值，既有資料 null → autoStage）
+  autoStage: SignalStage; // 即時判定（consecutiveAboveBand），只拿來比對 + 不一致 chip
   mode: DataMode; // resolveDataContext().mode——卡片自己組「收盤定案」字串（§3.4）
   dataFresh: boolean; // 僅 mode === "eod" 為 true → ⚡ / intraday·stale 皆 false → 🕐
   priceSource: "eod" | "realtime" | "estimated"; // intraday 用 realtime/estimated；eod·stale 一律 eod
@@ -213,12 +215,14 @@ async function buildCardRow(
     bollingerUpper: ind.bollingerUpper,
   }));
   const aboveBand = consecutiveAboveBand(stagingSeries);
-  const stage: SignalStage =
+  const autoStage: SignalStage =
     aboveBand.consecutiveDays <= 0
-      ? "pre-breakout"
+      ? "setup"
       : aboveBand.consecutiveDays <= 2
-        ? "breakout-day"
+        ? "breakoutDay"
         : "extended";
+  // 卡片因子渲染看 stage；使用者手動分類優先，未指定（既有資料）fallback autoStage。
+  const stage: SignalStage = item.userStage ?? autoStage;
 
   // ---- 走勢圖 ----
   const midByDate = new Map<number, number | null>();
@@ -236,7 +240,7 @@ async function buildCardRow(
   let factors: WatchlistCardRow["factors"] = null;
   let preInst: WatchlistCardRow["preInst"] = null;
 
-  if (stage === "pre-breakout") {
+  if (stage === "setup") {
     // 20 格日曆：投信 20 日淨買超序列（新到舊），前端 reverse 成舊→新
     const trustSeriesNewToOld = instWindow.map((r) =>
       Number(r.investmentTrustNetBuy ?? 0),
@@ -330,8 +334,9 @@ async function buildCardRow(
     stockCode: code,
     name: item.stock.name,
     addedAt: isoDate(item.addedAt),
-    source: item.source,
     stage,
+    userStage: item.userStage ?? autoStage,
+    autoStage,
     mode: ctx.mode,
     dataFresh,
     priceSource,
@@ -351,9 +356,53 @@ async function buildCardRow(
 // mutation（不變）
 // ============================================================================
 
+// 加入 watchlist 時算即時 autoStage（PLAN 6 §3.2）。只用 DB 資料（eod 視角）——加入動作
+// 在盤中也不該打 MIS 卡住。缺指標的檔不放進 Map，呼叫端 fallback "setup"。
+async function computeAutoStages(
+  codes: string[],
+): Promise<Map<string, SignalStage>> {
+  const out = new Map<string, SignalStage>();
+  await Promise.all(
+    codes.map(async (code) => {
+      const [quote, indicators] = await Promise.all([
+        prisma.dailyQuote.findFirst({
+          where: { stockCode: code },
+          orderBy: { date: "desc" },
+          select: { date: true, close: true },
+        }),
+        // 布林上軌歷史（新到舊）——consecutiveAboveBand 從 [0] 往回逐日比
+        prisma.technicalIndicator.findMany({
+          where: { stockCode: code },
+          orderBy: { date: "desc" },
+          take: BASE_MAX_WINDOW + 1,
+          select: { date: true, bollingerUpper: true },
+        }),
+      ]);
+      if (!quote || indicators.length === 0) return;
+
+      const closeByDate = new Map<number, number>();
+      closeByDate.set(quote.date.getTime(), quote.close);
+      const series = indicators.map((ind, i) => ({
+        close:
+          i === 0 ? quote.close : (closeByDate.get(ind.date.getTime()) ?? NaN),
+        bollingerUpper: ind.bollingerUpper,
+      }));
+      const aboveBand = consecutiveAboveBand(series);
+      out.set(
+        code,
+        aboveBand.consecutiveDays <= 0
+          ? "setup"
+          : aboveBand.consecutiveDays <= 2
+            ? "breakoutDay"
+            : "extended",
+      );
+    }),
+  );
+  return out;
+}
+
 export async function addToWatchlist(input: {
   codes: string[];
-  source?: string; // "breakout" | "accumulation" | "manual"
 }): Promise<{ added: number; skipped: number }> {
   const requested = [...new Set(input.codes)];
   if (requested.length === 0) return { added: 0, skipped: 0 };
@@ -363,11 +412,16 @@ export async function addToWatchlist(input: {
     select: { code: true },
   });
   const validCodes = existing.map((s) => s.code);
+  if (validCodes.length === 0)
+    return { added: 0, skipped: requested.length };
+
+  // 加入當下算即時 autoStage 寫進 userStage（算不出 → "setup"）。
+  const autoStageByCode = await computeAutoStages(validCodes);
 
   const result = await prisma.watchlistItem.createMany({
     data: validCodes.map((code) => ({
       stockCode: code,
-      ...(input.source ? { source: input.source } : {}),
+      userStage: autoStageByCode.get(code) ?? "setup",
     })),
     skipDuplicates: true,
   });
@@ -384,6 +438,7 @@ export async function removeFromWatchlist(input: { code: string }): Promise<void
 // 買入狀態欄位 UI 已移除，此 action 保留（schema 欄位仍在，未來可能再用）。
 export async function updateWatchlistItem(input: {
   code: string;
+  userStage?: SignalStage; // 手動分類（PLAN 6）——SignalStage 字串值 == Prisma enum 成員名，直接傳不需 map
   isPurchased?: boolean;
   buyPrice?: number | null;
   buyDate?: string | null;
@@ -392,6 +447,7 @@ export async function updateWatchlistItem(input: {
   notes?: string | null;
 }): Promise<void> {
   const data: Record<string, unknown> = {};
+  if (input.userStage !== undefined) data["userStage"] = input.userStage;
   if (input.isPurchased !== undefined) data["isPurchased"] = input.isPurchased;
   if (input.buyPrice !== undefined) data["buyPrice"] = input.buyPrice;
   if (input.buyDate !== undefined)

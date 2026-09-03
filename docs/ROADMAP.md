@@ -27,25 +27,25 @@
 
 ### 7.1 命名統一（純重構）
 
-- [ ] **全專案 `SignalStage` 值統一**：`pre-breakout` → `setup`、`breakout-day` → `breakoutDay`、`extended` 不變。（`breakoutDay` 而非 `breakout`——避免跟即將廢除的 `source` 值 `"breakout"` 混淆、且保留「首次 vs 延續」語意。）Prisma `enum SignalStage { setup breakoutDay extended }`。動的檔（grep 替換）：`scripts/lib/signal-factors/staging.ts`（`SignalStage` 型別 + `consecutiveAboveBand` 回傳）、`scripts/screening/run-signal-scan.ts`（型別 + 階段判定 + **JSON 輸出 `stage` 欄位值**）、`lib/actions/signal-scan.ts`（re-export）、`lib/actions/watchlist.ts`（自己那份 union 刪掉改 import）、`components/signal/labels.ts`（`STAGE_LABELS` / `STAGE_PILL_CLASS` / `STAGE_ORDER` key）、`components/screening/ScreeningPanel.tsx`、`components/screening/SignalDetail.tsx`、`components/watchlist/WatchlistGallery.tsx`。
-- [ ] **改完立刻重跑掃描覆蓋舊 JSON**：`data/signal-scan-results/*.json` 裡 `stage: "pre-breakout"` 會過時 → 前端讀進來對不上 `STAGE_LABELS["setup"]`。改完在 `main` 手動跑一次 `pnpm tsx scripts/screening/run-signal-scan.ts --source=eod` 覆蓋 `{date}.json`；realtime 檔等下次 launchd 自動覆蓋（或手動跑 `--source=realtime`）。舊 `{timestamp}.json` gitignored、無所謂。**不做讀舊值轉換**（YAGNI，掃描 JSON 本來每天重生）。
+- [x] **全專案 `SignalStage` 值統一**：`pre-breakout` → `setup`、`breakout-day` → `breakoutDay`、`extended` 不變。（`breakoutDay` 而非 `breakout`——避免跟即將廢除的 `source` 值 `"breakout"` 混淆、且保留「首次 vs 延續」語意。）Prisma `enum SignalStage { setup breakoutDay extended }`。動的檔（grep 替換）：`scripts/lib/signal-factors/staging.ts`（只有註解）、`scripts/screening/run-signal-scan.ts`（型別 + 階段判定 + **JSON 輸出 `stage` 欄位值**）、`lib/actions/signal-scan.ts`（re-export，無需改 code）、`lib/actions/watchlist.ts`（自己那份 union 刪掉改 `import type` from signal-scan）、`components/signal/labels.ts`（`STAGE_LABELS` / `STAGE_PILL_CLASS` / `STAGE_ORDER` key）、`components/signal/FactorList.tsx`、`components/screening/ScreeningPanel.tsx`、`components/screening/SignalDetail.tsx`、`components/watchlist/WatchlistCard.tsx`、`components/watchlist/WatchlistGallery.tsx`、`lib/latest-scan.ts`。
+- [x] **改完立刻重跑掃描覆蓋舊 JSON**：`data/signal-scan-results/*.json` 裡 `stage: "pre-breakout"` 會過時 → 前端讀進來對不上 `STAGE_LABELS["setup"]`。改完在 `main` 手動跑一次 `pnpm tsx scripts/screening/run-signal-scan.ts --source=eod` 覆蓋 `{date}.json`；realtime 檔等下次 launchd 自動覆蓋（或手動跑 `--source=realtime`）。舊 `{timestamp}.json` gitignored、無所謂。**不做讀舊值轉換**（YAGNI，掃描 JSON 本來每天重生）。
 
 ### 7.2 廢除 `WatchlistItem.source`
 
-- [ ] `source` 目前**只有寫入、無任何讀取**（`WatchlistCard` / `WatchlistGallery` / `scripts/` 全不讀，純死欄位；當初「記錄從哪個策略加入、日後做分析」的意圖從沒實現）。`userStage`（見 7.3）是它的上位替代（三階段之一，比 `breakout`/`accumulation` 二分精確）。**直接移除**：schema 拿掉 `source` + migration、`addToWatchlist` 拿掉 `source` 參數、`ScreeningPanel` 拿掉 `stageToSource()` + 加入時的 `bySource` 分組、`WatchlistCardRow` 拿掉 `source` 欄位。
+- [x] `source` 目前**只有寫入、無任何讀取**（`WatchlistCard` / `WatchlistGallery` / `scripts/` 全不讀，純死欄位；當初「記錄從哪個策略加入、日後做分析」的意圖從沒實現）。`userStage`（見 7.3）是它的上位替代（三階段之一，比 `breakout`/`accumulation` 二分精確）。**直接移除**：schema 拿掉 `source` + migration、`addToWatchlist` 拿掉 `source` 參數、`ScreeningPanel` 拿掉 `stageToSource()` + 加入時的 `bySource` 分組、`WatchlistCardRow` 拿掉 `source` 欄位。既有 6 筆非空 `source` 值 migration drop column 時自然消失。
 
 ### 7.3 `userStage` 手動分類
 
-- [ ] **新增 `WatchlistItem.userStage SignalStage?`**（nullable，用 7.1 的 enum）。
-- [ ] **`addToWatchlist` 加入時算 `autoStage` 寫入**：改成「先撈這批 code 的 quote + 布林指標 → `consecutiveAboveBand` 算即時 `autoStage` → 帶進 `createMany` 的每筆」。理由（使用者原話）：「我看到他現在在醞釀中、加入他，代表在我心中他就是醞釀股。隔天他變爆發，我看卡片標示才知道我挑的醞釀股發動了。」
-- [ ] **tab 分類用 `userStage`**（`userStage != null` 恆有值——加入時就寫了；理論上不會 null，但型別 nullable、渲染時 `userStage ?? autoStage` 保險）。
-- [ ] **卡片因子渲染跟 `userStage`**（Q1，改動最小）：`buildCardRow` 裡 `const stage = userStage ?? autoStage`，下面 `if (stage === "setup")` 那些渲染分支不動。`autoStage` 照算但只拿來比對 + chip。
-- [ ] **`WatchlistCardRow` 加 `userStage` + `autoStage` 兩欄**。
-- [ ] **手動分類 != 自動評估時的提示**：
-  - a. **卡片 chip**：`userStage !== autoStage` → 卡片加「自動判定：{中文}」chip（`STAGE_PILL_CLASS` 那組色 + ⚠ 或箭頭）。
-  - b. **tab label 數字**：`首次突破（8 · 2 異動）`——`2 異動` = 這 tab 裡 `autoStage !== userStage` 的檔數。`WatchlistGallery` 的 `countByStage` 改成 `{ total, mismatch }`。
-  - **`autoStage` 用當前 mode（eod/intraday/stale）的判定**，接受盤中閃動（Q4）——盤中衝上上軌 → 異動數 +1，回落 → 復原。「異動」本來就是即時提醒訊號。`stale` 模式（PLAN 5 未動，仍存在——週末 / 開盤前 / launchd 掛）用 DB 昨收判 `autoStage`。
-- [ ] **卡片加改分類 UI**（3 顆按鈕 / 下拉）→ `updateWatchlistItem({ code, userStage })` → `revalidatePath("/watchlist")`。`updateWatchlistItem` 早已存在（買入狀態 UI 移除後保留），加 `userStage` 參數 + 邊界 map（字串 `SignalStage` ↔ Prisma enum，若型別需要）即可。
+- [x] **新增 `WatchlistItem.userStage SignalStage?`**（nullable，用 7.1 的 enum）。
+- [x] **`addToWatchlist` 加入時算 `autoStage` 寫入**：私有 `computeAutoStages(codes)` helper——逐 code 撈最新 quote + 布林上軌歷史 → `consecutiveAboveBand` → `setup`/`breakoutDay`/`extended`，帶進 `createMany` 的 `userStage`。缺指標的檔 fallback `"setup"`。**只用 DB 資料**（加入動作盤中也不打 MIS）。
+- [x] **tab 分類用 `userStage ?? autoStage`**（渲染時 fallback；既有資料 `userStage` null）。
+- [x] **卡片因子渲染跟 `stage = userStage ?? autoStage`**：`buildCardRow` 裡 `autoStage` 照算（即時判定），`stage = item.userStage ?? autoStage`，下面渲染分支不動。
+- [x] **`WatchlistCardRow` 加 `userStage` + `autoStage` 兩欄**（`source` 欄移除）。
+- [x] **手動分類 != 自動評估時的提示**：
+  - a. **卡片 chip**：`row.userStage !== row.autoStage` → 卡片標頭加「⚠ 自動判定：{中文}」chip（`STAGE_PILL_CLASS[autoStage]` 色）。
+  - b. **tab label 數字**：`首次突破（8 · 2 異動）`——`WatchlistGallery` 的 `countByStage` 改成 `Record<SignalStage, { total, mismatch }>`。
+  - **`autoStage` 用當前 mode（eod/intraday/stale）的判定**，接受盤中閃動——盤中衝上上軌 → 異動數 +1，回落 → 復原。
+- [x] **卡片加改分類 UI**（3 顆按鈕，當前 `userStage` 高亮）→ `updateWatchlistItem({ code, userStage })` → `revalidatePath("/watchlist")`。`updateWatchlistItem` 加 `userStage?: SignalStage` 參數——**字串值 == Prisma enum 成員名（§1.1 特意），直接傳不需 map**。
 
 **兩個 deferred 項**（不影響上述完成度，等時機再做）：
 

@@ -1,7 +1,11 @@
 "use client";
 
 import { useTransition } from "react";
-import { removeFromWatchlist, type WatchlistCardRow } from "../../lib/actions/watchlist";
+import {
+  removeFromWatchlist,
+  updateWatchlistItem,
+  type WatchlistCardRow,
+} from "../../lib/actions/watchlist";
 import { cn } from "../../lib/cn";
 import { Button } from "../ui/Button";
 import { Sparkline } from "../ui/Sparkline";
@@ -14,7 +18,7 @@ import {
 } from "../signal/InstitutionalFlowPanel";
 import { PreBreakoutInstitutional } from "../signal/PreBreakoutInstitutional";
 import { resolvePreBreakoutChip } from "../signal/pre-breakout-chip";
-import { STAGE_LABELS, STAGE_PILL_CLASS } from "../signal/labels";
+import { STAGE_LABELS, STAGE_ORDER, STAGE_PILL_CLASS } from "../signal/labels";
 
 export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
   const [isPending, startTransition] = useTransition();
@@ -27,8 +31,10 @@ export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
     });
   }
 
+  const stageMismatch = row.userStage !== row.autoStage;
+
   const chip =
-    row.stage === "pre-breakout"
+    row.stage === "setup"
       ? resolvePreBreakoutChip(row.preInst)
       : row.inst
         ? resolveInstChip(row.inst, [])
@@ -66,6 +72,16 @@ export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
                 {chip.text}
               </span>
             ) : null}
+            {stageMismatch ? (
+              <span
+                className={cn(
+                  "rounded px-1.5 py-0.5 text-xs font-medium",
+                  STAGE_PILL_CLASS[row.autoStage],
+                )}
+              >
+                ⚠ 自動判定：{STAGE_LABELS[row.autoStage]}
+              </span>
+            ) : null}
           </div>
           <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-sm text-muted-foreground">
             <span className="truncate">{row.name}</span>
@@ -94,7 +110,7 @@ export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
       <Sparkline points={row.spark} rising={rising} />
 
       {/* 法人籌碼區塊：breakout 階段 = diverging bar；醞釀階段 = 20 格日曆 + 百分位進度條 */}
-      {row.stage === "pre-breakout" ? (
+      {row.stage === "setup" ? (
         row.preInst ? (
           <PreBreakoutInstitutional preInst={row.preInst} />
         ) : null
@@ -105,6 +121,30 @@ export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
       {/* 底排因子 */}
       <div className="border-t border-border pt-3">
         <FactorList row={row} />
+      </div>
+
+      {/* 改分類（PLAN 6 §3.7）：手動指定 userStage，當前高亮 */}
+      <div className="flex flex-wrap items-center gap-1 border-t border-border pt-3">
+        <span className="mr-1 text-xs text-muted-foreground/70">分類</span>
+        {STAGE_ORDER.map((s) => (
+          <button
+            key={s}
+            onClick={() =>
+              startTransition(() =>
+                updateWatchlistItem({ code: row.stockCode, userStage: s }),
+              )
+            }
+            disabled={isPending || row.userStage === s}
+            className={cn(
+              "rounded px-2 py-0.5 text-xs font-medium",
+              row.userStage === s
+                ? STAGE_PILL_CLASS[s]
+                : "bg-muted text-muted-foreground/70 hover:text-foreground",
+            )}
+          >
+            {STAGE_LABELS[s]}
+          </button>
+        ))}
       </div>
     </div>
   );

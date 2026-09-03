@@ -24,7 +24,7 @@
 
 ### `scripts/screening/`
 
-- `run-signal-scan.ts`：**統一選股引擎**（三路線收斂）。跑全市場一般股票 → 單一 gate（30 億市值 + 當日量 1000 張 + 近 20 日均量 500 張）→ 依「連續站上布林上軌天數」打階段標籤 `pre-breakout`（醞釀中）/ `breakout-day`（今日突破）/ `extended`（已延伸）→ 同一份因子分、階段套不同合併方式（醞釀 = 乘法「籌碼分 × 就緒係數」；突破 = 8 分項加權和）→ 各階段各自排名 → 落地 `data/signal-scan-results/`。**資料源自動切換**：今天有 `DailyQuote` → 讀 DB（盤後定案）；沒有 → 打 `mis.twse.com.tw` 即時報價（缺成交價用當日最高價代入、標 `estimated`）。**觀察清單成員豁免 gate**（帶 `fromWatchlist` 標記、`stats.watchlistExempt`）——被市值/量門檻篩掉的觀察股仍帶完整評分結果；另輸出 `watchlistQuotes`（所有觀察股即時報價）。匯出 `runSignalScan(date, { prisma?, config?, source?, now? })`。CLI：不帶參數自動判斷 / `--date=YYYY-MM-DD`（強制盤後補算）/ `--source=realtime|eod`。不接進 `daily-pipeline.ts`。
+- `run-signal-scan.ts`：**統一選股引擎**（三路線收斂）。跑全市場一般股票 → 單一 gate（30 億市值 + 當日量 1000 張 + 近 20 日均量 500 張）→ 依「連續站上布林上軌天數」打階段標籤 `setup`（醞釀中）/ `breakoutDay`（首次突破）/ `extended`（延續爆發）→ 同一份因子分、階段套不同合併方式（醞釀 = 乘法「籌碼分 × 就緒係數」；突破 = 8 分項加權和）→ 各階段各自排名 → 落地 `data/signal-scan-results/`。**資料源自動切換**：今天有 `DailyQuote` → 讀 DB（盤後定案）；沒有 → 打 `mis.twse.com.tw` 即時報價（缺成交價用當日最高價代入、標 `estimated`）。**觀察清單成員豁免 gate**（帶 `fromWatchlist` 標記、`stats.watchlistExempt`）——被市值/量門檻篩掉的觀察股仍帶完整評分結果；另輸出 `watchlistQuotes`（所有觀察股即時報價）。匯出 `runSignalScan(date, { prisma?, config?, source?, now? })`。CLI：不帶參數自動判斷 / `--date=YYYY-MM-DD`（強制盤後補算）/ `--source=realtime|eod`。不接進 `daily-pipeline.ts`。
 - （`_run-signal-scan.ts` 已於 PLAN 4（2026-09-01）刪除——選股頁不再前端 spawn realtime 掃描。盤中 realtime 掃描的背景執行者只剩 `scripts/pipeline/intraday-scan.ts`（launchd 每 30 分）。）
 - （舊三支 `calculate-breakout-strength.ts` / `calculate-accumulation-score.ts` / `check-intraday-breakout.ts` + 孤兒 runner `_run-intraday-scan.ts` 已於 4.5.4（2026-09-01）退役刪除，功能全由 `run-signal-scan.ts` 涵蓋。）
 - `scripts/lib/`：純函式庫。`http.ts`（retry/timeout fetch）、`signal-factors/`（統一因子庫目錄：`index.ts` barrel + `util.ts`（`clip`/`rankScore`）+ `breakout.ts` / `accumulation.ts`（常數 + `XxxConfig` 三件組 + 評分純函式 + `fetchXxxRawInputs` 撈 DB helper）+ `institutional.ts`（`computeInstitutionalFlow` / `computeMarginSurgePercentile`）+ `staging.ts`（`consecutiveAboveBand` / `computeBreakoutMarginMonotone`）+ `config.ts`（`SignalScanConfig` / `DEFAULT_SIGNAL_CONFIG` / `resolveSignalConfig`）；單測 `signal-factors/factors.test.ts`）、`mis-quotes.ts`（MIS 即時報價抓取）、`market-regime.ts`（大盤濾網）、`types.ts`（`DeepPartial`）。
@@ -53,7 +53,7 @@ Next.js 16（App Router，Turbopack）+ React 19 + Tailwind CSS v4 + `clsx` / `t
 
 **選股頁 `/screening`**：頁頂一條精簡大盤濾網燈號（同 Dashboard 資料源）。**進頁自動顯示結果**（跟觀察清單頁同一心智模型——`resolveDataContext()` 決定用哪份，讀一次就定住）：今天有盤後資料 → 進頁即同步跑一次「盤後掃描」（秒級，不用按任何按鈕）；還沒有 → 讀背景排程（`intraday-scan.ts`，launchd 每 30 分）產出的最新盤中掃描。**一顆按鈕手動重跑**：盤後模式「重跑盤後掃描」（秒級）；盤中模式「立即掃描」（Server Action 內同步對 `mis.twse.com.tw` 跑全市場快照，卡 UI 約 20–30 秒）。**無自動輪詢**——要看 launchd 產出的新掃描得手動重整頁面。跑完一張表格 + 三個階段 tab（首次突破 / 延續爆發 / 醞釀中，預設「首次突破」）→ 點列展開明細（突破階段三欄：60 日走勢圖 / 法人籌碼 diverging bar + 結論 chip / 突破因子長條；醞釀中兩欄：走勢圖 / 20 格投信買超日曆 + 投信、外資自營兩條全市場百分位進度條）→ 勾選一鍵加入觀察清單。表格欄位含狀態 pill、量增倍數（`x2.5`）、籌碼結論 chip。盤中缺成交價的檔用最高價代入、列尾標「估」。突破階段若「突破當日法人淨賣超 + 這檔融資餘額近期暴增」籌碼 chip 轉紅「融資追價」（`margin-chasing` 警示，僅提示不影響分數）。結果不寫資料庫（落地 `data/signal-scan-results/`）。
 
-**觀察清單頁 `/watchlist`**：卡片 gallery（一列 1–4 張，依螢幕寬度）+ 階段分頁（首次突破 / 延續爆發 / 醞釀中，依「連續站上布林上軌天數」即時分類，預設「首次突破」）。每張卡：左上資料新鮮度標示（資料庫有當日資料 ⚡ / 盤中或昨收 🕐）、代號 / 漲跌% / stage pill / 籌碼結論 chip、60 日走勢圖、法人籌碼區塊（突破階段 = 近 5 日淨買超 diverging bar；醞釀階段 = 20 格投信買超日曆 + 投信 / 外資自營兩條全市場百分位進度條 + ⓘ 說明）、底排「量增 / 距年高 / 強度 PR / 突破幅度」（突破階段）或「量增」（醞釀中）。**資料源三分支**（統一走 `resolveDataContext()`，進頁不再打 MIS）：資料庫最新交易日 == 今日 → 用資料庫（⚡）；盤中且有夠新的盤中掃描結果 → 讀 `intraday-scan.ts` 產出的即時報價（🕐，「盤中 {日期}」）；盤外 → 用資料庫昨收（🕐，標「收盤定案 {日期}」）。強度 PR 與醞釀階段的投信/外資百分位讀最近一次掃描結果。移除鈕。
+**觀察清單頁 `/watchlist`**：卡片 gallery（一列 1–4 張，依螢幕寬度）+ 階段分頁（首次突破 / 延續爆發 / 醞釀中，預設「首次突破」）。**分類依「手動指定」優先**（加入時系統算出當下階段寫入，之後可在卡片手動改）；系統另即時判定「自動階段」拿來比對——手動 != 自動時卡片加「⚠ 自動判定：{階段}」提示、tab label 顯示「N 異動」。每張卡：左上資料新鮮度標示（資料庫有當日資料 ⚡ / 盤中或昨收 🕐）、代號 / 漲跌% / stage pill / 籌碼結論 chip、60 日走勢圖、法人籌碼區塊（突破階段 = 近 5 日淨買超 diverging bar；醞釀階段 = 20 格投信買超日曆 + 投信 / 外資自營兩條全市場百分位進度條 + ⓘ 說明）、底排「量增 / 距年高 / 強度 PR / 突破幅度」（突破階段）或「量增」（醞釀中）、改分類三顆按鈕。**資料源三分支**（統一走 `resolveDataContext()`，進頁不再打 MIS）：資料庫最新交易日 == 今日 → 用資料庫（⚡）；盤中且有夠新的盤中掃描結果 → 讀 `intraday-scan.ts` 產出的即時報價（🕐，「盤中 {日期}」）；盤外 → 用資料庫昨收（🕐，標「收盤定案 {日期}」）。強度 PR 與醞釀階段的投信/外資百分位讀最近一次掃描結果。移除鈕。
 
 回測 UI 已擱置（見開頭說明）。
 
@@ -129,7 +129,7 @@ pnpm tsx scripts/pipeline/calculate-industry-heat.ts --backfill 20
 
 # --- 選股（手動）---
 
-# 統一選股引擎：跑全市場 → 階段標籤（醞釀中 / 今日突破 / 已延伸）→ 各階段各自排名
+# 統一選股引擎：跑全市場 → 階段標籤（醞釀中 / 首次突破 / 延續爆發）→ 各階段各自排名
 pnpm tsx scripts/screening/run-signal-scan.ts                  # 自動判斷盤後 / 盤中
 pnpm tsx scripts/screening/run-signal-scan.ts --date=2026-08-31 # 強制盤後補算指定日
 pnpm tsx scripts/screening/run-signal-scan.ts --source=realtime # 強制打 MIS 即時報價
