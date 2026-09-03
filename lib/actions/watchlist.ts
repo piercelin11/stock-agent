@@ -6,6 +6,7 @@ import { resolveDataContext, type DataContext, type DataMode } from "../data-con
 import {
   computeProximityToHigh,
   computeInstitutionalFlow,
+  computeOtherInstitutionRatio,
   consecutiveAboveBand,
   resolveBreakoutConfig,
   resolveAccumulationConfig,
@@ -58,24 +59,25 @@ export interface WatchlistCardRow {
   volumeRatio: number | null; // 今日（或盤中估全日）volume / volumeMa20——醞釀中「量增」欄仍用
   spark: SparkPoint[]; // 近 60 日相對布林中軌偏離（舊 → 新）
 
-  // 法人 diverging bar 中繼值——只在 breakout-day / extended 組；pre-breakout = null
+  // 法人 diverging bar 中繼值。PLAN 7：不再按 stage 分支——一律計算（breakout 卡片用 diverging bar，
+  // 醞釀卡片不畫但值仍在，使用者手動改分類後不空白）。
   inst: {
     trustRatio: number;
     foreignRatio: number;
     todayTrustDir: -1 | 0 | 1 | null;
     todayForeignDir: -1 | 0 | 1 | null;
-  } | null;
+  };
 
-  // 底排突破因子原始值——只在 breakout-day / extended 組；pre-breakout = null
+  // 底排突破因子原始值。PLAN 7：一律計算。setup 股票 breakoutMarginPct 為負、relativeStrength 由掃描 JSON 帶（setup 列現在也有）。
   factors: {
     proximityLongPct: number; // 距一年高點 %（<= 0）
     breakoutMarginPct: number; // (close - bollingerUpper) / bollingerUpper * 100
     relativeStrength: number | null; // §3.1：最近掃描結果的 PR；不在結果裡 = null
     relativeStrengthStale: boolean; // §3.1：掃描結果日期 != 卡片資料日期
-  } | null;
+  };
 
-  // 醞釀階段法人籌碼區塊——只在 pre-breakout 組；breakout 階段 null
-  preInst: PreBreakoutInst | null;
+  // 醞釀階段法人籌碼區塊。PLAN 7：一律計算（degraded 用欄位內 degraded: boolean 表達，不再整個 null）。
+  preInst: PreBreakoutInst;
 }
 
 export interface PreBreakoutInst {
@@ -164,13 +166,13 @@ async function buildCardRow(
       orderBy: { date: "desc" },
       select: { date: true, foreignNetBuy: true, investmentTrustNetBuy: true, dealerNetBuy: true },
     }),
-    // 近 PRE_INST_WINDOW(20) 日投信/外資淨買超（新到舊）——breakout diverging bar 取前 5 筆；
-    // pre-breakout 的 20 格日曆用全部。
+    // 近 PRE_INST_WINDOW(20) 日投信/外資/自營淨買超（新到舊）——breakout diverging bar 取前 5 筆；
+    // pre-breakout 的 20 格日曆用全部。PLAN 7：加 dealerNetBuy（otherInstRatio 現算需外資+自營）。
     prisma.institutionalTrading.findMany({
       where: { stockCode: code },
       orderBy: { date: "desc" },
       take: PRE_INST_WINDOW,
-      select: { foreignNetBuy: true, investmentTrustNetBuy: true },
+      select: { foreignNetBuy: true, investmentTrustNetBuy: true, dealerNetBuy: true },
     }),
   ]);
 
@@ -235,100 +237,114 @@ async function buildCardRow(
   const volumeRatio =
     volumeMa20 != null && volumeMa20 > 0 ? effectiveVolume / volumeMa20 : null;
 
-  // ---- breakout 階段：inst + factors ----
-  let inst: WatchlistCardRow["inst"] = null;
-  let factors: WatchlistCardRow["factors"] = null;
-  let preInst: WatchlistCardRow["preInst"] = null;
+  // ---- PLAN 7：inst / factors / preInst 一律計算（不再按 stage 分支）----
+  // 三者共用的 DB 查詢（indicatorWindow / instWindow / quoteWindow）已在 if/else 之前撈好、不分 stage。
+  const bollingerUpper = indicatorWindow[0]?.bollingerUpper ?? null;
 
-  if (stage === "setup") {
-    // 20 格日曆：投信 20 日淨買超序列（新到舊），前端 reverse 成舊→新
-    const trustSeriesNewToOld = instWindow.map((r) =>
-      Number(r.investmentTrustNetBuy ?? 0),
-    );
-    const dataDays = trustSeriesNewToOld.length;
-    const buyDayFlags = trustSeriesNewToOld.map((v) => v > 0);
-    const buyDays = buyDayFlags.filter(Boolean).length;
-    let consecutiveBuyDays = 0;
-    for (const flag of buyDayFlags) {
-      // buyDayFlags 是新→舊，從最新往回數連續買超
-      if (flag) consecutiveBuyDays += 1;
-      else break;
-    }
-
-    // 分數 / detail：優先讀最近 eod 掃描結果（rankScore 是全市場百分位，watchlist 算不出）
-    const fromScan = scan?.preInstByCode.get(code) ?? null;
-
-    // trustNetRatio：掃描結果有就用；沒有則 action 用 20 日序列 ÷ sharesOutstanding 現算
-    let trustNetRatio: number | null = fromScan?.trustNetRatio ?? null;
-    if (trustNetRatio === null && dataDays >= PRE_INST_MIN_DAYS) {
-      const shares = item.stock.sharesOutstanding;
-      if (shares != null && Number(shares) > 0) {
-        const netSum = trustSeriesNewToOld.reduce((s, v) => s + v, 0);
-        trustNetRatio = netSum / Number(shares);
-      }
-    }
-
-    preInst = {
-      buyDayFlags: buyDayFlags.reverse(), // 舊 → 新
-      buyDays,
-      consecutiveBuyDays,
-      dataDays,
-      trustScore: fromScan?.trustScore ?? null,
-      otherInstScore: fromScan?.otherInstScore ?? null,
-      trustNetRatio,
-      otherInstRatio: fromScan?.otherInstRatio ?? null,
-      degraded: dataDays < PRE_INST_MIN_DAYS,
-    };
-  } else {
-    const bollingerUpper = indicatorWindow[0]?.bollingerUpper ?? null;
-
-    // 法人 diverging bar
-    const trustSeries = instWindow.map((r) => Number(r.investmentTrustNetBuy ?? 0));
-    const foreignSeries = instWindow.map((r) => Number(r.foreignNetBuy ?? 0));
-    // 今日單日方向：只有當日籌碼（籌碼日期 == refDate）才算「今日」；否則 null（元件底部提示「近日資料」）
-    const instToday =
-      institutional && isoDate(institutional.date) === refDate ? institutional : null;
-    const flow = computeInstitutionalFlow({
-      trustNetBuyNewestFirst: trustSeries,
-      foreignNetBuyNewestFirst: foreignSeries,
-      todayTrustNetBuy:
-        instToday && instToday.investmentTrustNetBuy !== null
-          ? Number(instToday.investmentTrustNetBuy)
-          : null,
-      todayForeignNetBuy:
-        instToday && instToday.foreignNetBuy !== null ? Number(instToday.foreignNetBuy) : null,
-      volumeMa20,
-      marginSurgePercentile: null, // watchlist 不做 margin-chasing 警示
-      config: DEFAULT_INSTITUTIONAL_FLOW_CONFIG,
-    });
-    inst = {
-      trustRatio: flow.trustRatio,
-      foreignRatio: flow.foreignRatio,
-      todayTrustDir: flow.todayTrustDir,
-      todayForeignDir: flow.todayForeignDir,
-    };
-
-    // 突破因子原始值
-    const closeHistory = quoteWindow.slice(1).map((q) => q.close); // 不含當前
-    const prox = computeProximityToHigh(
-      close,
-      closeHistory,
-      score.proximityShortWindow,
-      score.proximityLongWindow,
-    );
-    const breakoutMarginPct =
-      bollingerUpper != null && bollingerUpper > 0
-        ? ((close - bollingerUpper) / bollingerUpper) * 100
-        : 0;
-
-    const pr = scan?.prByCode.get(code);
-    factors = {
-      proximityLongPct: prox.longPct,
-      breakoutMarginPct,
-      relativeStrength: typeof pr === "number" ? pr : null,
-      relativeStrengthStale: scan != null && scan.scanDate !== refDate,
-    };
+  // ── preInst（20 格日曆 + 兩條進度條）──
+  const trustSeriesNewToOld = instWindow.map((r) =>
+    Number(r.investmentTrustNetBuy ?? 0),
+  );
+  const foreignPlusDealerNewToOld = instWindow.map(
+    (r) => Number(r.foreignNetBuy ?? 0) + Number(r.dealerNetBuy ?? 0),
+  );
+  const vol20NewToOld = quoteWindow
+    .slice(0, PRE_INST_WINDOW)
+    .map((q) => Number(q.volume));
+  const dataDays = trustSeriesNewToOld.length;
+  const buyDayFlags = trustSeriesNewToOld.map((v) => v > 0);
+  const buyDays = buyDayFlags.filter(Boolean).length;
+  let consecutiveBuyDays = 0;
+  for (const flag of buyDayFlags) {
+    // buyDayFlags 是新→舊，從最新往回數連續買超
+    if (flag) consecutiveBuyDays += 1;
+    else break;
   }
+
+  // 分數 / detail：優先讀最近掃描結果（rankScore 是全市場母體百分位，watchlist 幾檔算不出）。
+  // PLAN 7：breakout 列現在也帶 preInst（插值百分位）→ preInstByCode 對突破股也有值。
+  const fromScan = scan?.preInstByCode.get(code) ?? null;
+
+  // trustNetRatio：掃描結果有就用；沒有則 action 用 20 日序列 ÷ sharesOutstanding 現算
+  let trustNetRatio: number | null = fromScan?.trustNetRatio ?? null;
+  if (trustNetRatio === null && dataDays >= PRE_INST_MIN_DAYS) {
+    const shares = item.stock.sharesOutstanding;
+    if (shares != null && Number(shares) > 0) {
+      const netSum = trustSeriesNewToOld.reduce((s, v) => s + v, 0);
+      trustNetRatio = netSum / Number(shares);
+    }
+  }
+
+  // otherInstRatio：掃描結果有就用；沒有則現算「20 日外資+自營 ÷ 20 日成交量」
+  let otherInstRatio: number | null = fromScan?.otherInstRatio ?? null;
+  if (otherInstRatio === null && dataDays >= PRE_INST_MIN_DAYS) {
+    const { ratio } = computeOtherInstitutionRatio(
+      foreignPlusDealerNewToOld,
+      vol20NewToOld,
+      PRE_INST_WINDOW,
+      ACC.minInstitutionalDaysRatio,
+    );
+    otherInstRatio = ratio;
+  }
+
+  const preInst: WatchlistCardRow["preInst"] = {
+    buyDayFlags: [...buyDayFlags].reverse(), // 舊 → 新
+    buyDays,
+    consecutiveBuyDays,
+    dataDays,
+    trustScore: fromScan?.trustScore ?? null, // 進度條寬度——仍只來自 scan（全市場母體）
+    otherInstScore: fromScan?.otherInstScore ?? null,
+    trustNetRatio,
+    otherInstRatio,
+    degraded: dataDays < PRE_INST_MIN_DAYS,
+  };
+
+  // ── inst（法人 diverging bar）──
+  const trustSeries = instWindow.map((r) => Number(r.investmentTrustNetBuy ?? 0));
+  const foreignSeries = instWindow.map((r) => Number(r.foreignNetBuy ?? 0));
+  // 今日單日方向：只有當日籌碼（籌碼日期 == refDate）才算「今日」；否則 null（元件底部提示「近日資料」）
+  const instToday =
+    institutional && isoDate(institutional.date) === refDate ? institutional : null;
+  const flow = computeInstitutionalFlow({
+    trustNetBuyNewestFirst: trustSeries,
+    foreignNetBuyNewestFirst: foreignSeries,
+    todayTrustNetBuy:
+      instToday && instToday.investmentTrustNetBuy !== null
+        ? Number(instToday.investmentTrustNetBuy)
+        : null,
+    todayForeignNetBuy:
+      instToday && instToday.foreignNetBuy !== null ? Number(instToday.foreignNetBuy) : null,
+    volumeMa20,
+    marginSurgePercentile: null, // watchlist 不做 margin-chasing 警示
+    config: DEFAULT_INSTITUTIONAL_FLOW_CONFIG,
+  });
+  const inst: WatchlistCardRow["inst"] = {
+    trustRatio: flow.trustRatio,
+    foreignRatio: flow.foreignRatio,
+    todayTrustDir: flow.todayTrustDir,
+    todayForeignDir: flow.todayForeignDir,
+  };
+
+  // ── factors（距年高 / 突破幅度 / 強度 PR）──
+  const closeHistory = quoteWindow.slice(1).map((q) => q.close); // 不含當前
+  const prox = computeProximityToHigh(
+    close,
+    closeHistory,
+    score.proximityShortWindow,
+    score.proximityLongWindow,
+  );
+  const breakoutMarginPct =
+    bollingerUpper != null && bollingerUpper > 0
+      ? ((close - bollingerUpper) / bollingerUpper) * 100 // setup 股票此值為負，屬正常
+      : 0;
+
+  const pr = scan?.prByCode.get(code);
+  const factors: WatchlistCardRow["factors"] = {
+    proximityLongPct: prox.longPct,
+    breakoutMarginPct,
+    relativeStrength: typeof pr === "number" ? pr : null,
+    relativeStrengthStale: scan != null && scan.scanDate !== refDate,
+  };
 
   return {
     stockCode: code,

@@ -36,9 +36,7 @@ export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
   const chip =
     row.stage === "setup"
       ? resolvePreBreakoutChip(row.preInst)
-      : row.inst
-        ? resolveInstChip(row.inst, [])
-        : null;
+      : resolveInstChip(row.inst, []);
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-background p-4">
@@ -109,14 +107,14 @@ export function WatchlistCard({ row }: { row: WatchlistCardRow }) {
       {/* 走勢圖 */}
       <Sparkline points={row.spark} rising={rising} />
 
-      {/* 法人籌碼區塊：breakout 階段 = diverging bar；醞釀階段 = 20 格日曆 + 百分位進度條 */}
+      {/* 法人籌碼區塊：breakout 階段 = diverging bar；醞釀階段 = 20 格日曆 + 百分位進度條。
+          PLAN 7：兩個元件視覺本就不同（醞釀看籌碼累積 / 突破看流向），維持按 stage 選元件；
+          inst / preInst 統一後皆有值，內層 null 檢查已移除。 */}
       {row.stage === "setup" ? (
-        row.preInst ? (
-          <PreBreakoutInstitutional preInst={row.preInst} />
-        ) : null
-      ) : row.inst ? (
+        <PreBreakoutInstitutional preInst={row.preInst} />
+      ) : (
         <InstitutionalFlowPanel inst={row.inst} warnings={[]} showChip={false} />
-      ) : null}
+      )}
 
       {/* 底排因子 */}
       <div className="border-t border-border pt-3">

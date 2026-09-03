@@ -31,6 +31,7 @@ import {
   type SignalScanConfig,
   type HistoryPoint,
   type BreakoutRawInputs,
+  type AccumulationRawInputs,
 } from "../lib/signal-factors/index";
 import {
   BATCH_SIZE,
@@ -401,6 +402,81 @@ function preBreakoutExtras(
   };
 }
 
+/**
+ * PLAN 7 §3.3：value 落在已升冪排序的 population 中的百分位（0~100）。population 空 → 回 naScore。
+ * 「贏過多少比例」= count(<= value) / N * 100，與 rankScore 的 (rank+1)/N*100 語意對齊
+ * （差一名次的邊界不影響 UI 呈現）。**不 push 進 rankScore 母體**——breakout 股的插值不污染 setup 分數。
+ */
+function percentileOf(value: number, sortedAsc: number[], naScore: number): number {
+  if (sortedAsc.length === 0) return naScore;
+  let lo = 0;
+  let hi = sortedAsc.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sortedAsc[mid]! <= value) lo = mid + 1;
+    else hi = mid;
+  }
+  return (lo / sortedAsc.length) * 100;
+}
+
+/**
+ * PLAN 7 §3.2：對 breakout 階段那 ~20 檔算 accumulation 籌碼分（trustScore / otherInstScore + preInst），
+ * 用「插值不進母體」法——分數是「這檔的投信 20 日買超佔比，拿去跟今天所有 setup 候選比，排第幾百分位」。
+ * **不 push 進 setup 的 rankScore 母體**（避免百分位語意改變污染 setup 分數）。
+ *
+ * setupPop = 從 setup 迴圈的 trustRaw / otherRaw 抽出的已排序母體（升冪，已濾 null）。
+ */
+interface SetupChipPopulation {
+  sortedBuyFreq: number[];
+  sortedTrustNetRatio: number[];
+  sortedOtherInstRatio: number[];
+}
+
+function buildBreakoutPreInst(
+  code: string,
+  accInputs: Map<string, AccumulationRawInputs>,
+  sharesOutstanding: number | null,
+  pop: SetupChipPopulation,
+  pb: SignalScanConfig["preBreakout"],
+): Pick<SignalResult, "preInst"> {
+  const acc = accInputs.get(code);
+  const t = computeTrustRawMetrics(
+    acc?.trustNetBuyNewestFirst ?? [],
+    sharesOutstanding,
+    pb.institutionalWindowDays,
+    pb.minInstitutionalDaysRatio,
+  );
+  const o = computeOtherInstitutionRatio(
+    acc?.foreignPlusDealerNewestFirst ?? [],
+    acc?.instVolumeNewestFirst ?? [],
+    pb.institutionalWindowDays,
+    pb.minInstitutionalDaysRatio,
+  );
+
+  const trustScore = t.degraded
+    ? pb.neutralScore
+    : combineTrustScore(
+        percentileOf(t.buyFrequency ?? 0, pop.sortedBuyFreq, pb.neutralScore),
+        t.netRatio === null
+          ? null
+          : percentileOf(t.netRatio, pop.sortedTrustNetRatio, pb.neutralScore),
+        pb.trustSubWeights,
+      );
+  const otherInstScore =
+    o.ratio === null
+      ? pb.neutralScore
+      : percentileOf(o.ratio, pop.sortedOtherInstRatio, pb.neutralScore);
+
+  return preBreakoutExtras(
+    acc?.trustNetBuyNewestFirst ?? [],
+    trustScore,
+    otherInstScore,
+    t.netRatio,
+    o.ratio,
+    Math.ceil(pb.institutionalWindowDays * pb.minInstitutionalDaysRatio),
+  );
+}
+
 function breakoutTotalScore(
   scores: BreakoutFactorOutput["scores"],
   stage: "breakoutDay" | "extended",
@@ -575,9 +651,12 @@ async function runEod(
   const volumeMa20ByCode = new Map<string, number | null>(
     staged.map((s) => [s.code, s.volumeMa20]),
   );
+  // PLAN 7 §3.2：accumulation 輸入除了 setup 候選，也撈 breakout 那 ~20 檔——讓 breakout 的
+  // SignalResult 也帶 preInst（使用者手動歸類到「醞釀中」tab 時兩條進度條有值）。
+  const accCodes = [...preCodes, ...breakoutCodes];
   const accInputs =
-    preCodes.length > 0
-      ? await fetchAccumulationRawInputs(prisma, date, preCodes, volumeMa20ByCode, {
+    accCodes.length > 0
+      ? await fetchAccumulationRawInputs(prisma, date, accCodes, volumeMa20ByCode, {
           institutionalWindowDays: config.preBreakout.institutionalWindowDays,
           squeezeVolumeWindowDays: config.preBreakout.squeezeVolumeWindowDays,
           bandwidthHistoryMaxDays: b.baseMaxWindowDays,
@@ -601,11 +680,18 @@ async function runEod(
 
   // 5. 逐階段合併
   const results: SignalResult[] = [];
+  const pb = config.preBreakout;
+
+  // PLAN 7 §3.2：breakout 階段插值用的 setup 母體（升冪、已濾 null）。setup 迴圈填、breakout 迴圈讀。
+  const setupChipPop: SetupChipPopulation = {
+    sortedBuyFreq: [],
+    sortedTrustNetRatio: [],
+    sortedOtherInstRatio: [],
+  };
 
   // 5a. pre-breakout（乘法，沿用 accumulation 合成）
   const preStaged = staged.filter((s) => s.stage === "setup");
   if (preStaged.length > 0) {
-    const pb = config.preBreakout;
     const trustRaw = preStaged.map((s) =>
       computeTrustRawMetrics(
         accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [],
@@ -640,6 +726,20 @@ async function runEod(
     const trustNetRatioScores = rankScore(trustRaw.map((t) => t.netRatio), false, pb.neutralScore);
     const otherInstScores = rankScore(otherRaw.map((o) => o.ratio), false, pb.neutralScore);
     const quietVolumeScores = rankScore(quietRaw.map((q) => q.avgRatio), true, pb.neutralScore);
+
+    // PLAN 7 §3.2：把 setup 母體的原始值存成升冪排序陣列，供 breakout 迴圈 percentileOf 插值。
+    setupChipPop.sortedBuyFreq = trustRaw
+      .map((t) => t.buyFrequency)
+      .filter((v): v is number => v !== null)
+      .sort((a, z) => a - z);
+    setupChipPop.sortedTrustNetRatio = trustRaw
+      .map((t) => t.netRatio)
+      .filter((v): v is number => v !== null)
+      .sort((a, z) => a - z);
+    setupChipPop.sortedOtherInstRatio = otherRaw
+      .map((o) => o.ratio)
+      .filter((v): v is number => v !== null)
+      .sort((a, z) => a - z);
 
     preStaged.forEach((s, i) => {
       const degraded: string[] = [];
@@ -690,6 +790,9 @@ async function runEod(
           quietVolumeScore,
           chipScore,
           readinessCoef,
+          // PLAN 7 §3.1：setup 合成公式不吃 RS，但值已在 gate 前全市場算好——帶進 scores
+          // 讓觀察股手動改成 breakout tab 時「強度 PR」欄有值。lib/latest-scan.ts 的 prByCode 自動收。
+          relativeStrength: rsByCode.get(s.code)?.score ?? b.naScore,
         },
         detail: {
           trustBuyFreq: t.buyFrequency,
@@ -747,6 +850,14 @@ async function runEod(
     );
     const stage = s.stage as "breakoutDay" | "extended";
     const totalScore = breakoutTotalScore(factors.scores, stage, config);
+    // PLAN 7 §3.2：breakout 階段也帶 preInst（插值百分位，不進 setup 母體、不動 totalScore / scores / rank）
+    const preInstExtra = buildBreakoutPreInst(
+      s.code,
+      accInputs,
+      s.raw.quote.sharesOutstanding,
+      setupChipPop,
+      pb,
+    );
     results.push({
       code: s.code,
       name: s.name,
@@ -761,6 +872,7 @@ async function runEod(
       warnings: factors.warnings,
       volumeRatio: s.volumeRatio!,
       ...breakoutExtras(factors),
+      ...preInstExtra,
       ...(watchlistCodes.has(s.code) ? { fromWatchlist: true } : {}),
     });
   }
@@ -1132,10 +1244,12 @@ async function runRealtime(
   });
 
   // ---- pre-breakout 補撈：accumulation 三表（到 T-1） ----
+  // PLAN 7 §3.2：也撈 breakout 那 ~20 檔——讓 breakout 的 SignalResult 也帶 preInst。
   const volumeMa20ByCode = new Map<string, number | null>(staged.map((s) => [s.code, s.volumeMa20]));
-  const accInputs =
-    preCodes.length > 0
-      ? await fetchAccumulationRawInputs(prisma, prevDate, preCodes, volumeMa20ByCode, {
+  const accCodes = [...preCodes, ...breakoutCodes];
+  const accInputs: Map<string, AccumulationRawInputs> =
+    accCodes.length > 0
+      ? await fetchAccumulationRawInputs(prisma, prevDate, accCodes, volumeMa20ByCode, {
           institutionalWindowDays: config.preBreakout.institutionalWindowDays,
           squeezeVolumeWindowDays: config.preBreakout.squeezeVolumeWindowDays,
           bandwidthHistoryMaxDays: b.baseMaxWindowDays,
@@ -1143,21 +1257,30 @@ async function runRealtime(
       : new Map();
 
   const results: SignalResult[] = [];
+  const pb = config.preBreakout;
+
+  // staged 每檔的 sharesOutstanding（setup 迴圈 + breakout preInst 插值共用）
+  const sharesByCode = new Map(
+    staged.map((s) => {
+      const st = stockByCode.get(s.code);
+      return [
+        s.code,
+        st?.sharesOutstanding !== null && st?.sharesOutstanding !== undefined
+          ? Number(st.sharesOutstanding)
+          : null,
+      ] as const;
+    }),
+  );
+
+  // PLAN 7 §3.2：breakout 階段插值用的 setup 母體（升冪、已濾 null）。setup 迴圈填、breakout 迴圈讀。
+  const setupChipPop: SetupChipPopulation = {
+    sortedBuyFreq: [],
+    sortedTrustNetRatio: [],
+    sortedOtherInstRatio: [],
+  };
 
   // pre-breakout（乘法）
   if (preStaged.length > 0) {
-    const pb = config.preBreakout;
-    const sharesByCode = new Map(
-      preStaged.map((s) => {
-        const st = stockByCode.get(s.code);
-        return [
-          s.code,
-          st?.sharesOutstanding !== null && st?.sharesOutstanding !== undefined
-            ? Number(st.sharesOutstanding)
-            : null,
-        ];
-      }),
-    );
     const trustRaw = preStaged.map((s) =>
       computeTrustRawMetrics(
         accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [],
@@ -1191,6 +1314,20 @@ async function runRealtime(
     const trustNetRatioScores = rankScore(trustRaw.map((t) => t.netRatio), false, pb.neutralScore);
     const otherInstScores = rankScore(otherRaw.map((o) => o.ratio), false, pb.neutralScore);
     const quietVolumeScores = rankScore(quietRaw.map((q) => q.avgRatio), true, pb.neutralScore);
+
+    // PLAN 7 §3.2：setup 母體升冪陣列，供 breakout 迴圈 percentileOf 插值。
+    setupChipPop.sortedBuyFreq = trustRaw
+      .map((t) => t.buyFrequency)
+      .filter((v): v is number => v !== null)
+      .sort((a, z) => a - z);
+    setupChipPop.sortedTrustNetRatio = trustRaw
+      .map((t) => t.netRatio)
+      .filter((v): v is number => v !== null)
+      .sort((a, z) => a - z);
+    setupChipPop.sortedOtherInstRatio = otherRaw
+      .map((o) => o.ratio)
+      .filter((v): v is number => v !== null)
+      .sort((a, z) => a - z);
 
     preStaged.forEach((s, i) => {
       const degraded: string[] = [];
@@ -1232,7 +1369,16 @@ async function runRealtime(
         totalScore: finalScore,
         rank: 0,
         priceSource: s.priceSource,
-        scores: { trustScore, otherInstScore, squeezeScore, quietVolumeScore, chipScore, readinessCoef },
+        scores: {
+          trustScore,
+          otherInstScore,
+          squeezeScore,
+          quietVolumeScore,
+          chipScore,
+          readinessCoef,
+          // PLAN 7 §3.1：值已在 gate 前全市場算好——帶進 scores 讓觀察股手動改 breakout tab 時「強度 PR」有值。
+          relativeStrength: rsByCode.get(s.code)?.score ?? b.naScore,
+        },
         detail: {
           trustBuyFreq: t.buyFrequency,
           trustConsecutiveDays: t.consecutiveBuyDays,
@@ -1297,6 +1443,14 @@ async function runRealtime(
       config,
     );
     const totalScore = breakoutTotalScore(factors.scores, stage, config);
+    // PLAN 7 §3.2：breakout 階段也帶 preInst（插值百分位，不進 setup 母體、不動 totalScore / scores / rank）
+    const preInstExtra = buildBreakoutPreInst(
+      s.code,
+      accInputs,
+      sharesByCode.get(s.code) ?? null,
+      setupChipPop,
+      pb,
+    );
     results.push({
       code: s.code,
       name: s.name,
@@ -1311,6 +1465,7 @@ async function runRealtime(
       warnings: factors.warnings,
       volumeRatio: s.volumeRatio!,
       ...breakoutExtras(factors),
+      ...preInstExtra,
       ...(watchlistCodes.has(s.code) ? { fromWatchlist: true } : {}),
     });
   }

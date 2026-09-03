@@ -32,18 +32,15 @@ export function FactorList({ row }: { row: WatchlistCardRow }) {
     );
   }
 
-  // breakout-day / extended
+  // breakout-day / extended。PLAN 7：row.factors 一律有值（去 nullable），f == null 死碼已移除。
   const f = row.factors;
-  const rs =
-    f == null || f.relativeStrength === null
-      ? null
-      : Math.round(f.relativeStrength);
+  const rs = f.relativeStrength === null ? null : Math.round(f.relativeStrength);
 
   return (
     <div className="flex items-end justify-between gap-2">
       <Cell label={FACTOR_LABELS.volumeRatio}>{volRatio}</Cell>
       <Cell label={FACTOR_LABELS.proximityLong}>
-        {f == null ? "—" : `${f.proximityLongPct.toFixed(1)}%`}
+        {`${f.proximityLongPct.toFixed(1)}%`}
       </Cell>
       <Cell label={FACTOR_LABELS.relativeStrength}>
         {rs === null ? (
@@ -51,7 +48,7 @@ export function FactorList({ row }: { row: WatchlistCardRow }) {
         ) : (
           <span className="inline-flex items-center gap-0.5">
             PR{rs}
-            {f?.relativeStrengthStale ? (
+            {f.relativeStrengthStale ? (
               <ClockIcon
                 className="h-3 w-3 text-muted-foreground/60"
                 aria-label="此 PR 取自較舊的掃描結果"
@@ -61,9 +58,7 @@ export function FactorList({ row }: { row: WatchlistCardRow }) {
         )}
       </Cell>
       <Cell label={FACTOR_LABELS.breakoutMargin}>
-        {f == null
-          ? "—"
-          : `${f.breakoutMarginPct >= 0 ? "+" : ""}${f.breakoutMarginPct.toFixed(1)}%`}
+        {`${f.breakoutMarginPct >= 0 ? "+" : ""}${f.breakoutMarginPct.toFixed(1)}%`}
       </Cell>
     </div>
   );

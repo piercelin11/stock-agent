@@ -74,24 +74,18 @@ function buildLatestScan(out: SignalScanOutput, fallbackDate: string): LatestSca
   const resultByCode = new Map<string, ScanResultLite>();
   for (const r of out.results ?? []) {
     resultByCode.set(r.code, r);
+    // PLAN 7 §3.1：setup 列現在也帶 scores.relativeStrength → prByCode 自動收（這行不用改）。
     const rs = r.scores?.["relativeStrength"];
     if (typeof rs === "number") prByCode.set(r.code, rs);
-    if (r.stage === "setup") {
+    // PLAN 7 §3.2：從「只 setup」放寬成「有 preInst 就收」——breakout 列現在也帶 preInst
+    // （插值百分位），讓觀察股手動歸類到「醞釀中」tab 時兩條進度條有值。
+    // 直接讀 r.preInst.*：breakout 的 r.scores 是 8 分項沒有 trustScore，但 r.preInst 有；setup 的 r.preInst 也有，一致。
+    if (r.preInst) {
       preInstByCode.set(r.code, {
-        trustScore:
-          typeof r.scores?.["trustScore"] === "number" ? r.scores["trustScore"] : null,
-        otherInstScore:
-          typeof r.scores?.["otherInstScore"] === "number"
-            ? r.scores["otherInstScore"]
-            : null,
-        trustNetRatio:
-          typeof r.detail?.["trustNetRatio"] === "number"
-            ? r.detail["trustNetRatio"]
-            : null,
-        otherInstRatio:
-          typeof r.detail?.["otherInstRatio"] === "number"
-            ? r.detail["otherInstRatio"]
-            : null,
+        trustScore: r.preInst.trustScore ?? null,
+        otherInstScore: r.preInst.otherInstScore ?? null,
+        trustNetRatio: r.preInst.trustNetRatio ?? null,
+        otherInstRatio: r.preInst.otherInstRatio ?? null,
       });
     }
   }
