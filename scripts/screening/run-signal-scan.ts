@@ -23,6 +23,9 @@ import {
   computeBreakoutMarginMonotone,
   computeInstitutionalFlow,
   computeMarginSurgePercentile,
+  computeTrendReversal,
+  computeSingleDayConcentration,
+  classifyInstBackground,
   consecutiveAboveBand,
   resolveSignalConfig,
   fetchBreakoutRawInputs,
@@ -71,6 +74,9 @@ function taipeiTodayIso(now: Date): string {
 export type SignalStage = "setup" | "breakoutDay" | "extended";
 export type SignalSource = "eod" | "realtime";
 
+// PLAN 8 §6：突破階段法人背景（中性，非風險）。前 15 日 vs 近 5 日投信方向分類。
+export type InstBackground = "positioned-early" | "fresh-entry";
+
 export interface SignalResult {
   code: string;
   name: string;
@@ -83,7 +89,13 @@ export interface SignalResult {
   scores: Record<string, number>; // 該階段用到的分項
   detail?: Record<string, number | null>; // pre-breakout 的原始指標
   degraded: string[]; // 資料不足 / 不確定（語意不變）
-  warnings: string[]; // PLAN §4：資料充足、系統明確發現的風險訊號（目前只有 "margin-chasing"）
+  // PLAN §4 / PLAN 8：資料充足、系統明確發現的風險訊號。
+  //   setup       → "trend-reversal" / "concentration"（PLAN 8 §2 / §5，首次讓 setup 有非空 warnings）
+  //   breakout/ext → "margin-chasing"（PLAN §4）/ "institution-crowded"（PLAN 8 §4）
+  warnings: string[];
+  // PLAN 8 §6：突破階段法人背景（中性，非風險——不放 warnings）。只在 breakoutDay / extended
+  //   的 push 帶；資料不足 → 欄位省略（undefined）。前端查 INST_BACKGROUND_LABELS 渲染一行小灰字。
+  instBackground?: InstBackground;
   // PLAN §4.1：展開列三欄用的中繼值。只在 breakout-day / extended 的 push 帶；pre-breakout undefined。
   volumeRatio?: number; // 觸發量比（今日 volume / volumeMa20）
   inst?: {
@@ -323,6 +335,7 @@ function computeBreakoutFactors(
 
   const warnings: string[] = [];
   if (flow.marginChasing) warnings.push("margin-chasing");
+  if (flow.institutionCrowded) warnings.push("institution-crowded"); // PLAN 8 §4：不動 score，只標記
 
   return {
     scores: {
@@ -774,6 +787,15 @@ async function runEod(
       );
       const finalScore = combineFinalScore(chipScore, readinessCoef);
 
+      // PLAN 8 §2 / §5：setup 也可帶 warnings（首次）。純標記、不動 finalScore。
+      const setupWarnings: string[] = [];
+      const trustSeries = accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [];
+      const fpdSeries = accInputs.get(s.code)?.foreignPlusDealerNewestFirst ?? [];
+      if (computeTrendReversal(trustSeries, pb.trendReversal)) setupWarnings.push("trend-reversal");
+      if (computeSingleDayConcentration(fpdSeries, pb.concentration)) {
+        setupWarnings.push("concentration");
+      }
+
       results.push({
         code: s.code,
         name: s.name,
@@ -803,7 +825,7 @@ async function runEod(
           avgVolumeRatio5d: q.avgRatio,
         },
         ...preBreakoutExtras(
-          accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [],
+          trustSeries,
           trustScore,
           otherInstScore,
           t.netRatio,
@@ -811,7 +833,7 @@ async function runEod(
           Math.ceil(pb.institutionalWindowDays * pb.minInstitutionalDaysRatio),
         ),
         degraded,
-        warnings: [], // pre-breakout 恆無 warnings（PLAN §4）
+        warnings: setupWarnings, // PLAN 8：setup 可帶 trend-reversal / concentration
         ...(watchlistCodes.has(s.code) ? { fromWatchlist: true } : {}),
       });
     });
@@ -858,6 +880,12 @@ async function runEod(
       setupChipPop,
       pb,
     );
+    // PLAN 8 §6：突破階段法人背景（中性，非風險）。複用已撈的 accInputs 20 日投信序列，0 額外查詢。
+    const bg = classifyInstBackground(
+      accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [],
+      s.volumeMa20 ?? null,
+      b.institutionalFlow.background,
+    );
     results.push({
       code: s.code,
       name: s.name,
@@ -873,6 +901,7 @@ async function runEod(
       volumeRatio: s.volumeRatio!,
       ...breakoutExtras(factors),
       ...preInstExtra,
+      ...(bg ? { instBackground: bg } : {}),
       ...(watchlistCodes.has(s.code) ? { fromWatchlist: true } : {}),
     });
   }
@@ -1360,6 +1389,15 @@ async function runRealtime(
       );
       const finalScore = combineFinalScore(chipScore, readinessCoef);
 
+      // PLAN 8 §2 / §5：setup 也可帶 warnings（首次）。純標記、不動 finalScore。
+      const setupWarnings: string[] = [];
+      const trustSeries = accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [];
+      const fpdSeries = accInputs.get(s.code)?.foreignPlusDealerNewestFirst ?? [];
+      if (computeTrendReversal(trustSeries, pb.trendReversal)) setupWarnings.push("trend-reversal");
+      if (computeSingleDayConcentration(fpdSeries, pb.concentration)) {
+        setupWarnings.push("concentration");
+      }
+
       results.push({
         code: s.code,
         name: s.name,
@@ -1388,7 +1426,7 @@ async function runRealtime(
           avgVolumeRatio5d: q.avgRatio,
         },
         ...preBreakoutExtras(
-          accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [],
+          trustSeries,
           trustScore,
           otherInstScore,
           t.netRatio,
@@ -1396,7 +1434,7 @@ async function runRealtime(
           Math.ceil(pb.institutionalWindowDays * pb.minInstitutionalDaysRatio),
         ),
         degraded,
-        warnings: [], // pre-breakout 恆無 warnings（PLAN §4）
+        warnings: setupWarnings, // PLAN 8：setup 可帶 trend-reversal / concentration
         ...(watchlistCodes.has(s.code) ? { fromWatchlist: true } : {}),
       });
     });
@@ -1451,6 +1489,12 @@ async function runRealtime(
       setupChipPop,
       pb,
     );
+    // PLAN 8 §6：突破階段法人背景（中性，非風險）。複用已撈的 accInputs 20 日投信序列，0 額外查詢。
+    const bg = classifyInstBackground(
+      accInputs.get(s.code)?.trustNetBuyNewestFirst ?? [],
+      s.volumeMa20 ?? null,
+      b.institutionalFlow.background,
+    );
     results.push({
       code: s.code,
       name: s.name,
@@ -1466,6 +1510,7 @@ async function runRealtime(
       volumeRatio: s.volumeRatio!,
       ...breakoutExtras(factors),
       ...preInstExtra,
+      ...(bg ? { instBackground: bg } : {}),
       ...(watchlistCodes.has(s.code) ? { fromWatchlist: true } : {}),
     });
   }
