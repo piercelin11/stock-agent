@@ -48,12 +48,14 @@
 
 - **分支只是習慣、不追求 PR**：功能寫好、驗證過，就可以直接 merge 進 `main`（`git merge` 即可，不需要開 PR、不需要 code review 流程）。「提交並合併」= commit + merge to main。
 - **每個新任務開始前先 `git branch --show-current` 確認分支**：
-  - 分支名跟新任務主題**明顯不符**（例如在 `feat/watchlist-flow-4` 上要開始做「盤中提醒」）→ 停下來問使用者要哪一種，得到答覆才動手：
-    (A) 從當前分支直接切新分支（`git checkout -b feat/xxx`，新工作疊在現有未合併的工作上）；
-    (B) 先把當前分支 merge 回 `main`，再從 `main` 開新分支；
-    (C) 就在當前分支繼續改。
-  - 分支名還算相符、或使用者已說「就在這改」→ 直接做，不用每次問。
+  - **一律從 `main` 開新分支——不要在既有 feature 分支上「疊」新分支**。開新分支前先確認**目前不在某個未合併的 feature 分支上**：若在，代表上一份工作還沒收尾，先照下面規則處理，不要 `git checkout -b` 從當前 HEAD 直接切（2026-09-04 事故：PLAN 8 從 PLAN 6/7 未合併的分支頂端切出，導致「已完成」與「審查中」的工作混在同一條分支、`main` 落後兩份 PLAN）。
+  - 分支名跟新任務主題**明顯不符**（例如在 `feat/watchlist-flow-4` 上要開始做「盤中提醒」），或**當前分支還有未合併的完成工作** → 停下來問使用者要哪一種，得到答覆才動手：
+    (B) 先把當前分支 merge 回 `main`（`git checkout main && git merge --ff-only <branch>`），再從 `main` 開新分支 ← **預設建議這個**；
+    (C) 就在當前分支繼續改（僅當新任務其實是同一主題的延續）；
+    (A) 從當前分支直接切新分支（新工作疊在現有未合併的工作上）← **僅在使用者明確要求時才用**，且要跟使用者講清楚「這樣兩份工作會綁在同一條分支、要一起 merge」。
+  - 分支名還算相符、當前分支無未合併完成工作、或使用者已說「就在這改」→ 直接做，不用每次問。
   - **merge 時機是使用者才能下的決定**——不要在使用者沒說的情況下自己 merge；但使用者一說「合併 / merge / 提交並合併」就直接做，不用再追問「PR 還是 merge」。
+  - **merge 後順手刪分支**：`git merge --ff-only <branch>` 進 `main` 後，`git branch -d <branch>` 把已合併的分支標籤清掉（`-d` 小寫安全刪，有獨立 commit 會拒刪）。不要留一堆「已合併但沒刪」的殘枝（2026-09-04 曾累積 11 個）。唯一例外 `feat/backtest-ui-3.6-3.7`（回測凍結，刻意保留供參考，見「回測系統 — 已放棄」段）。
   - **在 `main` 上絕不直接改**——一定先開 feature 分支（既有規範，這裡重申）。
 - Prisma model 單數命名（`Stock` 不是 `Stocks`），欄位用 camelCase（`stockCode` 不是 `stock_code`）。
 - **套件管理器是 pnpm**（2026-08-28 從 npm 轉換）。`package.json` 的 `packageManager` 欄位鎖 `pnpm@8.15.4`（corepack）。`.npmrc` 設 `node-linker=hoisted`——扁平 `node_modules` 佈局，讓 `generated/prisma` client、tsx 腳本、plist 的絕對路徑都能照舊解析，代價是放棄 pnpm 的嚴格 phantom-dependency 檢查。指令一律 `pnpm ...`（`pnpm dev` / `pnpm tsx scripts/...` / `pnpm prisma ...` / `pnpm exec tsc --noEmit`）。lockfile 是 `pnpm-lock.yaml`，`package-lock.json` 已刪。
