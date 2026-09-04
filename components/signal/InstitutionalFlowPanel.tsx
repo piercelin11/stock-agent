@@ -1,5 +1,10 @@
 import { cn } from "../../lib/cn";
-import { FACTOR_LABELS } from "./labels";
+import { FACTOR_LABELS, INST_CHIP, TONE_CHIP, type Tone } from "./labels";
+
+// PLAN 8 §8：Tone / TONE_CHIP 的定義搬到 labels.ts（純常數檔，單一出處）。這裡 re-export
+// 讓既有 `import { Tone, TONE_CHIP } from "./InstitutionalFlowPanel"` 路徑不炸。
+export { TONE_CHIP } from "./labels";
+export type { Tone } from "./labels";
 
 // 法人籌碼區塊：screening 展開列中欄 + watchlist 卡片共用（PLAN §5）。
 // 原檔 components/screening/InstitutionalFlow.tsx，4.5.x watchlist 改版時搬進 components/signal/。
@@ -21,21 +26,20 @@ export interface Inst {
 
 const CLIP_DIVISOR = 0.5; // 對齊 InstitutionalFlowConfig.clipDivisor
 
-export type Tone = "success" | "warning" | "destructive" | "muted";
-
-export const TONE_CHIP: Record<Tone, string> = {
-  success: "bg-success/10 text-success",
-  warning: "bg-warning/10 text-warning",
-  destructive: "bg-destructive/10 text-destructive",
-  muted: "bg-muted text-muted-foreground",
-};
-
 /**
  * chip 組合表：近 5 日流向強弱 × 今日方向 × margin-chasing → 一句話結論。
  * 門檻（強/中/弱）首版拍板，待校準。watchlist 卡片頂部的籌碼結論 chip 也用這支。
+ *
+ * PLAN 8 §8.2：分支結構不改，文字改引用 labels.ts 的 INST_CHIP，每分支上方補觸發條件註解。
+ * PLAN 8 §8.2 新分支：warnings 含 "institution-crowded" → INST_CHIP.crowded
+ *   （放在 noData 之後、一般流向結論之前；margin-chasing 的 destructive chip 仍優先——
+ *    marginChasing 只在 selling 分支內判定，crowded 這個獨立前置檢查不會蓋掉它，因為
+ *    「今日淨賣超 + margin-chasing」的股票也可能同時 crowded，此時走 selling 分支的
+ *    destructive chip 語意更重、更該顯示）。
  */
 export function resolveInstChip(inst: Inst, warnings: string[]): { text: string; tone: Tone } {
   const marginChasing = warnings.includes("margin-chasing");
+  const crowded = warnings.includes("institution-crowded");
   const ratioSum = inst.trustRatio + inst.foreignRatio;
 
   // 今日方向（任一為 null → 盤中未定）
@@ -46,12 +50,21 @@ export function resolveInstChip(inst: Inst, warnings: string[]): { text: string;
 
   // 籌碼資料不足：兩個 ratio 都恰為 0（後端 volumeMa20 缺 / 近窗不足 → 回 0）
   const noData = inst.trustRatio === 0 && inst.foreignRatio === 0;
-  if (noData) return { text: "籌碼資料不足", tone: "muted" };
+  if (noData) return INST_CHIP.noData;
+
+  // PLAN 8 §4：法人濃度過高（trustRatio + foreignRatio > 0.8）——散戶浮額少、體質脆弱。
+  //   前置於一般流向結論；但今日淨賣超（走下面 selling 分支）語意更重、不被此攔截，
+  //   所以只在「今日還在買 / 今日未定」時 crowded 才拿到最終 chip。
+  if (crowded && (todaySum === null || todaySum >= 0)) return INST_CHIP.crowded;
 
   // 盤中今日未定
   if (todaySum === null) {
-    const dir = ratioSum > 0 ? "偏多" : ratioSum < 0 ? "偏空" : "中性";
-    return { text: `近期${dir}・今日未定`, tone: "muted" };
+    // 近 5 日流向和 > 0 偏多 / < 0 偏空 / = 0 中性；今日方向盤中拿不到
+    return ratioSum > 0
+      ? INST_CHIP.recentBullPend
+      : ratioSum < 0
+        ? INST_CHIP.recentBearPend
+        : INST_CHIP.recentFlatPend;
   }
 
   const buying = todaySum > 0;
@@ -62,24 +75,27 @@ export function resolveInstChip(inst: Inst, warnings: string[]): { text: string;
   const mild = ratioSum > 0;
 
   if (buying) {
-    if (strong) return { text: "法人同步進場", tone: "success" };
-    if (mild) return { text: "法人續買", tone: "success" };
+    // 近 5 日強(ratioSum>0.3) + 今日買 → 法人火力集中，最強的偏多訊號
+    if (strong) return INST_CHIP.allInBuy;
+    // 近 5 日小幅偏多 + 今日買 → 續買
+    if (mild) return INST_CHIP.keepBuy;
     // 近 5 日弱但今日仍買（兩機構分歧）
-    return { text: "法人分歧偏多", tone: "warning" };
+    return INST_CHIP.splitBull;
   }
 
   if (selling) {
     if (marginChasing) {
-      return strong || mild
-        ? { text: "融資追價警示", tone: "destructive" }
-        : { text: "法人撤出＋融資追價", tone: "destructive" };
+      // 今日法人淨賣超 + 融資追價：近 5 日還算強 = 派發疑慮 / 近 5 日也弱 = 法人已撤+散戶硬追
+      return strong || mild ? INST_CHIP.marginChaseStrong : INST_CHIP.marginChaseWeak;
     }
-    if (strong || mild) return { text: "近期強・今日翻臉", tone: "warning" };
-    return { text: "法人同步撤出", tone: "destructive" };
+    // 近 5 日強但今日翻賣 → 翻臉（尚無融資追價佐證，暫列 warning）
+    if (strong || mild) return INST_CHIP.flipToday;
+    // 近 5 日也弱 + 今日賣 → 法人同步撤出
+    return INST_CHIP.allOut;
   }
 
-  // 今日持平
-  return { text: ratioSum > 0 ? "近期偏多・今日持平" : "近期偏空・今日持平", tone: "muted" };
+  // 今日持平：只看近 5 日方向
+  return ratioSum > 0 ? INST_CHIP.recentBullFlat : INST_CHIP.recentBearFlat;
 }
 
 function DivergingBar({
