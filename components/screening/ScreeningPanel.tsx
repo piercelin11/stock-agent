@@ -11,7 +11,14 @@ import type { DataMode } from "../../lib/data-context";
 import { addToWatchlist } from "../../lib/actions/watchlist";
 import { cn } from "../../lib/cn";
 import { Button } from "../ui/Button";
-import { STAGE_LABELS, STAGE_PILL_CLASS, STAGE_ORDER } from "../signal/labels";
+import {
+  STAGE_LABELS,
+  STAGE_PILL_CLASS,
+  STAGE_ORDER,
+  WARNING_LABELS,
+  TONE_CHIP,
+  type WarningKey,
+} from "../signal/labels";
 import { SignalDetail } from "./SignalDetail";
 
 // PLAN 4：選股頁拉回跟 watchlist 同一心智模型——進頁問 resolveDataContext()，它說用哪份就用哪份，
@@ -34,19 +41,42 @@ const STAGE_TABS: SignalStage[] = STAGE_ORDER;
 
 type Row = SignalScanView["results"][number];
 
-// 籌碼 chip（表格「籌碼」欄）：一句話結論。醞釀中階段後端無 inst → 呼叫端不渲染此欄內容。
+// PLAN 8 §8.4：warnings 命中時，表格「籌碼」欄顯示 tone 最重的一個 warning chip
+// （多個命中取 destructive > warning > 其他）。查 WARNING_LABELS 拿 title / tone。
+const TONE_RANK: Record<string, number> = { destructive: 3, warning: 2, success: 1, muted: 0 };
+function topWarningChip(warnings: string[]): { title: string; cls: string } | null {
+  const hits = warnings.filter((w): w is WarningKey => w in WARNING_LABELS);
+  if (hits.length === 0) return null;
+  const rank = (k: WarningKey) => TONE_RANK[WARNING_LABELS[k].tone] ?? 0;
+  const top = hits.reduce((a, b) => (rank(b) > rank(a) ? b : a));
+  const { title, tone } = WARNING_LABELS[top];
+  return { title, cls: TONE_CHIP[tone] };
+}
+
+// 籌碼 chip（表格「籌碼」欄）：一句話結論。
+// PLAN 8：setup 列以前恆 "—"，現在可能有 trend-reversal / concentration → 顯示 warning chip。
+// breakout 列的 margin-chasing 也統一走 topWarningChip（原本硬比對 "margin-chasing"）。
 function instCell(r: Row): React.ReactNode {
-  if (!r.inst) return <span className="text-muted-foreground/50">—</span>;
-  const marginChasing = r.warnings.includes("margin-chasing");
+  const warnChip = topWarningChip(r.warnings);
+  if (!r.inst) {
+    // setup 列：有 warning 就顯示 chip，否則維持 "—"
+    return warnChip ? (
+      <span className={cn("rounded px-1.5 py-0.5 text-xs font-medium", warnChip.cls)}>
+        {warnChip.title}
+      </span>
+    ) : (
+      <span className="text-muted-foreground/50">—</span>
+    );
+  }
   const ratioSum = r.inst.trustRatio + r.inst.foreignRatio;
   const todayKnown = r.inst.todayTrustDir !== null && r.inst.todayForeignDir !== null;
   const noData = r.inst.trustRatio === 0 && r.inst.foreignRatio === 0;
 
   let text: string;
   let cls: string;
-  if (marginChasing) {
-    text = "融資追價";
-    cls = "bg-destructive/10 text-destructive";
+  if (warnChip) {
+    text = warnChip.title;
+    cls = warnChip.cls;
   } else if (noData) {
     text = "資料不足";
     cls = "bg-muted text-muted-foreground";

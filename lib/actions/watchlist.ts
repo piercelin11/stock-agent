@@ -13,9 +13,9 @@ import {
   DEFAULT_INSTITUTIONAL_FLOW_CONFIG,
 } from "../../scripts/lib/signal-factors/index";
 
-// SignalStage 型別走 signal-scan re-export（`import type` 會被 erase，不會把掃描管線拉進 bundle）。
-import type { SignalStage } from "./signal-scan";
-export type { SignalStage };
+// SignalStage / InstBackground 型別走 signal-scan re-export（`import type` 會被 erase，不會把掃描管線拉進 bundle）。
+import type { SignalStage, InstBackground } from "./signal-scan";
+export type { SignalStage, InstBackground };
 import { SPARK_WINDOW, type SparkPoint } from "../dashboard-spark";
 import { buildSparkSeries } from "../spark-series";
 
@@ -78,6 +78,12 @@ export interface WatchlistCardRow {
 
   // 醞釀階段法人籌碼區塊。PLAN 7：一律計算（degraded 用欄位內 degraded: boolean 表達，不再整個 null）。
   preInst: PreBreakoutInst;
+
+  // PLAN 8：籌碼面觀察標籤。從最近掃描結果帶（resultByCode），不在 action 現算——跟
+  //   relativeStrength / preInst 分數一致的策略（全市場百分位 watchlist 幾檔算不出；
+  //   trend-reversal / concentration 雖不需母體，但為卡片與 screening 頁一致，統一從掃描 JSON 帶）。
+  warnings: string[]; // setup → trend-reversal / concentration；breakout → margin-chasing / institution-crowded
+  instBackground: InstBackground | null; // breakout 卡片的中性背景一行；不在掃描結果 → null
 }
 
 export interface PreBreakoutInst {
@@ -346,6 +352,12 @@ async function buildCardRow(
     relativeStrengthStale: scan != null && scan.scanDate !== refDate,
   };
 
+  // PLAN 8：warnings / instBackground 從最近掃描結果帶（0 新查詢、0 新讀檔——resultByCode 已在
+  //   LatestScan 裡，buildCardRow 上面已讀過 scan 的 prByCode / preInstByCode）。
+  const scanResult = scan?.resultByCode.get(code) ?? null;
+  const warnings = scanResult?.warnings ?? [];
+  const instBackground = scanResult?.instBackground ?? null;
+
   return {
     stockCode: code,
     name: item.stock.name,
@@ -365,6 +377,8 @@ async function buildCardRow(
     inst,
     factors,
     preInst,
+    warnings,
+    instBackground,
   };
 }
 

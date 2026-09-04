@@ -9,6 +9,7 @@ import {
   type SignalResult,
   type SignalStage,
   type SignalSource,
+  type InstBackground,
   type WatchlistQuote,
 } from "../../scripts/screening/run-signal-scan";
 import { SPARK_WINDOW, type SparkPoint } from "../dashboard-spark";
@@ -35,7 +36,7 @@ const REPO_ROOT = process.cwd();
 const RESULT_DIR = join(REPO_ROOT, "data", "signal-scan-results");
 
 // ---- view 型別（邊界轉換後的可序列化版；SignalResult 已全是 number/string）----
-export type { SignalStage, SignalSource };
+export type { SignalStage, SignalSource, InstBackground };
 
 export interface SignalScanView {
   date: string;
