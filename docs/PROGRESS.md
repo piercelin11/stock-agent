@@ -583,6 +583,23 @@
 
 ---
 
-尚未開始/明確不做：**watchlist 盤中資料源快取 / 節流**（YAGNI，intraday-scan 每 30 分一份 JSON，頁面純讀檔；若之後有需要再加）、`resolvePreBreakoutChip` 的門檻校準（首版拍板）、估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯（`topic_alignment` 因子固定中性分）、AnalysisResult 產出流程（Phase D）、`screening/`（統一入口 `run-signal-scan.ts`；舊三支已於 4.5.4 退役刪除）與 `backfill/` 各支皆為獨立手動執行（不在 `daily-pipeline.ts` 內）、`run-signal-scan.ts` 的階段權重 / 法人因子曲線校準（首版全拍腦袋，靠肉眼看單日排名 + 實盤觀察調）、**整個回測系統**（3.0～3.7 已從 `main` 移除、擱置，見上方；程式碼在 `feat/backtest-ui-3.6-3.7` 分支，OOM 待修）。`archive/` 的 `calculate-screen-score.ts` / `run-screener.ts` / `fetch-candidate-details.ts` / `top20-gainers.js` 已停用不維護。
+**籌碼面觀察標籤（輕手版）+ 標籤系統統一管理（2026-09-04，`feat/institutional-tags` / PLAN 8）**：PLAN 7 收尾後使用者觀察到現有籌碼因子都是「20 日窗等權加總」，看不到時間結構（前扎實後轉賣）與分布結構（單日爆量 vs 分散累積）的風險。決定先做輕手版——**只標記、不打折分數**，累積實盤資料後再獨立回測評估要不要動分數。分 4 個 commit（標籤系統重構 → 純函式 + config + test → run-signal-scan 接入 → 前端）。
+
+- **4 個新標籤**（皆比照 `marginChasing`：純函式回布林/字串、不動 score、呼叫端 push）：
+  - `trend-reversal`（**setup，首次讓 setup 有非空 warnings**）：`computeTrendReversal`——投信近 5 日淨買超合計 < 0 ∧ 前 15 日 > 0（近段在賣但前段還在買才算「轉」，兩段都賣不觸發）。
+  - `institution-crowded`（`breakoutDay`/`extended`）：`computeInstitutionalFlow` 加回 `institutionCrowded` 布林——`(trustRatio + foreignRatio) > 0.8`。管「法人尚未反手、但濃度已過高、散戶浮額少」，與 `sellCapScore` 封頂（管「法人已反手」）互補。
+  - `concentration`（setup）：`computeSingleDayConcentration`——20 日外資+自營窗內單一交易日買超 ÷ 窗內總正買超 > 0.5。分母用「總正買超」不用淨買超合計（避免賣日壓低分母造成假陽性，test case 專門驗證）。
+  - `instBackground: "positioned-early" | "fresh-entry"`（`breakoutDay`/`extended`，**中性背景欄位、非 warnings**）：`classifyInstBackground`——前 15 日投信也在買 = 早佈局 / 前段無動作近 5 日才買 = 剛進場。兩情境解讀甚至相反 → 不能塞 warnings。
+- **資料撈取零成本**：`trend-reversal` / `concentration` / `instBackground` 全複用 PLAN 7 已對 setup + breakout 兩批撈的 `accInputs`（20 日 `trustNetBuyNewestFirst` / `foreignPlusDealerNewestFirst`），0 額外查詢、0 新讀檔。
+- **config**（全未校準，`SignalScanConfig` 手寫展開合併）：`preBreakout.trendReversal { 5, 15, 12 }` / `preBreakout.concentration { 0.5, 10, 0 }` / `breakout.institutionalFlow.crowdedThreshold: 0.8` / `breakout.institutionalFlow.background { 5, 15, 0.02, 12 }`。
+- **標籤系統統一管理**：`warnings` 的 magic string 原本散在 4 檔硬比對、中文說明寫死在 `SignalDetail.tsx`。建 `components/signal/labels.ts` 的 `WARNING_LABELS`（4 個 key 的 `{ title, detail, trigger, tone }`，`trigger` = 觸發條件白話）+ `INST_CHIP` / `PRE_CHIP`（chip 文字常數化，`resolveInstChip` / `resolvePreBreakoutChip` **分支結構不變**、只改引用 + 每分支補觸發條件註解）+ `INST_BACKGROUND_LABELS`。`Tone` / `TONE_CHIP` 從 `InstitutionalFlowPanel.tsx` 搬到 `labels.ts`（該檔改 re-export，既有 import 路徑不炸）。新元件 `WarningBanner.tsx`（查 `WARNING_LABELS` 逐條渲染，screening 展開列 + watchlist 卡片共用，取代 `SignalDetail` 寫死的 margin-chasing 紅框）。
+- **前端接入**：`SignalDetail` / `WatchlistCard` 加 `<WarningBanner>` + breakout 分支 `instBackground` 一行小灰字；`ScreeningPanel.instCell` 的 margin-chasing 硬比對改 `topWarningChip`（查 `WARNING_LABELS`，多命中取 tone 最重）、setup 列有 warnings 時顯示 chip（原本恆 `—`）；`WatchlistCard` 兩個 `resolve*Chip` 傳 `row.warnings`（原傳 `[]`）；`WatchlistCardRow` 加 `warnings` / `instBackground`，`buildCardRow` 從 `ctx.latestScan.resultByCode` 帶。
+- **驗證（§10.1 硬性）**：`git stash` 前後各跑 `run-signal-scan.ts --date=2026-09-03`（eod，1942 檔），逐檔 `totalScore` / `scores.*` / `rank` / `stage` / `stats` diff **= 0**；唯一差異為新標籤（51 `trend-reversal` / 59 `concentration` / 7 `institution-crowded` / 4 `instBackground`）。全 setup 列 `warnings` 型別仍是 `string[]`。`pnpm exec tsc --noEmit` 乾淨、`factors.test.ts` 66 案（+28）全過、`pnpm build` 成功。抽查 2801 彰銀（trustRatio 0.343 + foreignRatio 0.771 = 1.114 > 0.8 → institution-crowded ✓）、6510 精測（sum 1.075 + buyDays 9/20 → institution-crowded + positioned-early ✓）。
+- **明確排除**（PLAN 8 §9）：重手版（修正係數打折分數）、外資/自營的 `buyFrequency` 指標、歷史回測校準門檻值、投信版 `concentration`。門檻全是經驗建議，待累積實盤資料後獨立回測（PLAN 8 §14）。
+- **文件同步**：本 PROGRESS、CLAUDE.md（`SignalResult.warnings` / `instBackground` 段、`components/signal/` 段、`institutional.ts` / `accumulation.ts` / `config.ts` 段、`/watchlist` 頁段、`run-signal-scan.ts` 段、`factors.test.ts` 案數）、ROADMAP §9（新增，全打勾）。
+
+---
+
+尚未開始/明確不做：**watchlist 盤中資料源快取 / 節流**（YAGNI，intraday-scan 每 30 分一份 JSON，頁面純讀檔；若之後有需要再加）、`resolvePreBreakoutChip` 的門檻校準（首版拍板）、**PLAN 8 四個籌碼面觀察標籤的門檻校準 + 要不要真的動分數（重手版）**（首版全拍腦袋，待累積實盤資料後獨立回測，屆時另開 PLAN；投信版 `concentration` 同）、估值歷史回補（`fill-gap-valuation.ts` 已支援 `--date` 隨時可補，但依計畫不主動回補）、heatScore 欄位與市值加權熱度（第一版等權即可，分數用時現算）、股本更新排程（月頻手動跑）、新聞情緒分析（`NewsArticle.sentiment`/`sentimentScore` 欄位已存在但尚未有腳本填值）、Tag/StockTag 篩選邏輯（`topic_alignment` 因子固定中性分）、AnalysisResult 產出流程（Phase D）、`screening/`（統一入口 `run-signal-scan.ts`；舊三支已於 4.5.4 退役刪除）與 `backfill/` 各支皆為獨立手動執行（不在 `daily-pipeline.ts` 內）、`run-signal-scan.ts` 的階段權重 / 法人因子曲線校準（首版全拍腦袋，靠肉眼看單日排名 + 實盤觀察調）、**整個回測系統**（3.0～3.7 已從 `main` 移除、擱置，見上方；程式碼在 `feat/backtest-ui-3.6-3.7` 分支，OOM 待修）。`archive/` 的 `calculate-screen-score.ts` / `run-screener.ts` / `fetch-candidate-details.ts` / `top20-gainers.js` 已停用不維護。
 
 （每次進度更新，麻煩幫我一併更新這個區塊。）

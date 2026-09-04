@@ -68,6 +68,24 @@
 
 ---
 
+## 9. 籌碼面觀察標籤（輕手版）+ 標籤系統統一管理（PLAN 8，2026-09-04）
+
+現有籌碼因子都是「20 日窗等權加總」，看不到時間結構（前扎實後轉賣）與分布結構（單日爆量 vs 分散累積）。做輕手版——只標記、不打折分數，累積實盤資料後再獨立回測評估要不要動分數。4 個 commit。
+
+- [x] **`trend-reversal`**（setup，**首次讓 setup 有非空 warnings**）：`computeTrendReversal`（`accumulation.ts`）——投信近 5 日淨買超合計 < 0 ∧ 前 15 日 > 0。
+- [x] **`institution-crowded`**（breakoutDay/extended）：`computeInstitutionalFlow` 加回 `institutionCrowded` 布林——`(trustRatio + foreignRatio) > crowdedThreshold(0.8)`。score 不動。
+- [x] **`concentration`**（setup）：`computeSingleDayConcentration`（`accumulation.ts`）——20 日外資+自營單一交易日買超 ÷ 窗內總正買超 > 0.5。分母用總正買超（避免賣日壓低分母假陽性）。
+- [x] **`instBackground`**（breakoutDay/extended，中性背景欄位、非 warnings）：`classifyInstBackground`（`institutional.ts`）→ `"positioned-early" | "fresh-entry" | null`。複用 PLAN 7 `accInputs`，0 額外查詢。
+- [x] **`SignalScanConfig` 新增欄位**（全未校準，手寫展開合併）：`preBreakout.trendReversal` / `preBreakout.concentration` / `breakout.institutionalFlow.crowdedThreshold` / `breakout.institutionalFlow.background`。
+- [x] **`InstitutionalFlowConfig` 上方補「突破階段刻意排除自營商」設計理由註解**（PLAN 8 §7，純文件）。
+- [x] **`factors.test.ts` +28 案**（trendReversal 7 / institutionCrowded 6 / concentration 7 / classifyInstBackground 7 + config 1），既有 38 案分數斷言全不變。
+- [x] **標籤系統統一管理**：`components/signal/labels.ts` 建 `WARNING_LABELS`（4 key 的 `{ title, detail, trigger, tone }` 中央清單）+ `INST_CHIP` / `PRE_CHIP`（chip 文字常數化，函式分支結構不變 + 每分支補觸發條件註解）+ `INST_BACKGROUND_LABELS`；`Tone` / `TONE_CHIP` 搬到 `labels.ts`（`InstitutionalFlowPanel` re-export）。新元件 `WarningBanner.tsx`（screening 展開列 + watchlist 卡片共用）。
+- [x] **前端接入**：`SignalDetail` / `WatchlistCard` 加 `<WarningBanner>` + breakout `instBackground` 一行；`ScreeningPanel.instCell` 改 `topWarningChip` + setup 列有 warnings 顯示 chip；`WatchlistCard` 兩個 `resolve*Chip` 傳 `row.warnings`；`WatchlistCardRow` 加 `warnings` / `instBackground`（`buildCardRow` 從 `resultByCode` 帶，0 新查詢）。
+- [x] **驗證（§10.1 硬性）**：`git stash` 前後跑 `--date=2026-09-03`（1942 檔），逐檔 `totalScore` / `scores.*` / `rank` / `stage` / `stats` diff = 0；唯一差異為新標籤。tsc 乾淨、`factors.test.ts` 66 案全過、`pnpm build` 成功。
+- **不做**（PLAN 8 §9）：重手版（修正係數打折分數）、外資/自營的 `buyFrequency` 指標、歷史回測校準門檻值、投信版 `concentration`。門檻全是經驗建議，待累積實盤資料後獨立回測（PLAN 8 §14）。
+
+---
+
 ## 5. 盤中提醒
 
 定期檢查觀察股，依「是否已買入」決定提醒時機，出現大跌大漲或不確定訊號時推播。依賴觀察清單有內容、也依賴資料庫能被 GitHub Actions 連到。細節等實際盯盤有手感後再細訂。
