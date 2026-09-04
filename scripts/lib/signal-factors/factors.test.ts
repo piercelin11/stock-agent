@@ -5,6 +5,9 @@ import {
   computeInstitutionalFlow,
   computeMarginSurgePercentile,
   computeProximityToHigh,
+  computeTrendReversal,
+  computeSingleDayConcentration,
+  classifyInstBackground,
   consecutiveAboveBand,
   resolveSignalConfig,
   DEFAULT_SIGNAL_CONFIG,
@@ -406,4 +409,254 @@ test("resolveSignalConfig: 部分 override 只改指定欄位", () => {
   assert.equal(c.gate.minMarketCap, 999);
   assert.equal(c.gate.minVolumeShares, DEFAULT_SIGNAL_CONFIG.gate.minVolumeShares);
   assert.equal(c.staging.extendedAfterDays, 5);
+});
+
+test("resolveSignalConfig: PLAN 8 新欄位預設值 + override 只改指定欄位", () => {
+  const d = resolveSignalConfig();
+  assert.deepEqual(d.preBreakout.trendReversal, { recentDays: 5, priorDays: 15, minDataDays: 12 });
+  assert.deepEqual(d.preBreakout.concentration, {
+    thresholdRatio: 0.5,
+    minWindowDays: 10,
+    minTotalNetBuy: 0,
+  });
+  assert.equal(d.breakout.institutionalFlow.crowdedThreshold, 0.8);
+  assert.deepEqual(d.breakout.institutionalFlow.background, {
+    recentDays: 5,
+    priorDays: 15,
+    activityEpsilon: 0.02,
+    minDataDays: 12,
+  });
+
+  const c = resolveSignalConfig({
+    preBreakout: { trendReversal: { recentDays: 7 }, concentration: { thresholdRatio: 0.6 } },
+    breakout: { institutionalFlow: { crowdedThreshold: 0.9, background: { minDataDays: 15 } } },
+  });
+  assert.equal(c.preBreakout.trendReversal.recentDays, 7);
+  assert.equal(c.preBreakout.trendReversal.priorDays, 15); // 未 override → 預設
+  assert.equal(c.preBreakout.concentration.thresholdRatio, 0.6);
+  assert.equal(c.preBreakout.concentration.minWindowDays, 10);
+  assert.equal(c.breakout.institutionalFlow.crowdedThreshold, 0.9);
+  assert.equal(c.breakout.institutionalFlow.background.minDataDays, 15);
+  assert.equal(c.breakout.institutionalFlow.background.recentDays, 5);
+});
+
+// ============================================================================
+// PLAN 8 §2：computeTrendReversal
+// ============================================================================
+
+const TR_CFG = { recentDays: 5, priorDays: 15, minDataDays: 12 };
+
+test("trendReversal: 序列長度 < minDataDays → false", () => {
+  assert.equal(computeTrendReversal(new Array(10).fill(1000), TR_CFG), false);
+});
+
+test("trendReversal: 前段買、近段轉賣 → true", () => {
+  const series = [-500, -500, -500, -500, -500, ...new Array(15).fill(1000)];
+  assert.equal(computeTrendReversal(series, TR_CFG), true);
+});
+
+test("trendReversal: 兩段都在賣（一路賣，不是「轉」）→ false", () => {
+  assert.equal(computeTrendReversal(new Array(20).fill(-500), TR_CFG), false);
+});
+
+test("trendReversal: 兩段都在買（正常累積）→ false", () => {
+  assert.equal(computeTrendReversal(new Array(20).fill(1000), TR_CFG), false);
+});
+
+test("trendReversal: 近段剛好打平（recentSum === 0）→ false", () => {
+  const series = [100, -100, 50, -50, 0, ...new Array(15).fill(1000)];
+  assert.equal(computeTrendReversal(series, TR_CFG), false);
+});
+
+test("trendReversal: 前段打平（priorSum === 0）+ 近段賣 → false", () => {
+  // 前 15 天正負相抵合計 0
+  const prior15 = [3000, -3000, 2000, -2000, 1000, -1000, 500, -500, 0, 0, 0, 0, 0, 0, 0];
+  const series = [-500, -500, -500, -500, -500, ...prior15];
+  assert.equal(prior15.reduce((s, v) => s + v, 0), 0);
+  assert.equal(computeTrendReversal(series, TR_CFG), false);
+});
+
+test("trendReversal: 序列恰 12 筆（= minDataDays），近 5 賣前 7 買 → true", () => {
+  const series = [-100, -100, -100, -100, -100, 500, 500, 500, 500, 500, 500, 500];
+  assert.equal(series.length, 12);
+  assert.equal(computeTrendReversal(series, TR_CFG), true);
+});
+
+// ============================================================================
+// PLAN 8 §4：computeInstitutionalFlow 的 institutionCrowded
+// ============================================================================
+
+test("institutionCrowded: trustRatio + foreignRatio 遠超 0.8 → true", () => {
+  const ma = 1_000_000;
+  const r = computeInstitutionalFlow({
+    trustNetBuyNewestFirst: [ma * 0.6, 0, 0, 0, 0],
+    foreignNetBuyNewestFirst: [ma * 0.5, 0, 0, 0, 0],
+    todayTrustNetBuy: 100,
+    todayForeignNetBuy: 100,
+    volumeMa20: ma,
+    marginSurgePercentile: null,
+    config: IF,
+  });
+  assert.equal(r.institutionCrowded, true);
+});
+
+test("institutionCrowded: sum 剛好 0.8（用嚴格大於）→ false", () => {
+  const ma = 1_000_000;
+  const r = computeInstitutionalFlow({
+    trustNetBuyNewestFirst: [ma * 0.4, 0, 0, 0, 0],
+    foreignNetBuyNewestFirst: [ma * 0.4, 0, 0, 0, 0],
+    todayTrustNetBuy: 100,
+    todayForeignNetBuy: 100,
+    volumeMa20: ma,
+    marginSurgePercentile: null,
+    config: IF,
+  });
+  assert.equal(r.institutionCrowded, false);
+});
+
+test("institutionCrowded: sum < 0.8（正常濃度）→ false", () => {
+  const ma = 1_000_000;
+  const r = computeInstitutionalFlow({
+    trustNetBuyNewestFirst: [ma * 0.2, 0, 0, 0, 0],
+    foreignNetBuyNewestFirst: [ma * 0.2, 0, 0, 0, 0],
+    todayTrustNetBuy: 100,
+    todayForeignNetBuy: 100,
+    volumeMa20: ma,
+    marginSurgePercentile: null,
+    config: IF,
+  });
+  assert.equal(r.institutionCrowded, false);
+});
+
+test("institutionCrowded: volumeMa20 缺（degraded 早退）→ false", () => {
+  const r = computeInstitutionalFlow({
+    trustNetBuyNewestFirst: [5_000_000, 0, 0, 0, 0],
+    foreignNetBuyNewestFirst: [5_000_000, 0, 0, 0, 0],
+    todayTrustNetBuy: 100,
+    todayForeignNetBuy: 100,
+    volumeMa20: null,
+    marginSurgePercentile: null,
+    config: IF,
+  });
+  assert.equal(r.institutionCrowded, false);
+});
+
+test("institutionCrowded: 法人淨賣超（負 ratio 之和）→ false", () => {
+  const ma = 1_000_000;
+  const r = computeInstitutionalFlow({
+    trustNetBuyNewestFirst: [-ma * 0.5, 0, 0, 0, 0],
+    foreignNetBuyNewestFirst: [-ma * 0.5, 0, 0, 0, 0],
+    todayTrustNetBuy: -100,
+    todayForeignNetBuy: -100,
+    volumeMa20: ma,
+    marginSurgePercentile: null,
+    config: IF,
+  });
+  assert.equal(r.institutionCrowded, false);
+});
+
+test("institutionCrowded: true 時 score 與手算一致（不動分數）", () => {
+  const ma = 1_000_000;
+  // 投信 5 日合計 = ma*0.6、外資 = ma*0.5 → sum 1.1 > 0.8；當日淨買超（不觸發 sellCap）
+  const r = computeInstitutionalFlow({
+    trustNetBuyNewestFirst: [ma * 0.6, 0, 0, 0, 0],
+    foreignNetBuyNewestFirst: [ma * 0.5, 0, 0, 0, 0],
+    todayTrustNetBuy: 100,
+    todayForeignNetBuy: 100,
+    volumeMa20: ma,
+    marginSurgePercentile: null,
+    config: IF,
+  });
+  // trustFlow: clip(0.6, 0, 0.5) * 200 = 100；foreignFlow: clip(0.5, 0, 0.5) * 200 = 100
+  // score = 100 * 0.6 + 100 * 0.4 = 100
+  assert.equal(r.institutionCrowded, true);
+  assert.equal(r.score, 100);
+});
+
+// ============================================================================
+// PLAN 8 §5：computeSingleDayConcentration
+// ============================================================================
+
+const CC_CFG = { thresholdRatio: 0.5, minWindowDays: 10, minTotalNetBuy: 0 };
+
+test("concentration: 序列長度 < minWindowDays → false", () => {
+  assert.equal(computeSingleDayConcentration(new Array(8).fill(1000), CC_CFG), false);
+});
+
+test("concentration: 單日爆量（1 天 8000、其他 19 天各 100）→ true", () => {
+  const series = [8000, ...new Array(19).fill(100)];
+  assert.equal(computeSingleDayConcentration(series, CC_CFG), true);
+});
+
+test("concentration: 分散累積（20 天各 500）→ false", () => {
+  assert.equal(computeSingleDayConcentration(new Array(20).fill(500), CC_CFG), false);
+});
+
+test("concentration: 窗內完全沒買超（全負）→ false", () => {
+  assert.equal(computeSingleDayConcentration(new Array(20).fill(-500), CC_CFG), false);
+});
+
+test("concentration: 單日佔比剛好 0.5（用嚴格大於）→ false", () => {
+  const series = [1000, 1000, 0, 0, 0, 0, 0, 0, 0, 0];
+  // totalPositive = 2000, maxSingleDay = 1000 → 0.5，不 > 0.5
+  assert.equal(computeSingleDayConcentration(series, CC_CFG), false);
+});
+
+test("concentration: 有大賣日壓低淨買超但分母用總正買超 → 仍正確（false）", () => {
+  const series = [5000, -8000, 1000, 1000, 500, 500, 500, 500, 500, 500];
+  // totalPositive = 5000+1000+1000+3000 = 10000, maxSingleDay 5000 / 10000 = 0.5 → false
+  assert.equal(computeSingleDayConcentration(series, CC_CFG), false);
+});
+
+test("concentration: 單日佔比 ~0.58 + 有賣日 → true", () => {
+  const series = [7000, -3000, 1000, 500, 500, 500, 500, 500, 500, 500];
+  // totalPositive = 7000 + 1000 + 4000 = 12000, 7000/12000 ≈ 0.583 → true
+  assert.equal(computeSingleDayConcentration(series, CC_CFG), true);
+});
+
+// ============================================================================
+// PLAN 8 §6：classifyInstBackground
+// ============================================================================
+
+const BG_CFG = { recentDays: 5, priorDays: 15, activityEpsilon: 0.02, minDataDays: 12 };
+const BG_MA = 1_000_000;
+
+test("instBackground: 資料不足（< minDataDays）→ null", () => {
+  assert.equal(classifyInstBackground(new Array(10).fill(1000), BG_MA, BG_CFG), null);
+});
+
+test("instBackground: volumeMa20 缺 → null", () => {
+  assert.equal(classifyInstBackground(new Array(20).fill(1000), null, BG_CFG), null);
+});
+
+test("instBackground: 前段在買 → positioned-early", () => {
+  assert.equal(
+    classifyInstBackground(new Array(20).fill(5000), BG_MA, BG_CFG),
+    "positioned-early",
+  );
+});
+
+test("instBackground: 前段幾乎無動作 + 近段在買 → fresh-entry", () => {
+  const series = [8000, 8000, 8000, 8000, 8000, ...new Array(15).fill(0)];
+  assert.equal(classifyInstBackground(series, BG_MA, BG_CFG), "fresh-entry");
+});
+
+test("instBackground: 前段小賣（活動高於 epsilon）+ 近段買 → null", () => {
+  const series = [8000, 8000, 8000, 8000, 8000, ...new Array(15).fill(-3000)];
+  // priorSum -45000, priorActivity 0.045 > 0.02, priorSum 不 > 0 → null
+  assert.equal(classifyInstBackground(series, BG_MA, BG_CFG), null);
+});
+
+test("instBackground: 前段無動作但近段也沒買 → null", () => {
+  const series = [-1000, -1000, -1000, -1000, -1000, ...new Array(15).fill(0)];
+  assert.equal(classifyInstBackground(series, BG_MA, BG_CFG), null);
+});
+
+test("instBackground: 前段活動剛好 = epsilon（邊界，用 <=）+ 近段買 → fresh-entry", () => {
+  // priorSum 必須 <= 0（否則走 positioned-early），且 |priorSum| / MA 恰 = 0.02
+  // → priorSum = -20000（前段小額淨賣、活動量剛好在門檻上）
+  const prior15 = [-20000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const series = [3000, 3000, 3000, 3000, 3000, ...prior15];
+  assert.equal(Math.abs(prior15.reduce((s, v) => s + v, 0)) / BG_MA, 0.02);
+  assert.equal(classifyInstBackground(series, BG_MA, BG_CFG), "fresh-entry");
 });

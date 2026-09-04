@@ -401,3 +401,91 @@ async function fetchBatch(
     });
   }
 }
+
+// ============================================================================
+// PLAN 8 §2：computeTrendReversal —— 投信買超的時間結構（前段扎實 / 近段轉賣）
+// ============================================================================
+//
+// 目的：偵測「前 priorDays 天投信淨買超為正、近 recentDays 天悄悄轉負」的假突破誘多劇本。
+//   computeTrustRawMetrics 的 20 日等權加總看不到這個轉折（前正後負相抵後總和仍可能為正）。
+//
+// 觸發：近段淨買超合計 < 0  且  前段淨買超合計 > 0。
+//   —— 「近段本身在賣、但前段還在買」才算轉賣訊號；兩段都賣 = 一路在賣（不是「轉」），不觸發。
+// 不動任何分數，只回布林讓 run-signal-scan.ts 掛進 warnings。
+//
+// config：trendReversal.{ recentDays, priorDays, minDataDays }。
+//   recentDays + priorDays 通常 = institutionalWindowDays(20)；序列比 20 短時按實際長度切。
+
+export interface TrendReversalConfig {
+  recentDays: number; // 5
+  priorDays: number; // 15
+  minDataDays: number; // 12（兩段合計有效天數下限，比照 computeBase 保守門檻精神）
+}
+
+/**
+ * trustNetBuyNewestFirst：投信淨買超序列，日期新到舊（run-signal-scan 的 accInputs 已備）。
+ * 回傳 true = 命中「近段轉賣、前段在買」；資料不足 / 未命中 → false。
+ */
+export function computeTrendReversal(
+  trustNetBuyNewestFirst: number[],
+  config: TrendReversalConfig,
+): boolean {
+  const { recentDays, priorDays, minDataDays } = config;
+  const n = trustNetBuyNewestFirst.length;
+  if (n < minDataDays) return false;
+
+  const recent = trustNetBuyNewestFirst.slice(0, recentDays);
+  const prior = trustNetBuyNewestFirst.slice(recentDays, recentDays + priorDays);
+  // 近段 / 前段各自至少要有一筆才有意義
+  if (recent.length === 0 || prior.length === 0) return false;
+
+  const recentSum = recent.reduce((s, v) => s + v, 0);
+  const priorSum = prior.reduce((s, v) => s + v, 0);
+
+  return recentSum < 0 && priorSum > 0;
+}
+
+// ============================================================================
+// PLAN 8 §5：computeSingleDayConcentration —— 單日買超集中度（外資+自營）
+// ============================================================================
+//
+// 目的：computeOtherInstitutionRatio 的「20 日合計買超 ÷ 20 日合計量」把「單日爆量買超」
+//   跟「分散 20 天穩定買超」算成相近比例。這裡檢查窗內單一交易日買超佔「窗內總正買超」的比例，
+//   超過 thresholdRatio → 命中（那波「累積」其實是單日一次性動作）。
+//
+// 只看外資+自營（config PLAN 8 §7 已說明突破當日自營 delta hedging 噪音，但這裡是 20 日窗、
+//   非突破當日單日，訊噪比足夠；投信版留待後續，見 PLAN 8 §14 未決事項）。
+//
+// 分母用「窗內總正買超」（只加 > 0 的日子），不用淨買超合計——避免「有幾天大賣把分母壓到極小
+//   → 單日佔比爆衝」的假陽性。窗內總正買超 <= minTotalNetBuy（法人整體沒在買）→ 不判定。
+//
+// config：concentration.{ thresholdRatio, minWindowDays, minTotalNetBuy }。
+
+export interface ConcentrationConfig {
+  thresholdRatio: number; // 0.5
+  minWindowDays: number; // 10
+  minTotalNetBuy: number; // 0
+}
+
+/**
+ * seriesNewestFirst：外資+自營淨買超序列，日期新到舊
+ *   （run-signal-scan 的 accInputs.foreignPlusDealerNewestFirst）。
+ * 回傳 true = 命中「單日買超佔窗內總正買超 > thresholdRatio」；
+ *   資料不足 / 窗內沒在買 / 未命中 → false。
+ */
+export function computeSingleDayConcentration(
+  seriesNewestFirst: number[],
+  config: ConcentrationConfig,
+): boolean {
+  const { thresholdRatio, minWindowDays, minTotalNetBuy } = config;
+  if (seriesNewestFirst.length < minWindowDays) return false;
+
+  const positives = seriesNewestFirst.filter((v) => v > 0);
+  if (positives.length === 0) return false;
+
+  const totalPositive = positives.reduce((s, v) => s + v, 0);
+  if (totalPositive <= minTotalNetBuy) return false;
+
+  const maxSingleDay = Math.max(...positives);
+  return maxSingleDay / totalPositive > thresholdRatio;
+}

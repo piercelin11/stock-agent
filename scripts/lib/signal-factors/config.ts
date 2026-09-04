@@ -8,6 +8,7 @@
 import type { DeepPartial } from "../types";
 import { DEFAULT_BREAKOUT_CONFIG } from "./breakout";
 import type { InstitutionalFlowConfig } from "./institutional";
+import type { TrendReversalConfig, ConcentrationConfig } from "./accumulation";
 
 const B = DEFAULT_BREAKOUT_CONFIG;
 
@@ -36,6 +37,9 @@ export interface SignalScanConfig {
     minSqueezeVolumeDays: number; // 3
     baseMinHistoryDays: number; // 40
     neutralScore: number; // 50
+    // PLAN 8：籌碼面觀察標籤（setup 階段 warnings）。純標記、不動 setup 合成分數。
+    trendReversal: TrendReversalConfig; // §2：{ recentDays: 5, priorDays: 15, minDataDays: 12 }
+    concentration: ConcentrationConfig; // §5：{ thresholdRatio: 0.5, minWindowDays: 10, minTotalNetBuy: 0 }
   };
   // breakout-day / extended 階段合併（加權和，總和 1）
   breakout: {
@@ -90,6 +94,15 @@ export const DEFAULT_INSTITUTIONAL_FLOW_CONFIG: InstitutionalFlowConfig = {
   foreignWeight: 0.4,
   clipDivisor: 0.5,
   sellCapScore: 40,
+  // PLAN 8 §4：法人濃度過高門檻（未校準，見 PLAN 8 §14）。
+  crowdedThreshold: 0.8,
+  // PLAN 8 §6：法人背景中性分類參數（未校準）。
+  background: {
+    recentDays: 5,
+    priorDays: 15,
+    activityEpsilon: 0.02,
+    minDataDays: 12,
+  },
   marginChasing: {
     lookbackDays: 5,
     historyWindowDays: 40,
@@ -121,6 +134,9 @@ export const DEFAULT_SIGNAL_CONFIG: SignalScanConfig = {
     minSqueezeVolumeDays: 3,
     baseMinHistoryDays: 40,
     neutralScore: 50,
+    // PLAN 8（未校準，見 §14）：recentDays + priorDays 應 = institutionalWindowDays(20)
+    trendReversal: { recentDays: 5, priorDays: 15, minDataDays: 12 },
+    concentration: { thresholdRatio: 0.5, minWindowDays: 10, minTotalNetBuy: 0 },
   },
   breakout: {
     weights: { ...BREAKOUT_WEIGHTS },
@@ -188,6 +204,19 @@ export function resolveSignalConfig(override?: DeepPartial<SignalScanConfig>): S
       minSqueezeVolumeDays: pb?.minSqueezeVolumeDays ?? d.preBreakout.minSqueezeVolumeDays,
       baseMinHistoryDays: pb?.baseMinHistoryDays ?? d.preBreakout.baseMinHistoryDays,
       neutralScore: pb?.neutralScore ?? d.preBreakout.neutralScore,
+      trendReversal: {
+        recentDays: pb?.trendReversal?.recentDays ?? d.preBreakout.trendReversal.recentDays,
+        priorDays: pb?.trendReversal?.priorDays ?? d.preBreakout.trendReversal.priorDays,
+        minDataDays: pb?.trendReversal?.minDataDays ?? d.preBreakout.trendReversal.minDataDays,
+      },
+      concentration: {
+        thresholdRatio:
+          pb?.concentration?.thresholdRatio ?? d.preBreakout.concentration.thresholdRatio,
+        minWindowDays:
+          pb?.concentration?.minWindowDays ?? d.preBreakout.concentration.minWindowDays,
+        minTotalNetBuy:
+          pb?.concentration?.minTotalNetBuy ?? d.preBreakout.concentration.minTotalNetBuy,
+      },
     },
     breakout: {
       weights: {
@@ -231,6 +260,23 @@ export function resolveSignalConfig(override?: DeepPartial<SignalScanConfig>): S
           bo?.institutionalFlow?.clipDivisor ?? d.breakout.institutionalFlow.clipDivisor,
         sellCapScore:
           bo?.institutionalFlow?.sellCapScore ?? d.breakout.institutionalFlow.sellCapScore,
+        crowdedThreshold:
+          bo?.institutionalFlow?.crowdedThreshold ??
+          d.breakout.institutionalFlow.crowdedThreshold,
+        background: {
+          recentDays:
+            bo?.institutionalFlow?.background?.recentDays ??
+            d.breakout.institutionalFlow.background.recentDays,
+          priorDays:
+            bo?.institutionalFlow?.background?.priorDays ??
+            d.breakout.institutionalFlow.background.priorDays,
+          activityEpsilon:
+            bo?.institutionalFlow?.background?.activityEpsilon ??
+            d.breakout.institutionalFlow.background.activityEpsilon,
+          minDataDays:
+            bo?.institutionalFlow?.background?.minDataDays ??
+            d.breakout.institutionalFlow.background.minDataDays,
+        },
         marginChasing: {
           lookbackDays:
             bo?.institutionalFlow?.marginChasing?.lookbackDays ??
